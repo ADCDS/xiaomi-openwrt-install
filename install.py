@@ -878,9 +878,12 @@ def main():
     ap = argparse.ArgumentParser(description="Install OpenWrt on a stock RD03v2 over Wi-Fi.")
     ap.add_argument("--host", default="192.168.31.1")
     ap.add_argument("--openwrt-host", default=OPENWRT_IP,
+                    # argparse %-formats help strings, so a literal % must be
+                    # doubled -- otherwise --help itself dies before it can
+                    # tell anyone anything.
                     help="the RAM system. Prefer an IPv6 link-local with a "
-                         "scope (fe80::...%wlan0): 192.168.1.1 collides with a "
-                         "very common gateway address")
+                         "scope (fe80::...%%wlan0): 192.168.1.1 collides with "
+                         "a very common gateway address")
     ap.add_argument("--discover", metavar="IFACE", default=None,
                     help="find the box's link-local on IFACE instead of "
                          "guessing an address")
