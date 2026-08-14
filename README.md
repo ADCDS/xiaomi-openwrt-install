@@ -109,14 +109,18 @@ a very common gateway address.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (178 checks) |
+| `selftest.py` | everything testable without the router (171 checks, 178 with release artifacts present) |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7) |
 
 `chain.py` re-implements the exploit rather than importing the disclosure
 package, so this tree carries no vendor-only material.
 
 ```sh
-python3 selftest.py     # run this first; needs no hardware
+python3 selftest.py                          # 171 checks, no hardware, no network
+
+# seven more run against real release artifacts, if you have them:
+python3 release.py --download --wifi --dest images
+RD03V2_IMAGES=images python3 selftest.py     # 178
 ```
 
 ## How the device is laid out
@@ -196,6 +200,38 @@ waits for the radios to register rather than assuming they already have.
 
 Without these arguments the installed system comes up as OpenWrt normally does:
 radios off, no root password, reachable over Ethernet only.
+
+## Reaching the installed system
+
+**The installed system's LAN address is `192.168.1.1`, and so is a great many
+people's own gateway.** If yours is one of them, that address is ambiguous on
+your machine and your existing route almost certainly wins on metric — so you
+will silently talk to your own gateway and draw conclusions about the router
+from it. This is not hypothetical: a reviewer handed only this repo did exactly
+that, found `dropbear` there offering only `publickey`, and concluded the root
+password this tool had just set was broken. It was not; they were logged into
+something else.
+
+The scripts avoid the question by addressing the box on its IPv6 link-local,
+and refuse outright to talk to this host's default gateway. Do the same by
+hand:
+
+```sh
+# find it -- this returns only a neighbour that answers as dropbear
+python3 -c "import install; print(install.discover_linklocal('<iface>'))"
+
+ssh root@fe80::xxxx:xxxx:xxxx:xxxx%<iface>          # password: what you set
+```
+
+Sanity-check what answered before believing anything it tells you:
+
+```sh
+. /lib/functions.sh; board_name          # xiaomi,mi-router-ax3000t-v2
+. /lib/upgrade/common.sh; rootfs_type    # overlay = NAND, tmpfs = RAM initramfs
+```
+
+Over Wi-Fi you can also just join the SSID you configured; the same ambiguity
+applies to `192.168.1.1` from there, so prefer the link-local either way.
 
 ## Going back to stock
 
