@@ -1,0 +1,21 @@
+# Run artifacts. These carry per-device data pulled off real hardware --
+# the label serial (from which the stock root password derives), MAC
+# addresses, rand_key/rand_nonce, 0:ART caldata and the full U-Boot
+# environment -- plus, for installs, the root password hash in the
+# first-boot tarball. None of it belongs in a repo.
+probe-*/
+install-*/
+*.log
+
+# Release images: tens of MB, published upstream, and fetched on demand by
+# release.py.
+images/
+
+# Local device dumps, wherever they land.
+*.bin
+*.ubi
+*.itb
+*.tar.gz
+
+__pycache__/
+*.pyc
