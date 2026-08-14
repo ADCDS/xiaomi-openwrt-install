@@ -46,6 +46,7 @@ is guaranteed to handle, unlike a partition full of another OS's UBI.
 import argparse
 import hashlib
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -152,9 +153,11 @@ def ssh(host, cmd, timeout=180, check=True):
 
 
 def _have(x):
-    return subprocess.run(["command", "-v", x], capture_output=True,
-                          shell=False, executable="/bin/bash").returncode == 0 \
-        or os.path.exists(f"/usr/bin/{x}")
+    # shutil.which, not `command -v` through subprocess: with shell=False that
+    # execs bash with "-v" as a *flag*, so it only ever worked by falling
+    # through to the /usr/bin check -- and missed sshpass installed anywhere
+    # else on PATH.
+    return shutil.which(x) is not None
 
 
 def mtd_map(host):

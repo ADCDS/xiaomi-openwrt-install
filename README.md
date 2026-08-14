@@ -17,6 +17,62 @@ into the OpenWrt RAM initramfs, and runs the sanctioned `sysupgrade` from there.
 Verified end to end on hardware: factory unit → configured OpenWrt on NAND, and
 back to factory 2.0.28, repeatedly, in both directions.
 
+## Prerequisites
+
+A Linux laptop, Python **3.9+**, and:
+
+```sh
+sudo apt install sshpass openssl        # or your distro's equivalent
+```
+
+`sshpass` is not optional. Without it the scripts fall back to an interactive
+`ssh` password prompt that fails as `Permission denied` — which looks exactly
+like a wrong password rather than a missing package. `openssl` is used to hash
+the root password. `ping6`, `ip`, `ssh`, `scp` and `tar` are assumed present.
+
+**The laptop needs an address on the router's subnet.** Stock serves DHCP on
+`192.168.31.0/24`; the OpenWrt RAM system is reached by IPv6 link-local, so it
+does not care. Either:
+
+```sh
+# over Wi-Fi: join the factory SSID (open, named minet_rd03_* or similar)
+nmcli dev wifi connect '<factory SSID>'
+
+# or over a cable, into any LAN port
+nmcli con add type ethernet ifname <iface> con-name rd03v2 \
+    ipv4.method auto ipv6.method link-local autoconnect no
+nmcli con up rd03v2
+```
+
+Over Wi-Fi the laptop's address gets baked into the exploit payload, so it
+must not change mid-run. A cable is steadier; neither needs serial.
+
+> Do **not** put the router on a network that already has a `192.168.1.1` —
+> once OpenWrt is installed that is its LAN address, and it will serve DHCP.
+> The scripts refuse to talk to your own default gateway, but a second DHCP
+> server on your LAN is your problem, not theirs.
+
+## Getting the images
+
+The OpenWrt images are downloaded and sha256-verified automatically by
+`install.py`. The **stock image is not** — you supply it, and you only need it
+to revert:
+
+| version | download | SHA-256 |
+|---|---|---|
+| **2.0.28** (newest) | [`miwifi_rd03v2_firmware_31bf9_2.0.28.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_31bf9_2.0.28.bin) | `3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f` |
+| 2.0.12 | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
+
+Genuine, Xiaomi-signed, served from Xiaomi's own CDN. `restore.py` refuses any
+image whose hash is not one of these unless you pass `--yes`, so check it:
+
+```sh
+sha256sum miwifi_rd03v2_firmware_31bf9_2.0.28.bin
+```
+
+Take 2.0.28 unless you have a reason not to: the bootloader's anti-rollback
+refuses only images *older* than the version the unit last ran.
+
 ## Two commands
 
 ```sh
