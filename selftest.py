@@ -346,11 +346,21 @@ def test_real_artifact():
         return
     print("\n== real release artifact ==")
     import glob
-    ubis = glob.glob(os.path.join(d, "*initramfs-factory.ubi"))
-    itbs = glob.glob(os.path.join(d, "*initramfs-uImage.itb"))
-    if not (ubis and itbs):
-        check("artifacts present", False, f"nothing to parse in {d}")
+    # Releases ship four initramfs flavours (default, -nss, -wifi, -nss-wifi), so
+    # match the family rather than one exact name: `release.py --download --wifi`
+    # fetches the -wifi pair, which the old exact-name globs missed.
+    ubis = sorted(glob.glob(os.path.join(d, "*initramfs-factory*.ubi")))
+    itbs = sorted(glob.glob(os.path.join(d, "*initramfs-uImage*.itb")))
+    if not ubis:
+        check("artifacts present", False, f"no *initramfs-factory*.ubi in {d}")
         return
+    if not itbs:
+        # The .ubi alone still exercises the parser; only the wrapped-kernel
+        # comparison needs the .itb, so skip that rather than fail the run.
+        print(f"  [skip] no *initramfs-uImage*.itb in {d} -- fetching the .ubi "
+              f"(and the sysupgrade) is enough to install; the .itb is only used "
+              f"to check that the UBI wraps it")
+        itbs = None
     img = ubiparse.UbiImage(open(ubis[0], "rb").read())
     names = [v.name for v in img.volumes.values()]
     check("real ubinize image parses", names == ["kernel"], str(names))
@@ -358,8 +368,9 @@ def test_real_artifact():
           str(img.peb_size))
     vol = img.extract(0)
     check("kernel volume is a FIT", vol[:4] == bytes.fromhex("d00dfeed"))
-    ok, why = ubiparse.matches_image(vol, open(itbs[0], "rb").read())
-    check("volume read-back matches the .itb it wraps", ok, why)
+    if itbs:
+        ok, why = ubiparse.matches_image(vol, open(itbs[0], "rb").read())
+        check("volume read-back matches the .itb it wraps", ok, why)
 
 
 def test_parsers():

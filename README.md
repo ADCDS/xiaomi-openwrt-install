@@ -9,10 +9,17 @@ a TFTP server over Ethernet, because the bootloader is locked. This drives it
 instead through a pre-auth root RCE in the stock firmware's mesh daemon, pivots
 into the OpenWrt RAM initramfs, and runs the sanctioned `sysupgrade` from there.
 
-> **Private, and it should stay that way for now.** `chain.py` is a working
-> exploit for a vulnerability under coordinated disclosure with the vendor.
-> Publishing this repo is the publication event for that chain — a disclosure
-> decision, not just an engineering one.
+> ### Published 2026-09-28
+>
+> `chain.py` is a working exploit for a vulnerability that is **unpatched** as of
+> this date. This repository is the owner-facing half of
+> [`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure):
+> the stock firmware offers no supported path off itself, so getting OpenWrt onto
+> the device *is* the exploit chain, and the installer and the exploit cannot be
+> separated. The advisory, the PoC and the timeline are there.
+>
+> Read [`NOTICE`](NOTICE) before running anything, and note that this install is
+> effectively one-way — see [Going back to stock](#going-back-to-stock).
 
 Verified end to end on hardware: factory unit → configured OpenWrt on NAND, and
 back to factory 2.0.28, repeatedly, in both directions.
@@ -109,18 +116,26 @@ a very common gateway address.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (171 checks, 178 with release artifacts present) |
-| `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7) |
+| `selftest.py` | everything testable without the router (162 checks, 165 once you have a release artifact, 166 with its matching `.itb`) |
+| `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
+| `LICENSE` | MIT — covers the code |
+| `NOTICE` | authorised-use, one-way-install and no-warranty terms — **read first** |
 
 `chain.py` re-implements the exploit rather than importing the disclosure
-package, so this tree carries no vendor-only material.
+package, so this tree stands on its own; the two repositories are independent
+implementations of the same chain, which is also what makes one a useful check
+on the other.
 
 ```sh
-python3 selftest.py                          # 171 checks, no hardware, no network
+python3 selftest.py                          # 162 checks, no hardware, no network
 
-# seven more run against real release artifacts, if you have them:
+# three more run against a real release artifact, if you have one:
 python3 release.py --download --wifi --dest images
-RD03V2_IMAGES=images python3 selftest.py     # 178
+RD03V2_IMAGES=images python3 selftest.py     # 165
+
+# a fourth check compares the kernel volume against the .itb it wraps, so it
+# needs that file too -- release.py fetches the .ubi and the sysupgrade only:
+RD03V2_IMAGES=images python3 selftest.py     # 166
 ```
 
 ## How the device is laid out

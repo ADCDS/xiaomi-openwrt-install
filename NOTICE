@@ -1,0 +1,61 @@
+NOTICE
+======
+
+This repository installs OpenWrt onto a Xiaomi AX3000T (RD03v2) by exploiting an
+unpatched vulnerability in the stock firmware. Read this before running anything.
+
+1. Authorised use only
+----------------------
+Use this only on devices you own. `chain.py` obtains root on the target without
+credentials, and the vulnerability it uses is firmware-global: the units you can
+reach this way are not necessarily yours. Unauthorised access to a computer
+system is a criminal offence in most jurisdictions.
+
+2. What this does to the device
+-------------------------------
+It writes to NAND. Specifically it roots the stock firmware, pivots into an
+OpenWrt RAM initramfs, and runs `sysupgrade` to install the squashfs to flash,
+having first set a root password and configured Wi-Fi for you. This **replaces
+the vendor firmware**. It also consumes the one-shot `cap_init` trigger in the
+process, which is what the exploit requires and is not reversible except by a
+factory reset.
+
+3. This install is effectively one-way
+--------------------------------------
+Stock keeps an A/B slot pair; the OpenWrt layout claims that region, so **the
+vendor's fallback is gone once you install**. Getting back to stock is possible
+and supported by this repo (`revert.py`, `restore.py`), and it works — but it
+runs the same pivot again over the network, and if that fails your remaining
+options are U-Boot TFTP recovery with a vendor-signed image, or a serial adapter.
+There is no vendor support path for a device with third-party firmware.
+
+4. Flashing can brick the device
+--------------------------------
+Writing firmware is inherently risky. A power loss, a bad image, or an
+interrupted NAND write can leave the unit unusable without UART or TFTP
+recovery. Vendor anti-rollback will refuse images older than the version the
+unit last ran, so using a mismatched stock image for a revert will fail rather
+than downgrade.
+
+5. No warranty
+--------------
+THE SOFTWARE AND DOCUMENTATION ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. In no
+event shall the author be liable for any claim, damages or other liability
+arising from the use of this software or documentation.
+
+6. Credentials you should change afterwards
+-------------------------------------------
+The installer sets the root password and Wi-Fi credentials you pass on the
+command line, and those end up in shell history and in the device's
+configuration. Afterwards, treat the device's serial number as sensitive too:
+on the *stock* firmware the per-device root password is derivable from the label
+serial (see V3 in the advisory's `secondary-findings.md`). None of that applies
+to the installed OpenWrt system, where the root password is the one you set.
+
+7. Reporting
+------------
+The vulnerability is reported to Xiaomi and is with CERT/CC via VINCE
+(`VRF#26-09-SFWHW`). Advisory, PoC, mitigations and timeline:
+https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure
