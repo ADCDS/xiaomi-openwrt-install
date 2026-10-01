@@ -50,12 +50,13 @@ Notes that cost something to learn
   rehearsal; the idle slot is the substitute.
 
 Usage:
-    python3 install.py --device rd03v2 --host 192.168.31.1 --stage preflight
-    python3 install.py --device rd03v2 --host 192.168.31.1 --stage pivot
-    python3 install.py --device rd03v2 --host 192.168.31.1 --stage flash
+    python3 install.py standard
+    python3 install.py nss
+    python3 install.py standard --dry-run
 """
 
 import argparse
+import getpass
 import hashlib
 import json
 import os
@@ -72,6 +73,9 @@ import devices
 import release
 import ubiparse
 from chain import ChainError, log
+
+DEFAULT_RELEASE = devices.RD03V2.default_release
+IMAGE_FLAVOURS = {"standard": "default", "nss": "nss"}
 
 # Written to /tmp by the operator and run detached: a NAND write must not die
 # with the shell channel. The status file is what the driver polls.
@@ -403,6 +407,9 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
         f"{facts['running_slot']}")
 
     confirm("reboot into the RAM initramfs now?", assume_yes)
+    log("[2] Wi-Fi-only: when the stock network disappears, join "
+        f"{profile.installer_wifi_ssid!r} with key "
+        f"{profile.installer_wifi_key!r}")
     ch.run("start-stop-daemon -S -b -x /sbin/reboot", retries=0, quiet=True)
     log("[2] rebooting -- stock is still intact in "
         f"{facts['running_slot']}; if the pivot does not come up, the "
@@ -866,49 +873,102 @@ def flash(host, images, assume_yes, profile, cfg_tar=None):
 # ---- driver -----------------------------------------------------------------
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Install OpenWrt on a supported Xiaomi router.")
-    devices.add_device_argument(ap)
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Install a selected OpenWrt image on a supported Xiaomi router.")
+    ap.add_argument(
+        "image", nargs="?", choices=tuple(IMAGE_FLAVOURS),
+        help="image to install (default: standard)")
+    ap.add_argument(
+        "--release", "--tag", dest="tag", default=DEFAULT_RELEASE,
+        help=f"OpenWrt release tag (default: {DEFAULT_RELEASE}; use 'latest' to follow latest)")
+    ap.add_argument(
+        "--interface", "--discover", dest="discover", metavar="IFACE",
+        help="router-facing network interface (normally detected automatically)")
+    ap.add_argument(
+        "--transport", choices=("auto", "wired", "wifi"), default="auto",
+        help="installation transport (default: detect from the interface)")
     ap.add_argument("--host", default=None,
-                    help="stock address (default: selected profile's address)")
-    ap.add_argument("--openwrt-host", default=None,
-                    # argparse %-formats help strings, so a literal % must be
-                    # doubled -- otherwise --help itself dies before it can
-                    # tell anyone anything.
-                    help="the RAM system. Prefer an IPv6 link-local with a "
-                         "scope (fe80::...%%wlan0): 192.168.1.1 collides with "
-                         "a very common gateway address")
-    ap.add_argument("--discover", metavar="IFACE", default=None,
-                    help="find the box's link-local on IFACE instead of "
-                         "guessing an address")
-    ap.add_argument("--stage", default="preflight",
-                    choices=("preflight", "pivot", "flash", "all"))
-    ap.add_argument("--tag", default=None, help="release tag (default: latest)")
-    ap.add_argument("--flavour", default="default", choices=("default", "nss"))
-    ap.add_argument("--no-wifi-initramfs", action="store_true",
-                    help="use the radio-silent initramfs; stage 3 then needs a "
-                         "LAN cable (pre-v1.7 releases have no other option)")
-    ap.add_argument("--images", default="images", help="download cache")
-    ap.add_argument("--outdir", default=None)
-    ap.add_argument("--attacker", default=None)
-    ap.add_argument("--serve-port", type=int, default=8000)
-    ap.add_argument("--shell-port", type=int, default=4444)
-    ap.add_argument("--file-port", type=int, default=4445)
-    ap.add_argument("--id", default="ota0001")
-    ap.add_argument("--skip-init", action="store_true")
-    ap.add_argument("--skip-exploit", action="store_true",
-                    help="a stager from an earlier run is already dialling in")
-    ap.add_argument("--settle", type=int, default=90)
+                    help="stock router address (default: profile address)")
     ap.add_argument("--wifi-ssid", default=None,
-                    help="bring the installed system up on this SSID (WPA2)")
-    ap.add_argument("--wifi-key", default=None, help="WPA2 passphrase, 8-63 chars")
+                    help="configure this SSID on the installed system")
+    ap.add_argument("--wifi-key", default=None,
+                    help="installed WPA2 passphrase, 8-63 characters")
     ap.add_argument("--wifi-country", default=None,
-                    help="regulatory domain, e.g. BR. Strongly recommended: "
-                         "without it the radios run under the world domain")
+                    help="two-letter regulatory domain, for example BR")
     ap.add_argument("--root-password", default=None,
-                    help="set root's password on the installed system")
-    ap.add_argument("--yes", action="store_true", help="do not prompt")
-    args = ap.parse_args()
+                    help="set the installed system's root password")
+    ap.add_argument("--configure", action="store_true",
+                    help="prompt for installed Wi-Fi and root credentials")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="download and verify the selected release; do not contact the router")
+    ap.add_argument("--yes", action="store_true",
+                    help="skip write and reboot confirmation prompts")
+
+    # Recovery and development controls. They remain accepted for interrupted
+    # runs, but the normal installation path does not need to expose them.
+    hidden = argparse.SUPPRESS
+    ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),
+                    help=hidden)
+    ap.add_argument("--openwrt-host", default=None, help=hidden)
+    ap.add_argument("--stage", default="all",
+                    choices=("preflight", "pivot", "flash", "all"), help=hidden)
+    ap.add_argument("--flavour", choices=("default", "nss"), default=None,
+                    help=hidden)
+    ap.add_argument("--no-wifi-initramfs", action="store_true", help=hidden)
+    ap.add_argument("--images", default="images", help=hidden)
+    ap.add_argument("--outdir", default=None, help=hidden)
+    ap.add_argument("--attacker", default=None, help=hidden)
+    ap.add_argument("--serve-port", type=int, default=8000, help=hidden)
+    ap.add_argument("--shell-port", type=int, default=4444, help=hidden)
+    ap.add_argument("--file-port", type=int, default=4445, help=hidden)
+    ap.add_argument("--id", default="ota0001", help=hidden)
+    ap.add_argument("--skip-init", action="store_true", help=hidden)
+    ap.add_argument("--skip-exploit", action="store_true", help=hidden)
+    ap.add_argument("--settle", type=int, default=90, help=hidden)
+    args = ap.parse_args(argv)
+
+    legacy_image = {"default": "standard", "nss": "nss"}.get(args.flavour)
+    if args.image and legacy_image and args.image != legacy_image:
+        ap.error(f"image {args.image!r} conflicts with --flavour {args.flavour!r}")
+    args.image = args.image or legacy_image or "standard"
+    args.flavour = IMAGE_FLAVOURS[args.image]
+    if args.no_wifi_initramfs:
+        if args.transport == "wifi":
+            ap.error("--transport wifi conflicts with --no-wifi-initramfs")
+        args.transport = "wired"
+    return args
+
+
+def detect_transport(interface, sysfs_root="/sys/class/net"):
+    """Classify a Linux network interface without sending network traffic."""
+    if not interface:
+        raise Abort("cannot detect transport without a network interface")
+    wireless = os.path.join(sysfs_root, interface, "wireless")
+    return "wifi" if os.path.isdir(wireless) else "wired"
+
+
+def prompt_firstboot(args):
+    """Collect optional installed-system settings without a long command line."""
+    if not sys.stdin.isatty():
+        raise Abort("--configure needs an interactive terminal")
+    print("\nInstalled-system configuration (press Enter to leave an item unset)")
+    if args.root_password is None:
+        args.root_password = getpass.getpass("OpenWrt root password: ") or None
+    if args.wifi_ssid is None:
+        args.wifi_ssid = input("OpenWrt Wi-Fi SSID: ").strip() or None
+    if args.wifi_ssid:
+        if args.wifi_key is None:
+            args.wifi_key = getpass.getpass("OpenWrt Wi-Fi password: ")
+        if args.wifi_country is None:
+            args.wifi_country = input("Wi-Fi country code (for example BR): ").strip().upper()
+    return args
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if args.configure and not args.dry_run:
+        prompt_firstboot(args)
     profile = devices.get_profile(args.device)
     args.host = args.host or profile.stock_host
     args.openwrt_host = args.openwrt_host or profile.openwrt_host
@@ -925,6 +985,25 @@ def main():
     chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
     log(f"[*] output -> {outdir}/")
 
+    if not args.discover and (args.stage == "all" or args.transport == "auto"):
+        args.discover = chain.local_interface(args.host)
+        if args.discover:
+            log(f"[*] router-facing interface: {args.discover} (auto-detected)")
+    if args.transport == "auto":
+        if args.discover:
+            args.transport = detect_transport(args.discover)
+        elif args.dry_run:
+            args.transport = "wired"
+            log("[*] no router route found during dry-run; verifying wired images")
+        else:
+            raise Abort("cannot determine the router-facing interface; pass "
+                        "--interface IFACE or --transport wired|wifi")
+    if args.stage == "all" and not args.dry_run and not args.discover:
+        raise Abort("cannot determine the router-facing interface; pass "
+                    "--interface IFACE")
+    via = f" via {args.discover}" if args.discover else ""
+    log(f"[*] transport: {args.transport}{via}")
+
     if args.root_password:
         SSH_PASSWORDS.append(args.root_password)
     if args.wifi_ssid or args.root_password:
@@ -938,21 +1017,39 @@ def main():
             f"root password={'set' if args.root_password else 'unset'} "
             f"-> {cfg_tar}")
 
-    # The release first: no point taking a device apart for an image that
-    # cannot drive its flash.
-    rel = release.by_tag(args.tag, profile) if args.tag else release.latest(profile)
-    log(f"[*] release {rel.tag} ({rel.published})")
+    # The release first: no point touching a device for an image that cannot
+    # drive its flash. The simple interface is pinned to a tested release, but
+    # `--release latest` remains available deliberately.
+    rel = (release.latest(profile) if args.tag == "latest"
+           else release.by_tag(args.tag, profile))
+    log(f"[*] selected {args.image} image from release {rel.tag} ({rel.published})")
     kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
     # The beaconing initramfs is what makes stage 3 cable-free, so it is the
     # default. It only exists from v1.7; fall back rather than fail, and say so,
     # because the consequence (needing a cable later) is the user's to plan for.
-    wifi = not args.no_wifi_initramfs
+    wifi = args.transport == "wifi"
     if wifi and "-wifi" not in " ".join(rel.assets):
         log(f"[!] {rel.tag} ships no -wifi initramfs; using the radio-silent one. "
             "The RAM system will not beacon, so stage 3 needs a LAN cable.")
         wifi = False
     log(f"[*] initramfs: {'beaconing (-wifi)' if wifi else 'radio-silent'}")
     images = release.get_images(rel, args.images, args.flavour, kinds, wifi=wifi)
+
+    if args.dry_run:
+        blob, want_md5 = expected_volume(
+            images["initramfs_ubi"]["path"], images["initramfs_itb"]["path"])
+        log("[+] selected release downloaded and verified")
+        for kind in kinds:
+            log(f"    {kind}: {images[kind]['name']}")
+        log(f"    initramfs kernel volume: {len(blob)} B, md5 {want_md5}")
+        log("[dry-run] router was not contacted")
+        return 0
+
+    if args.stage == "all" and wifi:
+        log("[*] after the RAM pivot, a Wi-Fi-only laptop must join "
+            f"{profile.installer_wifi_ssid} (key: {profile.installer_wifi_key}); "
+            "this process waits "
+            "for the router on the selected interface")
 
     if args.discover and args.stage == "flash":
         args.openwrt_host = wait_and_discover(args.discover)
@@ -977,6 +1074,7 @@ def main():
                 raise Abort("19553 closed and --skip-init given")
             chain.initialise(args.host)
         stok, _cfg = chain.admin_session(args.host, args.id.encode())
+        chain.require_cap_sink_ready(args.host, stok)
         restore = chain.read_wifi(args.host, stok)
     else:
         stok, restore = None, []

@@ -21,8 +21,11 @@ class DeviceProfile:
     openwrt_board: str
     stock_host: str
     openwrt_host: str
+    installer_wifi_ssid: str
+    installer_wifi_key: str
     release_repo: str
     release_prefix: str
+    default_release: str
     image_kinds: dict[str, str]
     nand_min_version: dict[str, tuple[int, int]]
     flash_types: dict[str, str]
@@ -48,8 +51,11 @@ RD03V2 = DeviceProfile(
     openwrt_board="xiaomi,mi-router-ax3000t-v2",
     stock_host="192.168.31.1",
     openwrt_host="192.168.1.1",
+    installer_wifi_ssid="OpenWrt-RD03v2-Installer",
+    installer_wifi_key="rd03v2install",
     release_repo="ADCDS/openwrt-xiaomi-ax3000t-rd03v2",
     release_prefix="openwrt-qualcommax-ipq50xx-xiaomi_mi-router-ax3000t-v2",
+    default_release="v1.11",
     image_kinds={
         "initramfs_itb": "initramfs-uImage.itb",
         "initramfs_ubi": "initramfs-factory.ubi",

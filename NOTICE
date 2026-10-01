@@ -47,9 +47,10 @@ arising from the use of this software or documentation.
 
 6. Credentials you should change afterwards
 -------------------------------------------
-The installer sets the root password and Wi-Fi credentials you pass on the
-command line, and those end up in shell history and in the device's
-configuration. Afterwards, treat the device's serial number as sensitive too:
+The installer stores the root password and Wi-Fi credentials you choose in the
+device's configuration. Use `--configure` to enter them interactively; values
+passed as command-line options can also remain in shell history. Afterwards,
+treat the device's serial number as sensitive too:
 on the *stock* firmware the per-device root password is derivable from the label
 serial (see V3 in the advisory's `secondary-findings.md`). None of that applies
 to the installed OpenWrt system, where the root password is the one you set.

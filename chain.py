@@ -158,6 +158,11 @@ def local_ip(host):
     return _route_field(host, "src")
 
 
+def local_interface(host):
+    """Interface this machine uses to reach the stock router."""
+    return _route_field(host, "dev")
+
+
 def local_mac(host):
     """MAC of the egress interface.  checkNonce only uses it to pick a replay
     slot -- it compares against the real remote MAC purely to log a line -- so
@@ -427,6 +432,18 @@ def read_wifi(host, stok):
             "channel": w.get("channelInfo", {}).get("channel", ""),
         })
     return bands
+
+
+def require_cap_sink_ready(host, stok):
+    """Fail before planting unless the V2 CAP path is in its tested state."""
+    res = api(host, stok, "api/xqnetwork/get_netmode")
+    netmode = res.get("netmode")
+    if netmode != 0:
+        raise ChainError(
+            f"V2 CAP path is unavailable (netmode={netmode!r}). Factory-reset "
+            "the router, leave the Xiaomi setup wizard untouched, reconnect "
+            "to its factory network, and run the installer again.")
+    return netmode
 
 
 def plant(host, stok, attacker_ip, serve_port, bands):

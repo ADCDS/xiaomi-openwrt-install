@@ -49,7 +49,7 @@ def _api(path):
     url = f"https://api.github.com/{path}"
     req = urllib.request.Request(url)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "xiaomi-ota-installer")
+    req.add_header("User-Agent", "xiaomi-router-installer")
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -101,7 +101,8 @@ class Release:
         self.body = meta.get("body") or ""
         self.prerelease = bool(meta.get("prerelease"))
         self.assets = {
-            a["name"]: {"url": a["browser_download_url"], "size": a["size"]}
+            a["name"]: {"url": a["browser_download_url"], "size": a["size"],
+                        "digest": a.get("digest")}
             for a in meta.get("assets", [])
         }
         self.version = parse_version(self.tag)
@@ -153,6 +154,32 @@ def by_tag(tag, profile=devices.RD03V2):
 # ---- download + verify ------------------------------------------------------
 
 
+def cache_dir(rel, destdir):
+    """Keep identically named assets from different release tags separate."""
+    safe_tag = re.sub(r"[^A-Za-z0-9._-]+", "_", rel.tag).strip("._")
+    if not safe_tag:
+        raise ReleaseError(f"unsafe or empty release tag {rel.tag!r}")
+    return os.path.join(destdir, safe_tag)
+
+
+def api_digest(rel, name):
+    value = (rel.assets.get(name, {}).get("digest") or "").strip().lower()
+    return value.removeprefix("sha256:") or None
+
+
+def expected_digest(rel, name, manifest_digest=None):
+    """Reconcile GitHub's immutable asset digest with sha256sums.txt."""
+    manifest_digest = (manifest_digest or "").strip().lower() or None
+    github_digest = api_digest(rel, name)
+    if manifest_digest and github_digest and manifest_digest != github_digest:
+        raise ReleaseError(
+            f"{rel.tag} is internally inconsistent for {name}:\n"
+            f"  sha256sums.txt  {manifest_digest}\n"
+            f"  GitHub asset   {github_digest}\n"
+            "The release must be repaired before it is safe to install.")
+    return manifest_digest or github_digest
+
+
 def download(rel, name, destdir, progress=True):
     """Fetch one asset, resuming nothing and trusting nothing -- the caller
     verifies against sha256sums.txt afterwards."""
@@ -161,10 +188,13 @@ def download(rel, name, destdir, progress=True):
     os.makedirs(destdir, exist_ok=True)
     path = os.path.join(destdir, name)
     want = rel.assets[name]["size"]
+    github_digest = api_digest(rel, name)
     if os.path.exists(path) and os.path.getsize(path) == want:
-        return path
+        if not github_digest or sha256(path) == github_digest:
+            return path
+        print(f"[!] cached {name} failed GitHub's asset digest; downloading again")
     req = urllib.request.Request(rel.assets[name]["url"])
-    req.add_header("User-Agent", "xiaomi-ota-installer")
+    req.add_header("User-Agent", "xiaomi-router-installer")
     tmp = path + ".part"
     got = 0
     with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as fh:
@@ -184,6 +214,13 @@ def download(rel, name, destdir, progress=True):
     if want and got != want:
         os.unlink(tmp)
         raise ReleaseError(f"{name}: got {got} B, release says {want}")
+    if github_digest:
+        got_digest = sha256(tmp)
+        if got_digest != github_digest:
+            os.unlink(tmp)
+            raise ReleaseError(
+                f"{name}: downloaded sha256 {got_digest}, GitHub records "
+                f"{github_digest}")
     os.replace(tmp, path)
     return path
 
@@ -194,7 +231,7 @@ def checksums(rel, destdir):
     rather than pretend the download was verified."""
     if "sha256sums.txt" not in rel.assets:
         return {}
-    path = download(rel, "sha256sums.txt", destdir, progress=False)
+    path = download(rel, "sha256sums.txt", cache_dir(rel, destdir), progress=False)
     out = {}
     with open(path) as fh:
         for line in fh:
@@ -224,12 +261,13 @@ def get_images(rel, destdir, flavour="default", kinds=("initramfs_ubi", "sysupgr
         print(f"[!] {rel.tag} publishes no sha256sums.txt -- downloads are "
               "unverified beyond their length")
     out = {}
+    cachedir = cache_dir(rel, destdir)
     for kind in kinds:
         name = rel.require(kind, flavour, wifi and kind.startswith("initramfs"))
         print(f"[*] {kind}: {name}")
-        path = download(rel, name, destdir)
+        want = expected_digest(rel, name, sums.get(name))
+        path = download(rel, name, cachedir)
         digest = sha256(path)
-        want = sums.get(name)
         if want and digest != want:
             raise ReleaseError(
                 f"{name}: sha256 mismatch\n  got  {digest}\n  want {want}")
@@ -266,7 +304,7 @@ def nand_support(rel, destdir=None):
     """
     if "nand-support.txt" not in rel.assets or destdir is None:
         return None
-    path = download(rel, "nand-support.txt", destdir, progress=False)
+    path = download(rel, "nand-support.txt", cache_dir(rel, destdir), progress=False)
     parts = {}
     with open(path) as fh:
         for line in fh:

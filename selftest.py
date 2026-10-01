@@ -17,8 +17,8 @@ import hmac
 import http.server
 import json
 import os
-import random
 import shutil
+import socket
 import socketserver
 import struct
 import subprocess
@@ -58,6 +58,35 @@ def test_profiles():
     check("untested stock ROM rejected",
           "not validated" in devices.stock_identity_error(
               profile, {**good, "romversion": "2.0.12"}))
+
+
+def test_simple_installer_cli():
+    import install
+    print("\n== simple installer CLI ==")
+    args = install.parse_args([])
+    check("default command selects standard v1.11 full install",
+          args.image == "standard" and args.flavour == "default"
+          and args.tag == "v1.11" and args.stage == "all"
+          and args.transport == "auto")
+    args = install.parse_args(["nss", "--interface", "enx0", "--dry-run"])
+    check("NSS selection maps to the NSS release family",
+          args.image == "nss" and args.flavour == "nss")
+    check("simple interface and dry-run options parse",
+          args.discover == "enx0" and args.dry_run)
+    args = install.parse_args(["--flavour", "nss", "--stage", "preflight"])
+    check("advanced recovery arguments remain compatible",
+          args.image == "nss" and args.stage == "preflight")
+
+    root = tempfile.mkdtemp(prefix="xiaomi-transport-")
+    try:
+        os.makedirs(os.path.join(root, "eth0"))
+        os.makedirs(os.path.join(root, "wlan0", "wireless"))
+        check("wired interface detection",
+              install.detect_transport("eth0", root) == "wired")
+        check("Wi-Fi interface detection",
+              install.detect_transport("wlan0", root) == "wifi")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 # ---- 1. stager rendering ----------------------------------------------------
@@ -125,8 +154,15 @@ def test_channel():
     if not shutil.which("busybox"):
         check("busybox present", False, "skipping channel test")
         return
-    sport = random.randint(41000, 45000)
-    fport = sport + 1
+    def free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
+            probe_socket.bind(("127.0.0.1", 0))
+            return probe_socket.getsockname()[1]
+
+    sport = free_port()
+    fport = free_port()
+    while fport == sport:
+        fport = free_port()
     workdir = tempfile.mkdtemp(prefix="rd03v2-selftest-")
     outdir = os.path.join(workdir, "out")
     os.makedirs(outdir)
@@ -502,6 +538,8 @@ class _MiWiFi(http.server.BaseHTTPRequestHandler):
             st["inited"] = 1
             st["ssid"] = form.get("wifi24Ssid", "")
             return self._json({"code": 0})
+        if path.endswith("api/xqnetwork/get_netmode"):
+            return self._json({"code": 0, "netmode": st.get("netmode", 0)})
         if path.endswith("api/xqnetwork/wifi_detail_all"):
             return self._json({"code": 0, "info": st["bands"]})
         if path.endswith("api/xqnetwork/set_wifi_without_restart"):
@@ -546,6 +584,17 @@ def test_http_flow():
 
         stok = chain.login(host, chain.FACTORY_ADMIN_HASH)
         check("login derives sha256(nonce||stored)", stok == "deadbeef" * 4)
+
+        check("gate-open CAP state accepted",
+              chain.require_cap_sink_ready(host, stok) == 0)
+        _MiWiFi.state["netmode"] = 4
+        try:
+            chain.require_cap_sink_ready(host, stok)
+            check("normal wizard CAP state refused", False)
+        except chain.ChainError as e:
+            check("normal wizard CAP state refused",
+                  "factory-reset" in str(e).lower())
+        _MiWiFi.state["netmode"] = 0
 
         try:
             chain.login(host, "0" * 64)
@@ -881,9 +930,11 @@ def test_v17_nand_support():
     print("\n== v1.7 nand-support.txt ==")
     d = tempfile.mkdtemp(prefix="rd03v2-nand-")
     try:
-        shutil.copy("testdata/nand-support-v1.7.txt",
-                    os.path.join(d, "nand-support.txt"))
         rel = _v17_release()
+        tagged = release.cache_dir(rel, d)
+        os.makedirs(tagged)
+        shutil.copy("testdata/nand-support-v1.7.txt",
+                    os.path.join(tagged, "nand-support.txt"))
         # download() short-circuits on a present file of the declared size, so
         # this parses the real published asset with no network.
         table = release.nand_support(rel, d)
@@ -915,6 +966,47 @@ def test_v17_nand_support():
               ok and "v1.7" in why, why[:60])
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_release_integrity():
+    print("\n== release cache and integrity ==")
+    one = release.Release({"tag_name": "v1.10", "assets": []})
+    two = release.Release({"tag_name": "v1.11", "assets": []})
+    check("release cache is tag-scoped",
+          release.cache_dir(one, "images") != release.cache_dir(two, "images"))
+
+    digest = "a" * 64
+    rel = release.Release({
+        "tag_name": "v1.11",
+        "assets": [{"name": "image.bin", "browser_download_url": "http://x/",
+                    "size": 1, "digest": f"sha256:{digest}"}],
+    })
+    check("matching manifest and GitHub digests are accepted",
+          release.expected_digest(rel, "image.bin", digest) == digest)
+    try:
+        release.expected_digest(rel, "image.bin", "b" * 64)
+        check("conflicting release digests fail closed", False)
+    except release.ReleaseError as exc:
+        check("conflicting release digests fail closed",
+              "internally inconsistent" in str(exc))
+
+
+def test_tagged_revert_cache():
+    import revert
+    print("\n== tagged revert cache ==")
+    root = tempfile.mkdtemp(prefix="xiaomi-revert-cache-")
+    try:
+        tagged = os.path.join(root, "v1.11")
+        os.makedirs(tagged)
+        ubi = os.path.join(tagged, "test-initramfs-factory-wifi.ubi")
+        itb = os.path.join(tagged, "test-initramfs-uImage-wifi.itb")
+        open(ubi, "wb").close()
+        open(itb, "wb").close()
+        got_ubi, got_itb = revert.find_ram_images(root, "v1.11")
+        check("revert finds the selected release's image pair",
+              got_ubi == ubi and got_itb == itb)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def test_stock_image():
@@ -997,6 +1089,7 @@ def test_expected_volume():
 def main():
     t0 = time.time()
     test_profiles()
+    test_simple_installer_cli()
     test_stager()
     test_ubi()
     test_ubi_live_hazards()
@@ -1010,6 +1103,8 @@ def main():
     test_installer_preflight()
     test_v17_names()
     test_v17_nand_support()
+    test_release_integrity()
+    test_tagged_revert_cache()
     test_stock_image()
     test_expected_volume()
     test_channel()

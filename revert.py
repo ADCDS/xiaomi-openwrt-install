@@ -42,23 +42,33 @@ import restore
 from chain import log
 
 
-def find_ram_images(images_dir):
+def find_ram_images(images_dir, release_tag=devices.RD03V2.default_release):
     """The RAM image to pivot through, and the .itb it wraps for verification.
 
     Prefers the -wifi variant: it is the one that beacons, so if the cable
     ever comes out mid-revert there is still a way back in.
     """
-    for pat in ("*initramfs-factory-wifi.ubi", "*initramfs-factory.ubi"):
-        ubi = sorted(glob.glob(os.path.join(images_dir, pat)))
+    roots = (os.path.join(images_dir, release_tag), images_dir)
+    ubi = []
+    for root in roots:
+        for pat in ("*initramfs-factory-wifi.ubi", "*initramfs-factory.ubi"):
+            ubi = sorted(glob.glob(os.path.join(root, pat)))
+            if ubi:
+                break
         if ubi:
             break
+    if not ubi:
+        raise restore.RestoreError(
+            f"no initramfs UBI in {images_dir}/{release_tag}. Fetch it first:\n"
+            f"  python3 release.py --device rd03v2 --tag {release_tag} --wifi "
+            "--download --dest images")
     itb_pat = ("*initramfs-uImage-wifi.itb" if "-wifi" in os.path.basename(ubi[0])
                else "*initramfs-uImage.itb")
-    itb = sorted(glob.glob(os.path.join(images_dir, itb_pat)))
-    if not ubi or not itb:
+    itb = sorted(glob.glob(os.path.join(root, itb_pat)))
+    if not itb:
         raise restore.RestoreError(
             f"no initramfs pair in {images_dir}. Fetch one first:\n"
-            "  python3 release.py --device rd03v2 --tag v1.7 --wifi "
+            f"  python3 release.py --device rd03v2 --tag {release_tag} --wifi "
             "--download --dest images")
     return ubi[0], itb[0]
 
@@ -172,6 +182,8 @@ def main():
                     help="find the box on IFACE (and again after the pivot)")
     ap.add_argument("--images", default="images",
                     help="directory holding the initramfs pair")
+    ap.add_argument("--release", default=devices.RD03V2.default_release,
+                    help="release tag used for the cached RAM image")
     ap.add_argument("--root-password", default=None,
                     help="the installed system's root password, if one is set")
     ap.add_argument("--dry-run", action="store_true")
@@ -204,7 +216,7 @@ def main():
 
     if rtype != "tmpfs":
         log("\n=== step 1: pivot into the RAM initramfs ===")
-        ubi, itb = find_ram_images(args.images)
+        ubi, itb = find_ram_images(args.images, args.release)
         if not args.yes and not args.dry_run:
             if input(f"[?] write {os.path.basename(ubi)} to ubi_kernel and "
                      "reboot? [type YES] ").strip() != "YES":
