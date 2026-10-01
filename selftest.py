@@ -30,6 +30,7 @@ import urllib.parse
 
 import chain
 import channel
+import devices
 import release
 import probe
 import ubiparse
@@ -40,6 +41,23 @@ PASS, FAIL = [], []
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
     print(f"  [{'ok' if cond else 'FAIL'}] {name}{(' -- ' + detail) if detail else ''}")
+
+
+def test_profiles():
+    print("\n== device profiles ==")
+    profile = devices.get_profile("rd03v2")
+    check("RD03v2 is the only enabled profile",
+          tuple(devices.PROFILES) == ("rd03v2",))
+    good = {"hardware": "RD03v2", "model": "xiaomi.router.rd03v2",
+            "romversion": "2.0.28"}
+    check("validated stock identity accepted",
+          devices.stock_identity_error(profile, good) is None)
+    check("wrong hardware rejected",
+          "does not match" in devices.stock_identity_error(
+              profile, {**good, "hardware": "RD23"}))
+    check("untested stock ROM rejected",
+          "not validated" in devices.stock_identity_error(
+              profile, {**good, "romversion": "2.0.12"}))
 
 
 # ---- 1. stager rendering ----------------------------------------------------
@@ -709,7 +727,8 @@ def _preflight(shell, rel=None, images=None):
     import install
     imgs, d = (images, None) if images else _fake_images()
     try:
-        return install.preflight(shell, rel or _fake_release(), imgs, True), None
+        return install.preflight(shell, rel or _fake_release(), imgs, True,
+                                 devices.RD03V2), None
     except Exception as e:                                       # noqa: BLE001
         return None, e
     finally:
@@ -802,8 +821,8 @@ def test_installer_preflight():
     check("wrapped df line still parses", err is None, str(err)[:80])
 
     check("flash_type table covers both documented parts",
-          install.FLASH_TYPE["11"] == "ESMT F50D1G41LB"
-          and install.FLASH_TYPE["be"] == "Winbond W25N01KW")
+          devices.RD03V2.flash_types["11"] == "ESMT F50D1G41LB"
+          and devices.RD03V2.flash_types["be"] == "Winbond W25N01KW")
 
 
 # ---- 8. v1.7: the -wifi variants and the release's own NAND declaration -----
@@ -821,7 +840,7 @@ V17_ASSETS = [
 
 def _v17_release(with_nand_file=True):
     """A v1.7 Release whose asset names are the ones actually published."""
-    assets = [{"name": f"{release.PREFIX}-{n}", "browser_download_url": "http://x/",
+    assets = [{"name": f"{devices.RD03V2.release_prefix}-{n}", "browser_download_url": "http://x/",
                "size": 1} for n in V17_ASSETS]
     assets.append({"name": "sha256sums.txt", "browser_download_url": "http://x/",
                    "size": 1})
@@ -846,7 +865,7 @@ def test_v17_names():
     ]
     for kind, flav, wifi, tail in cases:
         got = rel.name_for(kind, flav, wifi)
-        want = f"{release.PREFIX}-{tail}"
+        want = f"{devices.RD03V2.release_prefix}-{tail}"
         check(f"{kind}/{flav}{'/wifi' if wifi else ''} -> {tail}", got == want, got)
         # and it must be an asset that actually exists in the release
         check(f"  {tail} is published", got in rel.assets)
@@ -906,28 +925,36 @@ def test_stock_image():
         return
     import restore
     print("\n== stock image carve ==")
-    payload, digest, known = restore.carve(cand[0])
+    profile = devices.RD03V2
+    payload, digest, known = restore.carve(cand[0], profile)
     check("hash is a published one", bool(known), str(known))
-    check("payload is a whole number of PEBs", len(payload) % restore.PEB == 0)
-    img = restore.inspect(payload)
+    check("payload is a whole number of PEBs",
+          len(payload) % profile.peb_size == 0)
+    img = restore.inspect(payload, profile)
     names = {v.name for v in img.volumes.values() if v.lebs}
     check("carries kernel + ubi_rootfs", names == {"kernel", "ubi_rootfs"}, str(names))
     check("single UBI", len(img.image_seqs) == 1)
-    check("fits stock slot 0", len(payload) <= restore.STOCK_SLOT0[1])
+    check("fits stock slot 0", len(payload) <= profile.stock_slot0[1])
 
     # the erase plan must cover exactly what is above stock's slot 0
-    mtd = {"ubi_kernel": {"index": 18, "size": restore.OWRT_UBI_KERNEL[1]},
-           "rootfs": {"index": 19, "size": restore.OWRT_ROOTFS[1]}}
-    pl = restore.plan(mtd)
+    mtd = {
+        "ubi_kernel": {"index": 18,
+                       "size": profile.openwrt_partitions["ubi_kernel"][1]},
+        "rootfs": {"index": 19,
+                   "size": profile.openwrt_partitions["rootfs"][1]},
+    }
+    pl = restore.plan(mtd, profile)
     _k, tail_off, tail_cnt = pl["erase_tail"]
-    abs_start = restore.OWRT_UBI_KERNEL[0] + tail_off
+    abs_start = profile.openwrt_partitions["ubi_kernel"][0] + tail_off
     check("tail erase starts exactly at stock slot 1",
-          abs_start == restore.STOCK_SLOT0[0] + restore.STOCK_SLOT0[1],
+          abs_start == profile.stock_slot0[0] + profile.stock_slot0[1],
           hex(abs_start))
     check("tail erase runs to the end of ubi_kernel",
-          tail_off + tail_cnt * restore.PEB == restore.OWRT_UBI_KERNEL[1])
+          tail_off + tail_cnt * profile.peb_size
+          == profile.openwrt_partitions["ubi_kernel"][1])
     check("rootfs erase covers the whole partition",
-          pl["erase_rootfs"][2] * restore.PEB == restore.OWRT_ROOTFS[1])
+          pl["erase_rootfs"][2] * profile.peb_size
+          == profile.openwrt_partitions["rootfs"][1])
 
     bad = b"XXXX" + payload[4:]
     try:
@@ -936,7 +963,7 @@ def test_stock_image():
         with tempfile.NamedTemporaryFile("wb", suffix=".bin", delete=False) as fh:
             fh.write(bad); bp = fh.name
         try:
-            restore.carve(bp); check("non-HDR1 refused", False)
+            restore.carve(bp, profile); check("non-HDR1 refused", False)
         except restore.RestoreError as e:
             check("non-HDR1 refused", "HDR1" in str(e))
         finally:
@@ -969,6 +996,7 @@ def test_expected_volume():
 
 def main():
     t0 = time.time()
+    test_profiles()
     test_stager()
     test_ubi()
     test_ubi_live_hazards()

@@ -50,9 +50,9 @@ Notes that cost something to learn
   rehearsal; the idle slot is the substitute.
 
 Usage:
-    python3 install.py --host 192.168.31.1 --stage preflight
-    python3 install.py --host 192.168.31.1 --stage pivot
-    python3 install.py --host 192.168.31.1 --stage flash
+    python3 install.py --device rd03v2 --host 192.168.31.1 --stage preflight
+    python3 install.py --device rd03v2 --host 192.168.31.1 --stage pivot
+    python3 install.py --device rd03v2 --host 192.168.31.1 --stage flash
 """
 
 import argparse
@@ -68,26 +68,10 @@ import time
 
 import chain
 import channel
+import devices
 import release
 import ubiparse
 from chain import ChainError, log
-
-OPENWRT_IP = "192.168.1.1"
-BOARD = "xiaomi,mi-router-ax3000t-v2"
-
-# nvram flash_type -> the part, decoded from the serial-NAND ID table in
-# 0:APPSBL (name at record+0x18, id of that record in the preceding one).
-FLASH_TYPE = {
-    "c9": "GigaDevice GD5F1GQ4RE9IH", "22": "GigaDevice GD5F2GQ5REYIH",
-    "15": "Micron MT29F1G01ABBFDWB-IT", "bc": "Winbond W25N01JW",
-    "11": "ESMT F50D1G41LB", "41": "GigaDevice GD5F1GQ5REYIG",
-    "21": "GigaDevice GD5F1GQ5REYIH", "bf": "Winbond W25N02JWZEIF",
-    "92": "Macronix MX35UF1GE4AC", "ba": "Winbond W25N01GWZEIG",
-    "81": "GigaDevice GD5F1GM7REYIG", "be": "Winbond W25N01KW",
-}
-
-# The two slots, and the flag_boot_rootfs value that selects each.
-SLOTS = {"rootfs": 0, "rootfs_1": 1}
 
 # Written to /tmp by the operator and run detached: a NAND write must not die
 # with the shell channel. The status file is what the driver polls.
@@ -155,16 +139,20 @@ def nvram_get(ch, key):
     return out.strip() if rc == 0 else ""
 
 
-def preflight(ch, rel, images, assume_yes, destdir=None):
+def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     """Everything that must be true before a single byte is written."""
     facts = {}
     log("\n=== stage 1: pre-flight (nothing is written) ===")
 
+    if rel.profile.slug != profile.slug:
+        raise Abort(f"release profile {rel.profile.slug!r} does not match "
+                    f"selected device {profile.slug!r}")
+
     model = nvram_get(ch, "model")
     facts["model"] = model
     log(f"[1] nvram model = {model!r}")
-    if model != "RD03v2":
-        raise Abort(f"model {model!r} is not RD03v2 -- refusing")
+    if model != profile.nvram_model:
+        raise Abort(f"model {model!r} is not {profile.nvram_model} -- refusing")
 
     # NAND. The bootloader already identified the part and left the answer in
     # the environment, which beats dmesg: the ring buffer wraps, and ESMT and
@@ -176,7 +164,7 @@ def preflight(ch, rel, images, assume_yes, destdir=None):
             "the chip, so an empty one means this is not a layout this "
             "installer understands -- refusing rather than flashing blind.")
     ft = release.normalise_flash_type(raw_ft)
-    part = FLASH_TYPE.get(ft)
+    part = profile.flash_types.get(ft)
     facts["flash_type"] = ft
     facts["nand"] = part
     log(f"[1] nvram flash_type = 0x{ft} -> {part or 'UNKNOWN PART'}")
@@ -193,18 +181,21 @@ def preflight(ch, rel, images, assume_yes, destdir=None):
     rc, mtdtext = ch.run("cat /proc/mtd", quiet=True)
     mtd = parse_mtd(mtdtext)
     facts["mtd"] = mtd
-    missing = [p for p in ("rootfs", "rootfs_1", "overlay", "0:APPSBLENV") if p not in mtd]
+    missing = [p for p in profile.required_stock_partitions if p not in mtd]
     if missing:
         raise Abort(f"stock partition map is missing {missing} -- not a layout "
                     "this installer understands")
-    for slot in ("rootfs", "rootfs_1"):
+    slots = tuple(profile.stock_slots)
+    if len(slots) != 2:
+        raise Abort(f"profile {profile.slug!r} does not define exactly two slots")
+    for slot in slots:
         log(f"[1] {slot}: mtd{mtd[slot]['index']} {mtd[slot]['size']} B")
-    if mtd["rootfs"]["size"] != mtd["rootfs_1"]["size"]:
+    if mtd[slots[0]]["size"] != mtd[slots[1]]["size"]:
         raise Abort("the two system slots are different sizes -- unexpected layout")
 
     _rc, cmdline = ch.run("cat /proc/cmdline", quiet=True)
     m = re.search(r"ubi\.mtd=(\S+)", cmdline)
-    if not m or m.group(1) not in SLOTS:
+    if not m or m.group(1) not in profile.stock_slots:
         raise Abort(f"cannot tell which slot is running from cmdline: {cmdline!r}")
     running = m.group(1)
     flag = nvram_get(ch, "flag_boot_rootfs")
@@ -218,13 +209,14 @@ def preflight(ch, rel, images, assume_yes, destdir=None):
     # chooser's input and flag_boot_rootfs is what it recorded on the way out.
     # If either disagrees, the model of this bootloader is wrong and the pivot
     # would be aiming at a slot on a guess.
-    if str(SLOTS[running]) != flag or str(SLOTS[running]) != last:
+    if (str(profile.stock_slots[running]) != flag
+            or str(profile.stock_slots[running]) != last):
         raise Abort(
-            f"cmdline booted {running} (os_idx {SLOTS[running]}) but nvram has "
+            f"cmdline booted {running} (os_idx {profile.stock_slots[running]}) but nvram has "
             f"flag_boot_rootfs={flag!r} flag_last_success={last!r}. Refusing to "
             "guess which slot is live.")
 
-    target = "rootfs_1" if running == "rootfs" else "rootfs"
+    target = slots[1] if running == slots[0] else slots[0]
     facts["target_slot"] = target
     tidx = mtd[target]["index"]
 
@@ -272,12 +264,11 @@ def preflight(ch, rel, images, assume_yes, destdir=None):
     return facts
 
 
-def backup(ch, sink, outdir, mtd, attacker, file_port):
+def backup(ch, sink, outdir, mtd, attacker, file_port, profile):
     """Pull the partitions that are not reproducible if they are ever lost."""
     log("\n=== backup ===")
     got = {}
-    for label, part in (("appsblenv", "0:APPSBLENV"), ("art", "0:ART"),
-                        ("bdata", "bdata"), ("appsbl", "0:APPSBL")):
+    for label, part in profile.backup_partitions:
         idx, size = mtd[part]["index"], mtd[part]["size"]
         cmd = (f'({{ echo "FILE {label}.bin {size}"; '
                f'dd if=/dev/mtd{idx} bs=65536 conv=noerror,sync 2>/dev/null; }} '
@@ -318,7 +309,8 @@ def expected_volume(ubi_path, itb_path):
     return blob, hashlib.md5(blob).hexdigest()
 
 
-def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes):
+def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
+          profile):
     log("\n=== stage 2: pivot (writes the idle slot and the boot flags) ===")
     target = facts["target_slot"]
     tidx = facts["mtd"][target]["index"]
@@ -389,7 +381,7 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes):
     # budget. The caller increments this slot's counter before every attempt,
     # so from zero the RAM system gets six tries before the loader gives up and
     # returns to the slot stock is still sitting in.
-    idx = SLOTS[target]
+    idx = profile.stock_slots[target]
     for k, v in (("flag_try_sys1_failed", 0), ("flag_try_sys2_failed", 0),
                  ("flag_last_success", idx), ("flag_boot_rootfs", idx)):
         ch.run(f"nvram set {k}={v}", retries=0, quiet=True)
@@ -524,7 +516,7 @@ def _sq(v):
     return "'" + str(v).replace("'", "'\\''") + "'"
 
 
-def build_config_tar(path, ssid, key, country=None, pwhash=None):
+def build_config_tar(path, ssid, key, profile, country=None, pwhash=None):
     """A sysupgrade -f tarball carrying first-boot configuration.
 
     sysupgrade treats -f as the config archive and forces SAVE_CONFIG=1, so
@@ -542,7 +534,7 @@ def build_config_tar(path, ssid, key, country=None, pwhash=None):
                             country=cy, rootpw=pw).encode()
 
     with tarfile.open(path, "w:gz") as tf:
-        info = tarfile.TarInfo("etc/uci-defaults/99-rd03v2-firstboot")
+        info = tarfile.TarInfo(f"etc/uci-defaults/{profile.firstboot_script}")
         info.size = len(body)
         info.mode = 0o755
         tf.addfile(info, io.BytesIO(body))
@@ -768,7 +760,7 @@ def wait_for_openwrt(host, deadline_s=420):
     return False
 
 
-def flash(host, images, assume_yes, cfg_tar=None):
+def flash(host, images, assume_yes, profile, cfg_tar=None):
     log("\n=== stage 3: flash (sysupgrade from the RAM system) ===")
     if not wait_for_openwrt(host):
         raise Abort(
@@ -780,8 +772,8 @@ def flash(host, images, assume_yes, cfg_tar=None):
     _rc, rtype = ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
     _rc, mtdtext = ssh(host, "cat /proc/mtd")
     log(f"[3] board_name={board!r} rootfs_type={rtype!r}")
-    if board.strip() != BOARD:
-        raise Abort(f"board_name is {board!r}, expected {BOARD}")
+    if board.strip() != profile.openwrt_board:
+        raise Abort(f"board_name is {board!r}, expected {profile.openwrt_board}")
     if rtype.strip() != "tmpfs":
         raise Abort(f"rootfs_type is {rtype!r}, not tmpfs -- this is not the RAM "
                     "system, and an in-place sysupgrade is exactly what bricks "
@@ -875,9 +867,11 @@ def flash(host, images, assume_yes, cfg_tar=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Install OpenWrt on a stock RD03v2 over Wi-Fi.")
-    ap.add_argument("--host", default="192.168.31.1")
-    ap.add_argument("--openwrt-host", default=OPENWRT_IP,
+    ap = argparse.ArgumentParser(description="Install OpenWrt on a supported Xiaomi router.")
+    devices.add_device_argument(ap)
+    ap.add_argument("--host", default=None,
+                    help="stock address (default: selected profile's address)")
+    ap.add_argument("--openwrt-host", default=None,
                     # argparse %-formats help strings, so a literal % must be
                     # doubled -- otherwise --help itself dies before it can
                     # tell anyone anything.
@@ -915,6 +909,9 @@ def main():
                     help="set root's password on the installed system")
     ap.add_argument("--yes", action="store_true", help="do not prompt")
     args = ap.parse_args()
+    profile = devices.get_profile(args.device)
+    args.host = args.host or profile.stock_host
+    args.openwrt_host = args.openwrt_host or profile.openwrt_host
 
     cfg_tar = None
     if args.wifi_ssid or args.root_password:
@@ -933,6 +930,7 @@ def main():
     if args.wifi_ssid or args.root_password:
         cfg_tar = build_config_tar(
             f"{outdir}/firstboot.tar.gz", args.wifi_ssid or "", args.wifi_key or "",
+            profile,
             args.wifi_country,
             password_hash(args.root_password) if args.root_password else None)
         log(f"[*] first-boot config: ssid={args.wifi_ssid!r} "
@@ -942,7 +940,7 @@ def main():
 
     # The release first: no point taking a device apart for an image that
     # cannot drive its flash.
-    rel = release.by_tag(args.tag) if args.tag else release.latest()
+    rel = release.by_tag(args.tag, profile) if args.tag else release.latest(profile)
     log(f"[*] release {rel.tag} ({rel.published})")
     kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
     # The beaconing initramfs is what makes stage 3 cable-free, so it is the
@@ -960,7 +958,7 @@ def main():
         args.openwrt_host = wait_and_discover(args.discover)
 
     if args.stage == "flash":
-        flash(args.openwrt_host, images, args.yes, cfg_tar)
+        flash(args.openwrt_host, images, args.yes, profile, cfg_tar)
         return 0
 
     attacker = args.attacker or chain.local_ip(args.host)
@@ -971,8 +969,9 @@ def main():
         info = chain.init_info(args.host)
         log(f"[0] hardware={info.get('hardware')} rom={info.get('romversion')} "
             f"inited={info.get('inited')}")
-        if "RD03" not in str(info.get("hardware", "")).upper():
-            raise Abort(f"hardware {info.get('hardware')!r} is not an RD03v2")
+        identity_error = devices.stock_identity_error(profile, info)
+        if identity_error:
+            raise Abort(identity_error)
         if not chain.port_open(args.host, chain.MESH_PORT):
             if args.skip_init:
                 raise Abort("19553 closed and --skip-init given")
@@ -1006,7 +1005,7 @@ def main():
         time.sleep(args.settle)
         ch.run("echo settled", quiet=True)
 
-    facts = preflight(ch, rel, images, args.yes, args.images)
+    facts = preflight(ch, rel, images, args.yes, profile, args.images)
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
 
@@ -1015,17 +1014,19 @@ def main():
         log("    re-run with --stage pivot to write the idle slot.")
         return 0
 
-    backup(ch, sink, outdir, facts["mtd"], attacker, args.file_port)
-    pivot(ch, http, facts, images, outdir, attacker, args.serve_port, args.yes)
+    backup(ch, sink, outdir, facts["mtd"], attacker, args.file_port, profile)
+    pivot(ch, http, facts, images, outdir, attacker, args.serve_port, args.yes,
+          profile)
 
     if args.stage == "all":
         # The pivot has just rebooted the box into RAM; find it again there.
         host = wait_and_discover(args.discover) if args.discover \
             else args.openwrt_host
-        flash(host, images, args.yes, cfg_tar)
+        flash(host, images, args.yes, profile, cfg_tar)
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")
-        log(f"    python3 install.py --stage flash --images {args.images}")
+        log(f"    python3 install.py --device {profile.slug} --stage flash "
+            f"--images {args.images}")
     return 0
 
 

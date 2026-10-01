@@ -23,9 +23,10 @@ step re-checks the state it needs rather than assuming the previous run got
 there.
 
 Usage:
-    python3 revert.py miwifi_rd03v2_2.0.28.bin --discover enx0 \\
+    python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin --discover enx0 \\
         --root-password hunter2
-    python3 revert.py miwifi_rd03v2_2.0.28.bin --host fe80::...%eth0 --dry-run
+    python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin \\
+        --host fe80::...%eth0 --dry-run
 """
 
 import argparse
@@ -35,6 +36,7 @@ import os
 import sys
 import time
 
+import devices
 import install
 import restore
 from chain import log
@@ -56,7 +58,8 @@ def find_ram_images(images_dir):
     if not ubi or not itb:
         raise restore.RestoreError(
             f"no initramfs pair in {images_dir}. Fetch one first:\n"
-            "  python3 release.py --tag v1.7 --wifi --download --dest images")
+            "  python3 release.py --device rd03v2 --tag v1.7 --wifi "
+            "--download --dest images")
     return ubi[0], itb[0]
 
 
@@ -149,20 +152,21 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False):
     return install.wait_and_discover(iface) if iface else host
 
 
-def state_of(host):
+def state_of(host, profile):
     """(board, rootfs_type) -- and refuse anything that is not this board."""
     _rc, board = restore.ssh(host, ". /lib/functions.sh 2>/dev/null; board_name")
-    if board.strip() != restore.BOARD:
+    if board.strip() != profile.openwrt_board:
         raise restore.RestoreError(
-            f"board_name is {board.strip()!r}, not {restore.BOARD} -- this is "
-            "not an RD03v2 running this port")
+            f"board_name is {board.strip()!r}, not {profile.openwrt_board} -- "
+            f"this is not {profile.display_name} running its supported port")
     _rc, rtype = restore.ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
     return board.strip(), rtype.strip()
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("image", help="miwifi_rd03v2_*.bin")
+    devices.add_device_argument(ap)
+    ap.add_argument("image", help="official stock firmware image")
     ap.add_argument("--host", default=None, help="fe80::...%%iface of the box")
     ap.add_argument("--discover", metavar="IFACE", default=None,
                     help="find the box on IFACE (and again after the pivot)")
@@ -173,11 +177,12 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
+    profile = devices.get_profile(args.device)
 
     # Validate the stock image before touching the device: if it is not a
     # restorable image there is no point pivoting anything.
-    payload, _digest, known = restore.carve(args.image)
-    restore.inspect(payload)
+    payload, _digest, known = restore.carve(args.image, profile)
+    restore.inspect(payload, profile)
     if not known:
         log("[!] this image's hash is not one the port publishes")
         if not args.yes:
@@ -194,7 +199,7 @@ def main():
         raise restore.RestoreError("give --host or --discover")
 
     install.check_is_openwrt_ram(host)      # refuses this host's own gateway
-    board, rtype = state_of(host)
+    board, rtype = state_of(host, profile)
     log(f"[*] {host}: {board}, rootfs_type={rtype}")
 
     if rtype != "tmpfs":
@@ -209,7 +214,7 @@ def main():
             log("\n[dry-run] would restore stock next; stopping.")
             return 0
         host = newhost or host
-        _board, rtype = state_of(host)
+        _board, rtype = state_of(host, profile)
         if rtype != "tmpfs":
             raise restore.RestoreError(
                 f"after the pivot the box is still running from {rtype!r}. It "
@@ -219,8 +224,8 @@ def main():
         log("[*] already running from RAM -- skipping the pivot")
 
     log("\n=== step 2: restore stock ===")
-    mtd = restore.check_target(host)
-    plan = restore.plan(mtd)
+    mtd = restore.check_target(host, profile)
+    plan = restore.plan(mtd, profile)
     if args.dry_run:
         log("[dry-run] stopping before the restore write.")
         return 0
@@ -228,7 +233,8 @@ def main():
         if input("[?] erase OpenWrt and write stock? [type RESTORE] ").strip() \
                 != "RESTORE":
             raise restore.RestoreError("declined")
-    restore.do_restore(host, payload, restore.img_volumes(payload), plan)
+    restore.do_restore(host, payload, restore.img_volumes(payload, profile), plan,
+                       profile)
 
     log("\n=== step 3: wait for stock ===")
     import chain
@@ -236,7 +242,7 @@ def main():
     while time.time() < deadline:
         time.sleep(8)
         try:
-            info = chain.init_info("192.168.31.1")
+            info = chain.init_info(profile.stock_host)
         except Exception:                                        # noqa: BLE001
             continue
         log(f"[+] stock is up: hardware={info.get('hardware')} "
@@ -244,7 +250,7 @@ def main():
         if info.get("inited") == 0:
             log("[+] factory defaults -- the setup wizard is waiting")
         return 0
-    log("[!] stock did not answer on 192.168.31.1 within 7 minutes. It may "
+    log(f"[!] stock did not answer on {profile.stock_host} within 7 minutes. It may "
         "still be booting; check that this host has an address on that subnet.")
     return 1
 

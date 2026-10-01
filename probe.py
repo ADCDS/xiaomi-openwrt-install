@@ -32,10 +32,10 @@ so the sink is gated until a factory reset.  Reset the unit and re-run if a
 probe goes wrong -- phases 1-4 leave nothing else behind.
 
 Usage:
-    python3 probe.py --host 192.168.31.1
-    python3 probe.py --host 192.168.31.1 --skip-init      # already INITTED
-    python3 probe.py --skip-exploit                       # stager already running
-    python3 probe.py --print-stager                       # show the payload, exit
+    python3 probe.py --device rd03v2 --host 192.168.31.1
+    python3 probe.py --device rd03v2 --host 192.168.31.1 --skip-init
+    python3 probe.py --device rd03v2 --skip-exploit       # stager already running
+    python3 probe.py --device rd03v2 --print-stager       # show payload, exit
 """
 
 import argparse
@@ -50,7 +50,7 @@ import time
 
 import chain
 import channel
-import install
+import devices
 import ubiparse
 from chain import ChainError, log
 
@@ -258,8 +258,10 @@ def _await_file(sink, want_name, size):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Read-only fact-finding run on a stock Xiaomi AX3000T (RD03v2).")
-    ap.add_argument("--host", default="192.168.31.1")
+        description="Read-only fact-finding run on a supported stock Xiaomi router.")
+    devices.add_device_argument(ap)
+    ap.add_argument("--host", default=None,
+                    help="stock address (default: selected profile's address)")
     ap.add_argument("--attacker", default=None,
                     help="operator IP the device calls back to (auto-detected)")
     ap.add_argument("--serve-port", type=int, default=8000)
@@ -281,6 +283,8 @@ def main():
     ap.add_argument("--force", action="store_true",
                     help="continue past a hardware/ROM mismatch")
     args = ap.parse_args()
+    profile = devices.get_profile(args.device)
+    args.host = args.host or profile.stock_host
 
     if args.print_stager:
         # Rendered against an unknown radio config, i.e. the "restore the AP to
@@ -312,15 +316,9 @@ def main():
         result["init_info"] = info
         log(f"[0] hardware={info.get('hardware')} rom={info.get('romversion')} "
             f"inited={info.get('inited')} model={info.get('model')}")
-        hw = str(info.get("hardware", "")).upper()
-        if "RD03" not in hw:
-            log(f"[-] hardware {hw!r} is not an RD03v2. The MT7981 AX3000T is "
-                "different silicon and this would brick it.")
-            if not args.force:
-                return 1
-        if str(info.get("romversion", "")) != "2.0.28":
-            log(f"[!] ROM {info.get('romversion')} is not the tested 2.0.28 -- the "
-                "factory account hash and the mesh key are firmware-scoped")
+        identity_error = devices.stock_identity_error(profile, info)
+        if identity_error:
+            log(f"[-] {identity_error}")
             if not args.force:
                 log("    re-run with --force if you know what you are doing")
                 return 1
@@ -471,7 +469,7 @@ def main():
                    facts.get("nvram_nand", {}).get("output", ""))
     if ft:
         code = ft.group(1).lower().removeprefix("0x").zfill(2)
-        part = install.FLASH_TYPE.get(code)
+        part = profile.flash_types.get(code)
         result["flash_type"] = code
         if part:
             nand_hits.insert(0, {"part": part, "id": f"dev 0x{code}",

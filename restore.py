@@ -52,37 +52,21 @@ import subprocess
 import sys
 import time
 
+import devices
 import ubiparse
 
-# Published by the port's README, from Xiaomi's own CDN.
-KNOWN_IMAGES = {
-    "3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f":
-        "miwifi_rd03v2 2.0.28 (newest, version code 131100)",
-    "be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3":
-        "miwifi_rd03v2 2.0.12 (version code 131084)",
-}
-
 HDR1_MAGIC = b"HDR1"
-PAYLOAD_OFF = 0x2F4
-PEB = 131072
-
-# Absolute flash offsets, from the stock partition table and OpenWrt's DTS.
-STOCK_SLOT0 = (0x0A80000, 0x1E00000)          # start, length -- 240 PEBs
-OWRT_UBI_KERNEL = (0x0A80000, 0x2400000)      # mtd named ubi_kernel
-OWRT_ROOTFS = (0x2E80000, 0x5180000)          # mtd named rootfs
-
-BOARD = "xiaomi,mi-router-ax3000t-v2"
 
 
 class RestoreError(Exception):
     pass
 
 
-def carve(path):
+def carve(path, profile):
     """HDR1 -> the raw UBI payload, checked rather than assumed."""
     d = open(path, "rb").read()
     digest = hashlib.sha256(d).hexdigest()
-    known = KNOWN_IMAGES.get(digest)
+    known = profile.stock_images.get(digest)
     print(f"[*] {os.path.basename(path)}  {len(d)} B")
     print(f"    sha256 {digest}")
     print(f"    {known if known else '*** NOT a published image hash ***'}")
@@ -91,18 +75,18 @@ def carve(path):
     total = struct.unpack_from("<I", d, 4)[0]
     if total > len(d):
         raise RestoreError(f"HDR1 says {total} B but the file is {len(d)} B")
-    payload = d[PAYLOAD_OFF:total]
-    if len(payload) % PEB:
+    payload = d[profile.payload_offset:total]
+    if len(payload) % profile.peb_size:
         raise RestoreError(f"payload {len(payload)} B is not a whole number of "
-                           f"{PEB}-byte blocks")
-    print(f"    payload {len(payload)} B = {len(payload)//PEB} PEBs, "
+                           f"{profile.peb_size}-byte blocks")
+    print(f"    payload {len(payload)} B = {len(payload)//profile.peb_size} PEBs, "
           f"signature trailer {len(d)-total} B")
     return payload, digest, known
 
 
-def inspect(payload):
+def inspect(payload, profile):
     """Confirm the payload really is a stock system before offering to write it."""
-    img = ubiparse.UbiImage(payload, peb_size=PEB)
+    img = ubiparse.UbiImage(payload, peb_size=profile.peb_size)
     if len(img.image_seqs) > 1:
         raise RestoreError("payload spans more than one UBI -- refusing")
     names = {v.name: v for v in img.volumes.values() if v.lebs}
@@ -117,11 +101,11 @@ def inspect(payload):
         if head != magic:
             raise RestoreError(f"{want} does not start with {what} ({head.hex()})")
     need = len(payload)
-    if need > STOCK_SLOT0[1]:
+    if need > profile.stock_slot0[1]:
         raise RestoreError(f"payload {need} B does not fit stock's slot 0 "
-                           f"({STOCK_SLOT0[1]} B)")
-    print(f"    fits stock slot 0: {need} B of {STOCK_SLOT0[1]} B "
-          f"({STOCK_SLOT0[1]//PEB} PEBs)")
+                           f"({profile.stock_slot0[1]} B)")
+    print(f"    fits stock slot 0: {need} B of {profile.stock_slot0[1]} B "
+          f"({profile.stock_slot0[1]//profile.peb_size} PEBs)")
     return img
 
 
@@ -171,7 +155,7 @@ def mtd_map(host):
     return m
 
 
-def check_target(host):
+def check_target(host, profile):
     """Refuse anything that is not an RD03v2 running OpenWrt *from RAM*.
 
     This has to run from the initramfs, for the same reason the install does:
@@ -185,8 +169,9 @@ def check_target(host):
     -wifi image that step needs no cable either.
     """
     _rc, board = ssh(host, ". /lib/functions.sh 2>/dev/null; board_name")
-    if board.strip() != BOARD:
-        raise RestoreError(f"board_name is {board.strip()!r}, not {BOARD}")
+    if board.strip() != profile.openwrt_board:
+        raise RestoreError(
+            f"board_name is {board.strip()!r}, not {profile.openwrt_board}")
     _rc, rtype = ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
     if rtype.strip() != "tmpfs":
         raise RestoreError(
@@ -196,8 +181,7 @@ def check_target(host):
             "mid-write. Pivot to the initramfs first (docs/no-uart-reflash.md, "
             "using the -wifi image so it stays cable-free), then re-run.")
     mtd = mtd_map(host)
-    for name, (_start, size) in (("ubi_kernel", OWRT_UBI_KERNEL),
-                                 ("rootfs", OWRT_ROOTFS)):
+    for name, (_start, size) in profile.openwrt_partitions.items():
         if name not in mtd:
             raise RestoreError(f"no {name!r} partition -- not the OpenWrt layout")
         if mtd[name]["size"] != size:
@@ -208,18 +192,20 @@ def check_target(host):
     return mtd
 
 
-def plan(mtd):
+def plan(mtd, profile):
     """What gets written and what gets erased, in absolute offsets."""
     k, r = mtd["ubi_kernel"]["index"], mtd["rootfs"]["index"]
     # Everything above stock's slot 0 must look erased to stock: the tail of
     # ubi_kernel (stock's slot 1 head) and the whole of OpenWrt's rootfs
     # (stock's slot 1 tail + all of overlay).
-    tail_off = STOCK_SLOT0[0] + STOCK_SLOT0[1] - OWRT_UBI_KERNEL[0]
-    tail_len = OWRT_UBI_KERNEL[1] - tail_off
+    ubi_kernel = profile.openwrt_partitions["ubi_kernel"]
+    rootfs = profile.openwrt_partitions["rootfs"]
+    tail_off = profile.stock_slot0[0] + profile.stock_slot0[1] - ubi_kernel[0]
+    tail_len = ubi_kernel[1] - tail_off
     return {
         "write": (k, "ubi_kernel"),
-        "erase_tail": (k, tail_off, tail_len // PEB),
-        "erase_rootfs": (r, 0, OWRT_ROOTFS[1] // PEB),
+        "erase_tail": (k, tail_off, tail_len // profile.peb_size),
+        "erase_rootfs": (r, 0, rootfs[1] // profile.peb_size),
     }
 
 
@@ -247,7 +233,8 @@ echo done > /tmp/restore.status
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("image", help="miwifi_rd03v2_*.bin")
+    devices.add_device_argument(ap)
+    ap.add_argument("image", help="official stock firmware image")
     ap.add_argument("--host", default=None,
                     help="the OpenWrt system; prefer fe80::...%%iface")
     ap.add_argument("--discover", metavar="IFACE", default=None)
@@ -255,9 +242,10 @@ def main():
                     help="carve, verify and print the plan; touch nothing")
     ap.add_argument("--yes", action="store_true")
     args = ap.parse_args()
+    profile = devices.get_profile(args.device)
 
-    payload, digest, known = carve(args.image)
-    inspect(payload)
+    payload, digest, known = carve(args.image, profile)
+    inspect(payload, profile)
     if not known:
         print("[!] this image's hash is not one the port publishes. It may be "
               "genuine, but nothing here can vouch for it.")
@@ -277,15 +265,15 @@ def main():
 
     import install
     install.check_is_openwrt_ram(host)      # refuses this host's own gateway
-    mtd = check_target(host)
-    p = plan(mtd)
+    mtd = check_target(host, profile)
+    p = plan(mtd, profile)
 
     print("\n=== plan ===")
     print(f"  write  /dev/mtd{p['write'][0]} ({p['write'][1]}) <- stock UBI, "
-          f"{len(payload)//PEB} PEBs at its start = stock slot 0")
+          f"{len(payload)//profile.peb_size} PEBs at its start = stock slot 0")
     print(f"  erase  /dev/mtd{p['erase_rootfs'][0]} entirely "
           f"({p['erase_rootfs'][2]} blocks) = stock slot 1 tail + all of overlay")
-    print(f"  leave  /dev/mtd{p['erase_tail'][0]} tail (48 blocks at "
+    print(f"  leave  /dev/mtd{p['erase_tail'][0]} tail ({p['erase_tail'][2]} blocks at "
           f"0x{p['erase_tail'][1]:x}) carrying ubiformat's EC headers: no "
           "offset-erase tool exists on this image, and stock never consults "
           "slot 1 while slot 0's counter is 0")
@@ -300,18 +288,18 @@ def main():
         if input("\ntype RESTORE to continue: ").strip() != "RESTORE":
             print("declined")
             return 1
-    do_restore(host, payload, img_volumes(payload), p)
+    do_restore(host, payload, img_volumes(payload, profile), p, profile)
     return 0
 
 
-def img_volumes(payload):
+def img_volumes(payload, profile):
     """{name: md5 of the volume as UBI will present it back}."""
-    img = ubiparse.UbiImage(payload, peb_size=PEB)
+    img = ubiparse.UbiImage(payload, peb_size=profile.peb_size)
     return {v.name: hashlib.md5(img.extract(v.vol_id)).hexdigest()
             for v in img.volumes.values() if v.lebs}
 
 
-def do_restore(host, payload, want_md5, p):
+def do_restore(host, payload, want_md5, p, profile):
     import tempfile
     k, _ = p["write"]
     _kd, tail_off, tail_cnt = p["erase_tail"]
@@ -409,7 +397,7 @@ def do_restore(host, payload, want_md5, p):
     print("[5] rebooting into stock")
     ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
     print("\n[+] restore written and verified. The unit should come back as "
-          "stock 2.0.28 on its own SSID, with the setup wizard.")
+          f"stock {profile.display_name} on its own SSID, with the setup wizard.")
 
 
 def scp(host, local, remote):

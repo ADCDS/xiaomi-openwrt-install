@@ -1,8 +1,18 @@
-# ax3000t-ota-install
+# xiaomi-ota-install
 
-Install OpenWrt on a **Xiaomi AX3000T (RD03v2)** over the air — no serial
-adapter, no soldering, and no LAN cable — and put pristine stock back the same
-way.
+Install OpenWrt over the air on supported Xiaomi routers — no serial adapter,
+no soldering, and no LAN cable — and put pristine stock back the same way.
+
+## Supported devices
+
+| profile | hardware | tested stock | install | return to stock |
+|---|---|---|---|---|
+| `rd03v2` | Xiaomi AX3000T RD03v2 (Qualcomm IPQ5018) | 2.0.28 | Hardware-validated V1 → V2 root, RAM pivot, and NAND install | Xiaomi 2.0.28 hardware-validated; signed 2.0.12 image also recognized |
+
+Only `rd03v2` is enabled. The mesh vulnerabilities exist in firmware shared by
+other Xiaomi models, but that does not establish their flash layout, boot
+flags, OpenWrt image, or restoration procedure. Every additional model needs
+its own reviewed and hardware-tested profile before this tool will accept it.
 
 The port's documented install needs a USB↔UART adapter on the board's pads plus
 a TFTP server over Ethernet, because the bootloader is locked. This drives it
@@ -84,12 +94,12 @@ refuses only images *older* than the version the unit last ran.
 
 ```sh
 # stock -> OpenWrt on NAND, with WiFi and a root password already set
-python3 install.py --host 192.168.31.1 --stage all --discover <iface> \
+python3 install.py --device rd03v2 --host 192.168.31.1 --stage all --discover <iface> \
     --wifi-ssid '<SSID>' --wifi-key '<passphrase>' \
     --wifi-country <CC> --root-password '<password>'
 
 # OpenWrt -> pristine stock 2.0.28
-python3 revert.py miwifi_rd03v2_2.0.28.bin --discover <iface> \
+python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin --discover <iface> \
     --root-password '<the installed system's password>'
 ```
 
@@ -107,6 +117,7 @@ a very common gateway address.
 
 | file | role |
 |---|---|
+| `devices.py` | device-profile registry and the complete RD03v2 identity, release, NAND, partition and restore safety boundary |
 | `install.py` | the installer: pre-flight → pivot into the idle A/B slot → `sysupgrade` from the RAM system, with optional first-boot config |
 | `revert.py` | one command back to stock: pivot into RAM if needed, then restore |
 | `restore.py` | the restore itself, from Xiaomi's own signed image. Runs only from RAM |
@@ -116,9 +127,9 @@ a very common gateway address.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (162 checks, 165 once you have a release artifact, 166 with its matching `.itb`) |
+| `selftest.py` | everything testable without the router (166 checks, 169 once you have a release artifact, 170 with its matching `.itb`) |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
-| `LICENSE` | MIT — covers the code |
+| `LICENSE` | GPL-2.0-only |
 | `NOTICE` | authorised-use, one-way-install and no-warranty terms — **read first** |
 
 `chain.py` re-implements the exploit rather than importing the disclosure
@@ -127,15 +138,15 @@ implementations of the same chain, which is also what makes one a useful check
 on the other.
 
 ```sh
-python3 selftest.py                          # 162 checks, no hardware, no network
+python3 selftest.py                          # 166 checks, no hardware, no network
 
 # three more run against a real release artifact, if you have one:
-python3 release.py --download --wifi --dest images
-RD03V2_IMAGES=images python3 selftest.py     # 165
+python3 release.py --device rd03v2 --download --wifi --dest images
+RD03V2_IMAGES=images python3 selftest.py     # 169
 
 # a fourth check compares the kernel volume against the .itb it wraps, so it
 # needs that file too -- release.py fetches the .ubi and the sysupgrade only:
-RD03V2_IMAGES=images python3 selftest.py     # 166
+RD03V2_IMAGES=images python3 selftest.py     # 170
 ```
 
 ## How the device is laid out
@@ -195,10 +206,10 @@ version table, so the gate is answered by the release rather than a hardcoded
 assumption. It fails closed on anything it cannot identify.
 
 ```sh
-python3 release.py                                # what the latest release ships
-python3 release.py --flash-type be --tag v1.6     # REFUSE: Winbond needs >= v1.7
-python3 release.py --flash-type be --tag v1.7     # PASS
-python3 release.py --download --wifi --dest images
+python3 release.py --device rd03v2                                # latest release
+python3 release.py --device rd03v2 --flash-type be --tag v1.6     # REFUSE
+python3 release.py --device rd03v2 --flash-type be --tag v1.7     # PASS
+python3 release.py --device rd03v2 --download --wifi --dest images
 ```
 
 ## First-boot configuration
@@ -301,3 +312,7 @@ Run only against a device you own.
 - The installer beacon should drop to 2.4 GHz only, for the same reason.
 - The placeholder-shaped arguments in the docs have been bitten once already;
   keep them unmistakable.
+
+## License
+
+GPL-2.0-only. See [`LICENSE`](LICENSE).

@@ -35,25 +35,7 @@ import sys
 import urllib.error
 import urllib.request
 
-REPO = "ADCDS/openwrt-xiaomi-ax3000t-rd03v2"
-PREFIX = "openwrt-qualcommax-ipq50xx-xiaomi_mi-router-ax3000t-v2"
-
-# Images this installer knows how to use, keyed by role.  mkrelease.sh derives
-# the NSS names by inserting "-nss" before the extension.
-KINDS = {
-    "initramfs_itb": "initramfs-uImage.itb",
-    "initramfs_ubi": "initramfs-factory.ubi",
-    "sysupgrade": "squashfs-sysupgrade.bin",
-}
-
-# Fallback only -- see the module docstring.  Keyed by the part names
-# probe.identify_nand() reports.
-NAND_MIN_VERSION = {
-    "ESMT F50D1G41LB": (1, 0),
-    "ESMT F50D1G41LB (raw id)": (1, 0),
-    "Winbond W25N01KW": (1, 7),
-    "Winbond W25N01KW (raw id)": (1, 7),
-}
+import devices
 
 
 class ReleaseError(Exception):
@@ -67,7 +49,7 @@ def _api(path):
     url = f"https://api.github.com/{path}"
     req = urllib.request.Request(url)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "rd03v2-ota-installer")
+    req.add_header("User-Agent", "xiaomi-ota-installer")
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -112,7 +94,8 @@ def parse_version(tag):
 
 
 class Release:
-    def __init__(self, meta):
+    def __init__(self, meta, profile=devices.RD03V2):
+        self.profile = profile
         self.tag = meta.get("tag_name", "?")
         self.published = meta.get("published_at", "?")
         self.body = meta.get("body") or ""
@@ -132,9 +115,9 @@ class Release:
         the initramfs artifacts have a -wifi twin -- there is still exactly
         one sysupgrade image per flavour, built from the radio-silent pass.
         """
-        if kind not in KINDS:
+        if kind not in self.profile.image_kinds:
             raise ReleaseError(f"unknown image kind {kind!r}")
-        base = KINDS[kind]
+        base = self.profile.image_kinds[kind]
         stem, _, ext = base.rpartition(".")
         if flavour == "nss":
             stem += "-nss"
@@ -144,7 +127,7 @@ class Release:
             if not kind.startswith("initramfs"):
                 raise ReleaseError(f"{kind} has no -wifi variant")
             stem += "-wifi"
-        return f"{PREFIX}-{stem}.{ext}"
+        return f"{self.profile.release_prefix}-{stem}.{ext}"
 
     def require(self, kind, flavour="default", wifi=False):
         name = self.name_for(kind, flavour, wifi)
@@ -159,12 +142,12 @@ class Release:
         return f"<Release {self.tag} ({len(self.assets)} assets)>"
 
 
-def latest(repo=REPO):
-    return Release(_api(f"repos/{repo}/releases/latest"))
+def latest(profile=devices.RD03V2):
+    return Release(_api(f"repos/{profile.release_repo}/releases/latest"), profile)
 
 
-def by_tag(tag, repo=REPO):
-    return Release(_api(f"repos/{repo}/releases/tags/{tag}"))
+def by_tag(tag, profile=devices.RD03V2):
+    return Release(_api(f"repos/{profile.release_repo}/releases/tags/{tag}"), profile)
 
 
 # ---- download + verify ------------------------------------------------------
@@ -181,7 +164,7 @@ def download(rel, name, destdir, progress=True):
     if os.path.exists(path) and os.path.getsize(path) == want:
         return path
     req = urllib.request.Request(rel.assets[name]["url"])
-    req.add_header("User-Agent", "rd03v2-ota-installer")
+    req.add_header("User-Agent", "xiaomi-ota-installer")
     tmp = path + ".part"
     got = 0
     with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as fh:
@@ -331,7 +314,7 @@ def check_nand(rel, part, destdir=None, flash_type=None):
                               f"(flash_type 0x{code})")
         return False, f"{rel.tag} does not declare support for {part!r}"
 
-    need = NAND_MIN_VERSION.get(part)
+    need = rel.profile.nand_min_version.get(part)
     if need is None:
         what = part or f"flash_type 0x{normalise_flash_type(flash_type)}"
         return False, (f"{what} is not a part this installer knows about, and "
@@ -353,7 +336,8 @@ def check_nand(rel, part, destdir=None, flash_type=None):
 
 def main(argv):
     import argparse
-    ap = argparse.ArgumentParser(description="Inspect/fetch an RD03v2 OpenWrt release.")
+    ap = argparse.ArgumentParser(description="Inspect/fetch a supported OpenWrt release.")
+    devices.add_device_argument(ap)
     ap.add_argument("--tag", default=None, help="default: the latest release")
     ap.add_argument("--flavour", default="default", choices=("default", "nss"))
     ap.add_argument("--dest", default="images")
@@ -365,13 +349,14 @@ def main(argv):
     ap.add_argument("--wifi", action="store_true",
                     help="select the beaconing initramfs (v1.7+)")
     args = ap.parse_args(argv[1:])
+    profile = devices.get_profile(args.device)
 
-    rel = by_tag(args.tag) if args.tag else latest()
+    rel = by_tag(args.tag, profile) if args.tag else latest(profile)
     print(f"{rel.tag}  published {rel.published}  ({len(rel.assets)} assets)")
     for n in sorted(rel.assets):
         print(f"  {rel.assets[n]['size']:>12} B  {n}")
     print()
-    for kind in KINDS:
+    for kind in profile.image_kinds:
         try:
             print(f"  {kind:<14} -> "
                   f"{rel.require(kind, args.flavour, args.wifi and kind.startswith('initramfs'))}")
