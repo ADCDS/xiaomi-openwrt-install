@@ -131,7 +131,7 @@ a very common gateway address.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (179 checks, 182 once you have a release artifact, 183 with its matching `.itb`) |
+| `selftest.py` | everything testable without the router (179 checks, 182 once you have a release artifact, 186 with its matching `.itb`) |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
 | `LICENSE` | GPL-2.0-only |
 | `NOTICE` | authorised-use, one-way-install and no-warranty terms — **read first** |
@@ -150,7 +150,7 @@ RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 182
 
 # a fourth check compares the kernel volume against the .itb it wraps, so it
 # needs that file too -- release.py fetches the .ubi and the sysupgrade only:
-RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 183
+RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 186
 ```
 
 ## How the device is laid out

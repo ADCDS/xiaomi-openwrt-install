@@ -314,7 +314,7 @@ def expected_volume(ubi_path, itb_path):
 
 
 def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
-          profile):
+          profile, wifi=False):
     log("\n=== stage 2: pivot (writes the idle slot and the boot flags) ===")
     target = facts["target_slot"]
     tidx = facts["mtd"][target]["index"]
@@ -407,9 +407,10 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
         f"{facts['running_slot']}")
 
     confirm("reboot into the RAM initramfs now?", assume_yes)
-    log("[2] Wi-Fi-only: when the stock network disappears, join "
-        f"{profile.installer_wifi_ssid!r} with key "
-        f"{profile.installer_wifi_key!r}")
+    if wifi:
+        log("[2] Wi-Fi-only: when the stock network disappears, join "
+            f"{profile.installer_wifi_ssid!r} with key "
+            f"{profile.installer_wifi_key!r}")
     ch.run("start-stop-daemon -S -b -x /sbin/reboot", retries=0, quiet=True)
     log("[2] rebooting -- stock is still intact in "
         f"{facts['running_slot']}; if the pivot does not come up, the "
@@ -735,13 +736,18 @@ def scp_to(host, local, remote):
     raise Abort(f"scp to {remote} failed: {last}")
 
 
-def wait_and_discover(iface, deadline_s=420):
+def wait_and_discover(iface, deadline_s=420, fallback=None):
     """Find the box again after a reboot. Discovery has to happen *after* the
     pivot, not before it: run early it would answer with whatever is on the
     link at the time, which is the stock system."""
     log(f"[*] waiting for the RAM system to appear on {iface}")
     end = time.time() + deadline_s
     while time.time() < end:
+        if fallback:
+            banner, _error = ssh_banner(fallback, timeout=3)
+            if banner and "dropbear" in banner.lower():
+                log(f"[*] wired OpenWrt system found at {fallback}")
+                return fallback
         try:
             host = discover_linklocal(iface, timeout=10)
             log(f"[*] discovered {host}")
@@ -1063,7 +1069,8 @@ def main(argv=None):
             "for the router on the selected interface")
 
     if args.discover and args.stage == "flash":
-        args.openwrt_host = wait_and_discover(args.discover)
+        fallback = profile.openwrt_host if args.transport == "wired" else None
+        args.openwrt_host = wait_and_discover(args.discover, fallback=fallback)
 
     if args.stage == "flash":
         flash(args.openwrt_host, images, args.yes, profile, cfg_tar)
@@ -1125,12 +1132,13 @@ def main(argv=None):
 
     backup(ch, sink, outdir, facts["mtd"], attacker, args.file_port, profile)
     pivot(ch, http, facts, images, outdir, attacker, args.serve_port, args.yes,
-          profile)
+          profile, wifi)
 
     if args.stage == "all":
         # The pivot has just rebooted the box into RAM; find it again there.
-        host = wait_and_discover(args.discover) if args.discover \
-            else args.openwrt_host
+        fallback = profile.openwrt_host if args.transport == "wired" else None
+        host = wait_and_discover(args.discover, fallback=fallback) \
+            if args.discover else args.openwrt_host
         flash(host, images, args.yes, profile, cfg_tar)
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")

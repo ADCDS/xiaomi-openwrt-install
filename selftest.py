@@ -1092,8 +1092,12 @@ def test_expected_volume():
     if not (ubi and itb):
         return
     blob, md5 = install.expected_volume(ubi[0], itb[0])
-    check("expected volume derived from the real pair", len(blob) == 13967360,
-          str(len(blob)))
+    parsed = ubiparse.UbiImage(open(ubi[0], "rb").read())
+    itb_size = os.path.getsize(itb[0])
+    check("expected volume derived from the real pair",
+          len(blob) % parsed.leb_size() == 0
+          and 0 <= len(blob) - itb_size < parsed.leb_size(),
+          f"volume={len(blob)} image={itb_size} leb={parsed.leb_size()}")
     check("it is the .itb plus 0xff padding",
           blob.startswith(open(itb[0], "rb").read())
           and set(blob[os.path.getsize(itb[0]):]) == {0xFF})
