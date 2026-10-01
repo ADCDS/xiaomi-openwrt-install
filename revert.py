@@ -226,6 +226,9 @@ def main():
             log("\n[dry-run] would restore stock next; stopping.")
             return 0
         host = newhost or host
+        if not args.discover and not install.wait_for_openwrt(host, deadline_s=420):
+            raise restore.RestoreError(
+                f"RAM initramfs did not start answering on {host}")
         _board, rtype = state_of(host, profile)
         if rtype != "tmpfs":
             raise restore.RestoreError(
