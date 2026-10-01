@@ -53,6 +53,7 @@ Usage:
     python3 install.py standard
     python3 install.py nss
     python3 install.py standard --dry-run
+    python3 install.py --verify-only /path/to/resume.json --verify-interface IFACE
 """
 
 import argparse
@@ -835,10 +836,11 @@ def wait_and_discover(iface, deadline_s=420, fallback=None):
     """Find the box again after a reboot. Discovery has to happen *after* the
     pivot, not before it: run early it would answer with whatever is on the
     link at the time, which is the stock system."""
-    log(f"[*] waiting for the RAM system to appear on {iface}")
+    log(f"[*] waiting for an OpenWrt system to appear on {iface}")
     end = time.time() + deadline_s
     while time.time() < end:
-        if fallback:
+        if (fallback and fallback not in default_gateways()
+                and chain.local_interface(fallback) == iface):
             banner, _error = ssh_banner(fallback, timeout=3)
             if banner and "dropbear" in banner.lower():
                 log(f"[*] wired OpenWrt system found at {fallback}")
@@ -886,6 +888,60 @@ def permanent_system_matches(profile, board, rootfs_type, mtd_text):
             and rootfs_type.strip() == "overlay" and partitions_ok)
 
 
+def verify_permanent_system(profile, interface=None, fallback=None, host=None,
+                            deadline_s=600):
+    """Rediscover and prove the permanent system without writing anything."""
+    if not interface and not host:
+        raise Abort("permanent verification needs --verify-interface or an "
+                    "explicit OpenWrt host")
+    where = interface or host
+    log(f"[3] waiting up to {deadline_s}s for permanent OpenWrt on {where}")
+    end = time.time() + deadline_s
+    last = "no OpenWrt peer discovered"
+    while time.time() < end:
+        candidate = host
+        if interface:
+            try:
+                candidate = wait_and_discover(
+                    interface, deadline_s=min(30, max(1, int(end - time.time()))),
+                    fallback=fallback)
+            except Abort as exc:
+                last = str(exc)
+                continue
+        try:
+            check_is_openwrt_ram(candidate)
+        except Abort as exc:
+            last = str(exc)
+            time.sleep(5)
+            continue
+        rc1, board = ssh(
+            candidate, ". /lib/functions.sh 2>/dev/null; board_name",
+            check=False)
+        rc2, rtype = ssh(
+            candidate, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type",
+            check=False)
+        rc3, mtd_text = ssh(candidate, "cat /proc/mtd", check=False)
+        if rc1 == rc2 == rc3 == 0 and permanent_system_matches(
+                profile, board, rtype, mtd_text):
+            log(f"[3] installed board={board.strip()} rootfs_type=overlay")
+            log("[+] OpenWrt is installed on NAND.")
+            return candidate
+        last = (f"board={board.strip()!r} rootfs={rtype.strip()!r}; expected "
+                f"board={profile.openwrt_board!r}, rootfs='overlay', and the "
+                "profile partition sizes")
+        log(f"[3] system is reachable but not the permanent target yet: {last}")
+        time.sleep(10)
+    raise Abort(f"permanent OpenWrt was not verified on {where}: {last}")
+
+
+def verification_command(manifest_path, interface=None):
+    command = ["python3", os.path.realpath(__file__), "--verify-only",
+               os.path.abspath(manifest_path)]
+    if interface:
+        command.extend(("--verify-interface", interface))
+    return shlex.join(command)
+
+
 def build_sysupgrade_launcher(opts):
     return ("#!/bin/sh\n"
             "echo started > /tmp/xiaomi-sysupgrade.status\n"
@@ -899,8 +955,18 @@ def build_sysupgrade_launcher(opts):
             f"exec /sbin/sysupgrade {opts or '-n '}/tmp/fw.bin\n")
 
 
-def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None):
+def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
+          manifest_path=None, transport="wired", verify_interface=None,
+          permanent_wifi_ssid=None, verify_fallback=None,
+          verify_transport=None):
     log("\n=== stage 3: flash (sysupgrade from the RAM system) ===")
+    if verify_transport == "wifi" and not permanent_wifi_ssid:
+        raise Abort("Wi-Fi final verification needs a configured permanent "
+                    "SSID; refusing to launch sysupgrade because the installed "
+                    "system would be unreachable")
+    if not verify_interface:
+        raise Abort("final verification needs --verify-interface before "
+                    "sysupgrade can be launched")
     if not wait_for_openwrt(host):
         raise Abort(
             f"nothing answering ssh on {host}. If the release initramfs does "
@@ -934,6 +1000,15 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None):
     ft, part, why = require_permanent_nand_support(
         raw_ft, rel, profile, image_cache)
     log(f"[3] permanent-image NAND gate: PASS -- {why}")
+
+    if verify_transport == "wifi":
+        log(f"[3] after the RAM installer network disappears, join permanent "
+            f"SSID {permanent_wifi_ssid!r}; final verification will wait on "
+            f"{verify_interface} (the password is not printed)")
+    elif transport == "wifi":
+        log(f"[3] after the RAM installer network disappears, connect the "
+            f"router to {verify_interface}; final verification requires that "
+            "wired interface")
 
     img = images["sysupgrade"]
     confirm(f"write {img['name']} to NAND? This is the point of no return.",
@@ -990,31 +1065,34 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None):
             "sysupgrade start marker was not observed. Do not power-cycle; "
             "inspect the RAM system before retrying.")
     log("[3] durable sysupgrade start marker observed")
-    rc, ack = ssh(host, "touch /tmp/xiaomi-sysupgrade.ack; echo ack-sent",
+    if not manifest_path:
+        raise Abort("no resume manifest is available to record that sysupgrade "
+                    "was launched; the device has not been acknowledged and "
+                    "will time out without writing")
+    update_resume_phase(manifest_path, "flash-started")
+    log(f"[3] resume phase -> flash-started ({manifest_path})")
+    rc, ack = ssh(host, "touch /tmp/xiaomi-sysupgrade.ack && echo ack-sent",
                   timeout=10, check=False)
     if rc != 0 or "ack-sent" not in ack:
-        raise Abort("could not acknowledge sysupgrade start; it will time out "
-                    "without writing")
+        raise Abort("could not acknowledge sysupgrade start. Its outcome is "
+                    "uncertain; do not launch sysupgrade again. Use the "
+                    "verification-only continuation after the router settles: "
+                    f"{verification_command(manifest_path, verify_interface)}")
     log("[3] do not touch the power")
     log("[3] it reformats both UBIs, writes kernel+rootfs, sets the boot flags "
         "and reboots")
 
     time.sleep(60)
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        if not wait_for_openwrt(host, 30):
-            continue
-        _rc, board2 = ssh(host, ". /lib/functions.sh; board_name", check=False)
-        _rc, rtype2 = ssh(host, ". /lib/upgrade/common.sh; rootfs_type", check=False)
-        _rc, mtd2_text = ssh(host, "cat /proc/mtd", check=False)
-        if permanent_system_matches(profile, board2, rtype2, mtd2_text):
-            log(f"[3] installed board={board2.strip()} rootfs_type=overlay")
-            log("[+] OpenWrt is installed on NAND.")
-            return
-        log(f"[3] system is up but not the permanent target yet: "
-            f"board={board2.strip()!r} rootfs={rtype2.strip()!r}")
-        time.sleep(10)
-    raise Abort("OpenWrt did not return as the expected permanent overlay system")
+    try:
+        verify_permanent_system(
+            profile, interface=verify_interface, fallback=verify_fallback,
+            host=host if not verify_interface else None)
+    except Abort as exc:
+        log("[!] sysupgrade was launched; do not run the flash stage again")
+        log("[!] verification-only continuation:")
+        log("    " + verification_command(manifest_path, verify_interface))
+        raise
+    update_resume_phase(manifest_path, "flash-complete")
 
 
 # ---- driver -----------------------------------------------------------------
@@ -1051,6 +1129,12 @@ def parse_args(argv=None):
                     help="set the installed system's root password")
     ap.add_argument("--configure", action="store_true",
                     help="prompt for installed Wi-Fi and root credentials")
+    ap.add_argument(
+        "--verify-only", metavar="RESUME_JSON",
+        help="verify an already-started install without launching sysupgrade")
+    ap.add_argument(
+        "--verify-interface", metavar="IFACE",
+        help="interface for permanent-system verification (default: install interface)")
     ap.add_argument("--dry-run", action="store_true",
                     help="download and verify the selected release; do not contact the router")
     ap.add_argument("--yes", action="store_true",
@@ -1063,7 +1147,8 @@ def parse_args(argv=None):
                     help=hidden)
     ap.add_argument("--openwrt-host", default=None, help=hidden)
     ap.add_argument("--stage", default="all",
-                    choices=("preflight", "pivot", "flash", "all"), help=hidden)
+                    choices=("preflight", "pivot", "flash", "verify", "all"),
+                    help=hidden)
     ap.add_argument("--flavour", choices=("default", "nss"), default=None,
                     help=hidden)
     ap.add_argument("--no-wifi-initramfs", action="store_true", help=hidden)
@@ -1084,6 +1169,16 @@ def parse_args(argv=None):
     ap.add_argument("--config-tar", default=None, help=hidden)
     args = ap.parse_args(argv)
 
+    if args.verify_only:
+        if args.resume_manifest:
+            ap.error("--verify-only conflicts with --resume-manifest")
+        if args.stage != "all":
+            ap.error("--verify-only conflicts with --stage")
+        if args.dry_run:
+            ap.error("--verify-only contacts the router and conflicts with --dry-run")
+        args.resume_manifest = args.verify_only
+        args.stage = "verify"
+
     legacy_image = {"default": "standard", "nss": "nss"}.get(args.flavour)
     if args.image and legacy_image and args.image != legacy_image:
         ap.error(f"image {args.image!r} conflicts with --flavour {args.flavour!r}")
@@ -1101,6 +1196,9 @@ def detect_transport(interface, sysfs_root="/sys/class/net"):
     """Classify a Linux network interface without sending network traffic."""
     if not interface:
         raise Abort("cannot detect transport without a network interface")
+    device = os.path.join(sysfs_root, interface)
+    if not os.path.isdir(device):
+        raise Abort(f"network interface {interface!r} does not exist")
     wireless = os.path.join(sysfs_root, interface, "wireless")
     return "wifi" if os.path.isdir(wireless) else "wired"
 
@@ -1190,16 +1288,84 @@ def prompt_firstboot(args):
     return args
 
 
+def validate_wifi_config_archive(path, profile, ssid):
+    """Prove that an existing installer archive enables the declared SSID."""
+    import tarfile
+    member_name = f"etc/uci-defaults/{profile.firstboot_script}"
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            member = archive.getmember(member_name)
+            source = archive.extractfile(member)
+            body = source.read().decode("utf-8") if source else ""
+    except (OSError, KeyError, tarfile.TarError, UnicodeDecodeError) as exc:
+        raise Abort(f"cannot validate Wi-Fi config archive {path}: {exc}")
+    required = (
+        "uci -q set wireless.$dev.disabled='0'",
+        "uci -q set wireless.$vif.disabled='0'",
+        f"uci -q set wireless.$vif.ssid={_sq(ssid)}",
+        "uci -q set wireless.$vif.encryption='psk2'",
+        "uci -q set wireless.$vif.key=",
+        "uci -q commit wireless",
+    )
+    if any(marker not in body for marker in required):
+        raise Abort(f"{path} does not contain the installer-generated Wi-Fi "
+                    f"configuration for SSID {ssid!r}")
+
+
+def require_wifi_firstboot(args, profile, cfg_tar=None):
+    """Ensure a Wi-Fi install leaves a reachable permanent system.
+
+    A custom config archive may already contain the credentials, in which case
+    only the SSID is needed so the operator knows which network to join.  For a
+    normal run, collect the complete first-boot configuration before the
+    exploit or any flash write.
+    """
+    if cfg_tar:
+        if not args.wifi_ssid:
+            if not sys.stdin.isatty():
+                raise Abort(
+                    "Wi-Fi installation needs the permanent SSID for reconnect "
+                    "and verification; pass --wifi-ssid with --config-tar")
+            args.wifi_ssid = input(
+                "Permanent OpenWrt SSID contained in the config archive: "
+            ).strip() or None
+        if not args.wifi_ssid:
+            raise Abort("a permanent OpenWrt SSID is required for Wi-Fi installation")
+        validate_wifi_ssid(args.wifi_ssid)
+        validate_wifi_config_archive(cfg_tar, profile, args.wifi_ssid)
+        return
+
+    missing = not args.wifi_ssid or args.wifi_key is None or not args.wifi_country
+    if missing and not sys.stdin.isatty():
+        raise Abort(
+            "Wi-Fi installation must configure reachable permanent Wi-Fi before "
+            "the exploit runs; use --configure, or pass --wifi-ssid, --wifi-key "
+            "and --wifi-country")
+    if not args.wifi_ssid:
+        print("\nWi-Fi installation requires permanent OpenWrt Wi-Fi for final verification.")
+        args.wifi_ssid = input("OpenWrt Wi-Fi SSID: ").strip() or None
+    if args.wifi_ssid and args.wifi_key is None:
+        args.wifi_key = getpass.getpass("OpenWrt Wi-Fi password: ")
+    if args.wifi_ssid and not args.wifi_country:
+        args.wifi_country = input(
+            "Wi-Fi country code (for example BR): ").strip().upper()
+    validate_firstboot_config(args.wifi_ssid, args.wifi_key, args.wifi_country)
+
+
+def validate_wifi_ssid(ssid):
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
+        raise Abort("Wi-Fi SSID must not contain control characters")
+    if not 1 <= len(ssid.encode("utf-8")) <= 32:
+        raise Abort("Wi-Fi SSID must be 1-32 UTF-8 bytes")
+
+
 def validate_firstboot_config(ssid, key, country):
     """Validate values against hostapd/WPA limits before any device change."""
     if not ssid:
         if key or country:
             raise Abort("--wifi-key/--wifi-country require --wifi-ssid")
         return
-    if any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
-        raise Abort("Wi-Fi SSID must not contain control characters")
-    if not 1 <= len(ssid.encode("utf-8")) <= 32:
-        raise Abort("Wi-Fi SSID must be 1-32 UTF-8 bytes")
+    validate_wifi_ssid(ssid)
     try:
         key_bytes = (key or "").encode("ascii")
     except UnicodeEncodeError:
@@ -1231,37 +1397,54 @@ def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
         "flavour": args.flavour,
         "transport": args.transport,
         "interface": args.discover,
+        "verify_interface": args.verify_interface,
         "images_dir": os.path.abspath(args.images),
         "images": {kind: {"name": item["name"], "sha256": item["sha256"]}
                    for kind, item in images.items()},
         "session_token": token,
         "callback_address": getattr(args, "attacker", None),
         "config_tar": os.path.abspath(cfg_tar) if cfg_tar else None,
+        # The SSID is not secret and is needed to explain the post-sysupgrade
+        # reconnect.  The passphrase stays only in the mode-0600 config archive.
+        "wifi_ssid": args.wifi_ssid,
         "root_password_set": bool(args.root_password),
     }
+    _write_resume_data(path, data)
+    return data
+
+
+def _write_resume_data(path, data):
+    """Atomically persist resume state, including the containing directory."""
     tmp = path + ".tmp"
-    with open(tmp, "w") as output:
+    descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        os.fchmod(output.fileno(), 0o600)
         json.dump(data, output, indent=2, sort_keys=True)
         output.write("\n")
-    os.chmod(tmp, 0o600)
+        output.flush()
+        os.fsync(output.fileno())
     os.replace(tmp, path)
-    return data
+    directory = os.path.dirname(os.path.abspath(path))
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def update_resume(path, **changes):
     data = load_resume_manifest(path)
     data.update(changes)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as output:
-        json.dump(data, output, indent=2, sort_keys=True)
-        output.write("\n")
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    _write_resume_data(path, data)
     return data
 
 
 def update_resume_phase(path, phase):
     return update_resume(path, phase=phase)
+
+
+def update_resume_fields(path, **fields):
+    return update_resume(path, **fields)
 
 
 def verify_resume_selection(resume, args, profile, rel, images):
@@ -1287,6 +1470,8 @@ def main(argv=None):
     os.umask(0o077)
     args = parse_args(argv)
     requested_attacker = args.attacker
+    if args.resume_manifest:
+        args.resume_manifest = os.path.abspath(args.resume_manifest)
     resume = load_resume_manifest(args.resume_manifest) if args.resume_manifest else None
     if resume:
         args.device = resume["profile"]
@@ -1304,22 +1489,22 @@ def main(argv=None):
             raise Abort("--attacker does not match the callback address recorded "
                         "in resume.json")
         args.attacker = recorded_attacker or requested_attacker
+        args.verify_interface = (args.verify_interface
+                                 or resume.get("verify_interface"))
+        args.wifi_ssid = resume.get("wifi_ssid") or args.wifi_ssid
         args.configure = False
-    if args.configure and not args.dry_run:
-        prompt_firstboot(args)
     profile = devices.get_profile(args.device)
     args.host = args.host or profile.stock_host
     args.openwrt_host = args.openwrt_host or profile.openwrt_host
 
     cfg_tar = args.config_tar
-    validate_firstboot_config(args.wifi_ssid, args.wifi_key, args.wifi_country)
     outdir = os.path.abspath(
         args.outdir or (os.path.dirname(os.path.abspath(args.resume_manifest))
                         if args.resume_manifest else None)
         or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "a" if resume else "w"))
     log(f"[*] output -> {outdir}/")
 
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
@@ -1338,18 +1523,71 @@ def main(argv=None):
     if args.stage == "all" and not args.dry_run and not args.discover:
         raise Abort("cannot determine the router-facing interface; pass "
                     "--interface IFACE")
+    args.verify_interface = args.verify_interface or args.discover
     via = f" via {args.discover}" if args.discover else ""
     log(f"[*] transport: {args.transport}{via}")
 
-    if (resume and resume.get("root_password_set") and args.stage == "flash"
+    if (resume and resume.get("root_password_set")
+            and args.stage in ("flash", "verify", "all")
             and not args.root_password):
         if not sys.stdin.isatty():
-            raise Abort("resumed flash needs the configured root password for "
-                        "post-install verification; rerun in a terminal")
+            raise Abort("post-install verification needs the configured root "
+                        "password; rerun in a terminal")
         args.root_password = getpass.getpass(
             "OpenWrt root password used by the original run: ")
     if args.root_password:
         SSH_PASSWORDS.append(args.root_password)
+
+    if args.stage == "verify":
+        if not resume:
+            raise Abort("--verify-only requires the resume.json from the "
+                        "original install")
+        phase = resume.get("phase")
+        if phase not in ("pivot-complete", "flash-started", "flash-complete"):
+            raise Abort(f"resume phase {phase!r} has not reached the RAM pivot")
+        if args.verify_interface != resume.get("verify_interface"):
+            resume = update_resume_fields(
+                args.resume_manifest, verify_interface=args.verify_interface)
+        verify_transport = (detect_transport(args.verify_interface)
+                            if args.verify_interface else None)
+        if verify_transport == "wifi" and args.wifi_ssid:
+            log(f"[*] join permanent SSID {args.wifi_ssid!r} on "
+                f"{args.verify_interface}; verification will wait without "
+                "printing its password")
+        if phase == "pivot-complete":
+            log("[!] this older/incomplete manifest does not prove sysupgrade "
+                "was launched; verification-only will inspect the router and "
+                "will not start a write")
+        fallback = (profile.openwrt_host
+                    if verify_transport == "wired" else None)
+        verify_permanent_system(
+            profile, interface=args.verify_interface, fallback=fallback,
+            host=args.openwrt_host if not args.verify_interface else None)
+        update_resume_phase(args.resume_manifest, "flash-complete")
+        return 0
+
+    if resume and resume.get("phase") == "flash-started":
+        raise Abort(
+            "sysupgrade was already launched; do not run the flash stage again. "
+            "Use the read-only continuation: "
+            f"{verification_command(args.resume_manifest, args.verify_interface)}")
+    if resume and resume.get("phase") == "flash-complete":
+        raise Abort(
+            "this install is already recorded as complete. To verify it again, "
+            f"run: {verification_command(args.resume_manifest, args.verify_interface)}")
+
+    if args.configure and not args.dry_run:
+        prompt_firstboot(args)
+    verification_uses_wifi = (not args.dry_run
+                              and args.verify_interface is not None
+                              and detect_transport(args.verify_interface) == "wifi")
+    if verification_uses_wifi and not args.dry_run:
+        require_wifi_firstboot(args, profile, cfg_tar)
+    elif cfg_tar and args.wifi_ssid:
+        validate_wifi_ssid(args.wifi_ssid)
+    else:
+        validate_firstboot_config(args.wifi_ssid, args.wifi_key,
+                                  args.wifi_country)
     if not cfg_tar and (args.wifi_ssid or args.root_password):
         cfg_tar = build_config_tar(
             f"{outdir}/firstboot.tar.gz", args.wifi_ssid or "", args.wifi_key or "",
@@ -1360,6 +1598,14 @@ def main(argv=None):
             f"country={args.wifi_country or 'unset'} "
             f"root password={'set' if args.root_password else 'unset'} "
             f"-> {cfg_tar}")
+    if resume:
+        resume = update_resume_fields(
+            args.resume_manifest,
+            verify_interface=args.verify_interface,
+            config_tar=os.path.abspath(cfg_tar) if cfg_tar else None,
+            wifi_ssid=args.wifi_ssid,
+            root_password_set=(resume.get("root_password_set")
+                               or bool(args.root_password)))
 
     # The release first: no point touching a device for an image that cannot
     # drive its flash. The simple interface is pinned to a tested release, but
@@ -1378,14 +1624,12 @@ def main(argv=None):
                 raise online_error
     log(f"[*] selected {args.image} image from release {rel.tag} ({rel.published})")
     kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
-    # The beaconing initramfs is what makes stage 3 cable-free, so it is the
-    # default. It only exists from v1.7; fall back rather than fail, and say so,
-    # because the consequence (needing a cable later) is the user's to plan for.
+    # A Wi-Fi transport requires a beaconing initramfs; a radio-silent fallback
+    # would strand the run immediately after the pivot.
     wifi = args.transport == "wifi"
     if wifi and "-wifi" not in " ".join(rel.assets):
-        log(f"[!] {rel.tag} ships no -wifi initramfs; using the radio-silent one. "
-            "The RAM system will not beacon, so stage 3 needs a LAN cable.")
-        wifi = False
+        raise Abort(f"{rel.tag} ships no Wi-Fi initramfs; use a release with a "
+                    "beaconing RAM image or restart over Ethernet")
     log(f"[*] initramfs: {'beaconing (-wifi)' if wifi else 'radio-silent'}")
     images = release.get_images(rel, args.images, args.flavour, kinds, wifi=wifi)
 
@@ -1457,9 +1701,13 @@ def main(argv=None):
         args.openwrt_host = wait_and_discover(args.discover, fallback=fallback)
 
     if args.stage == "flash":
+        verify_transport = (detect_transport(args.verify_interface)
+                            if args.verify_interface else None)
+        verify_fallback = (profile.openwrt_host
+                           if verify_transport == "wired" else None)
         flash(args.openwrt_host, rel, images, args.yes, profile, args.images,
-              cfg_tar)
-        update_resume_phase(manifest_path, "flash-complete")
+              cfg_tar, manifest_path, args.transport, args.verify_interface,
+              args.wifi_ssid, verify_fallback, verify_transport)
         return 0
 
     if not attacker:
@@ -1538,8 +1786,13 @@ def main(argv=None):
         fallback = profile.openwrt_host if args.transport == "wired" else None
         host = wait_and_discover(args.discover, fallback=fallback) \
             if args.discover else args.openwrt_host
-        flash(host, rel, images, args.yes, profile, args.images, cfg_tar)
-        update_resume_phase(manifest_path, "flash-complete")
+        verify_transport = (detect_transport(args.verify_interface)
+                            if args.verify_interface else None)
+        verify_fallback = (profile.openwrt_host
+                           if verify_transport == "wired" else None)
+        flash(host, rel, images, args.yes, profile, args.images, cfg_tar,
+              manifest_path, args.transport, args.verify_interface,
+              args.wifi_ssid, verify_fallback, verify_transport)
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")
         command = ["python3", os.path.realpath(__file__), args.image,

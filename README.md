@@ -56,13 +56,30 @@ If route-based interface detection fails, append `--interface INTERFACE_NAME`.
 
 During a Wi-Fi install, the router temporarily reboots into a RAM installer
 network. `install.py` prints its SSID and password before the reboot and waits
-while you join it. Those credentials are fixed and public, and root has no
-password in the temporary RAM system. Keep the link isolated until the
-permanent system has booted.
+while you join it. By default, final verification uses that same Wi-Fi
+interface, so before doing anything to the router the installer requires the
+SSID, passphrase, and country code for the permanent system. An interactive run
+prompts for missing values; automation must pass `--wifi-ssid`, `--wifi-key`,
+and `--wifi-country`. After `sysupgrade` makes the temporary network disappear,
+join that permanent SSID. The installer never prints its passphrase.
 
-Without configuration arguments, the installed system uses OpenWrt defaults:
-Wi-Fi is disabled and the root password is unset. Configure both interactively
-during installation with:
+To keep permanent Wi-Fi disabled, select an Ethernet interface for the final
+check and connect it when the installer asks:
+
+```sh
+python3 install.py standard --transport wifi --interface WIFI_INTERFACE \
+    --verify-interface ETHERNET_INTERFACE
+```
+
+Both paths rediscover the router and verify the board, persistent overlay, and
+partition sizes.
+
+The temporary credentials are fixed and public, and root has no password in
+the RAM system. Keep the link isolated until the permanent system has booted.
+
+When final verification is over Ethernet, omitting configuration arguments
+leaves OpenWrt Wi-Fi disabled and the root password unset. Configure both
+interactively during installation with:
 
 ```sh
 python3 install.py standard --configure
@@ -78,6 +95,15 @@ python3 install.py standard --dry-run
 Use `--release TAG` to select a particular release, or `--release latest` to
 follow the release repository's current latest tag instead of the profile's
 tested default.
+
+If the connection is lost after `sysupgrade` starts, do not repeat the flash
+stage. Use the private manifest printed by the original run to perform only
+the final checks, optionally over a different interface:
+
+```sh
+python3 install.py --verify-only /path/to/resume.json \
+    --verify-interface INTERFACE_NAME
+```
 
 ## Return to stock
 

@@ -125,7 +125,12 @@ a very common gateway address.
 The beaconing RAM image uses fixed public Wi-Fi credentials and has a
 passwordless root account. Keep that link isolated. During a Wi-Fi install or
 revert, the driver prints the temporary SSID and key before the pivot and waits
-while the operator reconnects.
+while the operator reconnects. An install over Wi-Fi also requires permanent
+Wi-Fi settings before the exploit runs when final verification uses Wi-Fi.
+Before `sysupgrade`, the driver prints the permanent SSID without its
+passphrase; after the RAM network disappears, join that SSID so final
+verification can rediscover the installed system. To leave permanent Wi-Fi
+disabled, pass a wired `--verify-interface` and connect that link when asked.
 
 ## What is here
 
@@ -169,10 +174,29 @@ XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
 
 Each run writes a mode-`0600` `resume.json` inside its mode-`0700` output
 directory. It records the device profile, release, flavor, transport, exact
-image hashes, configuration archive, callback address, and callback token. When
-a manual stage is needed, use the continuation command printed by `install.py`;
-the flash stage refuses selection drift. `attach.py` likewise requires the
-bind address and token from this manifest.
+image hashes, configuration archive, callback address, permanent SSID (never
+its passphrase), and callback token. When a manual stage is needed, use the
+continuation command printed by `install.py`; the flash stage refuses selection
+drift. `attach.py` likewise requires the bind address and token from this
+manifest.
+
+As soon as the RAM system reports that the detached sysupgrade launcher has
+started, the host atomically records `flash-started` before allowing the write
+to proceed. A disconnect after that point must never launch sysupgrade again.
+Reconnect to the permanent network and run the read-only verifier instead:
+
+```sh
+python3 install.py --verify-only /path/to/resume.json \
+    --verify-interface INTERFACE_NAME
+```
+
+`--verify-interface` may name a different interface from the original install,
+such as an Ethernet adapter after a Wi-Fi interruption. Verification performs
+no write: it rediscovers the router and requires the profile's exact board,
+`rootfs_type=overlay`, and permanent partition sizes before recording
+`flash-complete`. It also accepts an older `pivot-complete` manifest so a run
+whose sysupgrade launch was not recorded can be inspected without risking a
+second flash.
 
 Detached NAND writers use atomic directory locks. A live writer is never
 restarted. An inactive stale lock is preserved for inspection unless the
@@ -253,8 +277,12 @@ actually sits; a hand-written file that gets it wrong leaves the radios down
 with no way in. The script edits whatever the board generated for itself, and
 waits for the radios to register rather than assuming they already have.
 
-Without these arguments the installed system comes up as OpenWrt normally does:
-radios off, no root password, reachable over Ethernet only.
+Without these arguments an Ethernet install comes up as OpenWrt normally does:
+radios off, no root password, reachable over Ethernet only. An install whose
+final verification interface is Wi-Fi refuses to begin until it has a valid
+permanent SSID, WPA2 passphrase, and country code; noninteractive callers must
+supply all three explicitly. Selecting a wired final verification interface
+keeps those settings optional.
 
 ## Reaching the installed system
 
