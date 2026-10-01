@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch and verify a release of the RD03v2 OpenWrt port.
+"""Fetch and verify OpenWrt images for a supported device profile.
 
 Two jobs, and the second one is the important one.
 
@@ -15,10 +15,10 @@ device is registered, `/proc/mtd` is empty, UBI cannot attach, and ath11k
 cannot read caldata out of `0:ART`, so the radios never come up either.  On a
 Wi-Fi-only install that is a device you cannot talk to any more.
 
-The entry landed in commit 4d074a2, one day *after* the v1.6 tag, so **the
-latest published release does not have it**.  Downloading "the latest
-release" and flashing it onto a Winbond unit is precisely the failure this
-module exists to refuse.
+The entry landed in commit 4d074a2, one day *after* the v1.6 tag. Releases at
+or before that boundary can leave a Winbond unit without flash or radios;
+this module exists to refuse such a mismatch regardless of which release is
+current.
 
 The release itself should say which parts it supports rather than having that
 encoded here; if an asset named `nand-support.txt` is present it wins, and
@@ -404,8 +404,8 @@ def check_nand(rel, part, destdir=None, flash_type=None):
         f"{part} needs >= v{need[0]}.{need[1]} and {rel.tag} predates it. "
         "For the Winbond W25N01KW the spinand ID entry landed after v1.6 "
         "(commit 4d074a2); without it the kernel registers no MTD at all and "
-        "the device comes up with no flash and no radios. Build from main, or "
-        "wait for the release that carries it."
+        "the device comes up with no flash and no radios. Select a release "
+        "that carries it or use a validated local build."
     )
 
 

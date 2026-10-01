@@ -1,12 +1,12 @@
 # xiaomi-router-install
 
-Install OpenWrt on a supported Xiaomi router without UART or soldering. The
-current release supports only the **Xiaomi AX3000T RD03v2** running stock
-firmware **2.0.28**.
+Install OpenWrt on a supported Xiaomi router without UART or soldering, or
+return an installed router to an approved stock image.
 
 The installer uses the documented V1 → V2 `cab_meshd` chain to obtain root,
-checks the exact board, NAND and partition layout, downloads the selected
-OpenWrt release, boots its RAM installer, and writes the permanent image.
+checks the exact board, NAND and partition layout, downloads the OpenWrt images
+selected by the device profile, boots the RAM installer, and writes the
+permanent image.
 
 > Read [NOTICE](NOTICE) before continuing. Run this only on a router you own.
 
@@ -19,13 +19,13 @@ sudo apt install sshpass openssl
 ```
 
 Factory-reset the router and leave it at Xiaomi's setup wizard. **Do not finish
-the web wizard.** Connect the computer to a LAN port or to the open factory
-Wi-Fi network (`minet_rd03_*`). Keep the router on stable power.
+the web wizard.** Connect the computer to a LAN port or to the router's open
+factory Wi-Fi network. Keep the router on stable power.
 
-Use an isolated link: a direct Ethernet cable is preferred. If using the open
-factory Wi-Fi, ensure no other client is joined. The temporary root callback
-uses a per-run token and peer checks, while the stock firmware cannot provide
-an authenticated encrypted channel for this exploit stage.
+Use an isolated link. If using factory Wi-Fi, ensure no other client is joined.
+The temporary root callback uses a per-run token and peer checks, while the
+stock firmware cannot provide an authenticated encrypted channel for this
+exploit stage.
 
 Clone this repository:
 
@@ -46,65 +46,99 @@ python3 install.py standard
 python3 install.py nss
 ```
 
-That is the complete installation command. It defaults to the hardware-tested
-[v1.11 release](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/releases/tag/v1.11),
-auto-detects whether the router is connected by Ethernet or Wi-Fi, downloads
-and verifies the matching RAM and permanent images, backs up device-specific
-partitions, and performs the full installation. It asks before each
-irreversible write.
+The device profile supplies the tested default OpenWrt release. The installer
+downloads and verifies the matching RAM and permanent images, detects whether
+the router is connected by Ethernet or Wi-Fi, backs up device-specific
+partitions, and asks before each irreversible write.
 
-Ethernet uses the radio-silent RAM installer. Wi-Fi uses the beaconing RAM
-installer shown below. Override detection with `--transport wired` or
-`--transport wifi`.
+Override connection detection with `--transport wired` or `--transport wifi`.
+If route-based interface detection fails, append `--interface INTERFACE_NAME`.
 
-If interface detection fails, append `--interface <name>`; for example,
-`--interface enx00e04c125990`.
+During a Wi-Fi install, the router temporarily reboots into a RAM installer
+network. `install.py` prints its SSID and password before the reboot and waits
+while you join it. Those credentials are fixed and public, and root has no
+password in the temporary RAM system. Keep the link isolated until the
+permanent system has booted.
 
-For a Wi-Fi-only installation, the router temporarily reboots into:
-
-```text
-SSID: OpenWrt-RD03v2-Installer
-Password: rd03v2install
-```
-
-Join that network when the installer asks you to; the running process waits for
-the router to reappear.
-
-By default, the installed system uses `192.168.1.1`, has Wi-Fi disabled, and has
-no root password. To configure Wi-Fi and a root password interactively during
-the install, run:
+Without configuration arguments, the installed system uses OpenWrt defaults:
+Wi-Fi is disabled and the root password is unset. Configure both interactively
+during installation with:
 
 ```sh
 python3 install.py standard --configure
 ```
 
-To download and fully verify the selected v1.11 image pair without contacting
-the router:
+Download and fully verify the profile's default image set without contacting a
+router:
 
 ```sh
 python3 install.py standard --dry-run
 ```
 
-Use `--release latest` only when you deliberately want a newer release than the
-pinned, tested default.
+Use `--release TAG` to select a particular release, or `--release latest` to
+follow the release repository's current latest tag instead of the profile's
+tested default.
 
-## After installation
+## Return to stock
 
-Connect a cable to a LAN port and open <http://192.168.1.1>, or join the Wi-Fi
-network configured with `--configure`. The first boot can take several minutes.
+Download an official stock image whose SHA-256 is approved by the selected
+device profile. The [technical reference](docs/technical.md#getting-the-images)
+lists the approved images for the enabled profiles.
 
-For interrupted runs, manual stages, stock restoration, flash-layout details,
-and recovery procedures, see the [RD03v2 technical reference](docs/technical.md).
+From an installed OpenWrt system, run:
+
+```sh
+IFACE=enx00e04c125990
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
+    --interface "$IFACE"
+```
+
+`revert.py` verifies the stock image, downloads and verifies the profile's RAM
+image pair, pivots the router into RAM, restores stock, and confirms that the
+setup wizard returns. It infers Ethernet or Wi-Fi from the selected interface.
+During a Wi-Fi revert, join the temporary RAM network when `revert.py` prints
+its SSID and password. The useful overrides are:
+
+```sh
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
+    --transport wired --interface "$IFACE"
+
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
+    --interface "$IFACE" --root-password 'YOUR_OPENWRT_PASSWORD'
+
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
+    --interface "$IFACE" --dry-run
+```
+
+Use `revert.py` for normal restoration. `restore.py` is the lower-level writer
+and refuses to run unless the router is already booted from a RAM initramfs.
+
+## Supporting tools
+
+| Command | Purpose |
+|---|---|
+| `python3 release.py --device rd03v2` | Inspect the latest release and its required assets. |
+| `python3 release.py --device rd03v2 --download --wifi --dest images` | Download and verify a release image set. |
+| `python3 probe.py --device rd03v2` | Collect hardware and flash-layout evidence without raw firmware-partition writes. It initializes or reboots stock as needed, modifies stock control state, and consumes the one-shot trigger. |
+| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reattach to the authenticated callback from an interrupted run. |
+| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE_NAME` | Run the low-level stock writer from an already-booted RAM system. |
+| `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspect a raw UBI dump offline. |
+| `python3 selftest.py` | Run checks that do not require a router. |
+
+See the [technical reference](docs/technical.md) for interrupted runs, manual
+stages, stock-image hashes, flash-layout details, and recovery procedures.
 
 ## Supported device
 
-| Profile | Hardware | Tested stock | Default OpenWrt release |
+| Profile | Hardware | Install source | Return to stock |
 |---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | 2.0.28 | v1.11 |
+| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Stock 2.0.28, hardware-tested | 2.0.28 hardware-tested; 2.0.12 hash-recognized but not hardware-tested |
 
-Other Xiaomi models may contain the same vulnerabilities, but their flash and
-boot layouts are not interchangeable. The installer rejects every model that
-does not have a hardware-tested profile.
+The exact tested stock ROMs, release source, NAND support, layouts, and accepted
+stock-image hashes live in [`devices.py`](devices.py). Other Xiaomi models may
+contain the same vulnerabilities, but their flash and boot layouts are not
+interchangeable. The installer rejects every model without a reviewed and
+hardware-tested profile.
 
 Technical details and the vulnerability disclosure are in
 [`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure).

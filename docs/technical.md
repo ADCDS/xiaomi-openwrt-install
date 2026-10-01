@@ -1,4 +1,4 @@
-# `xiaomi-router-install` RD03v2 technical reference
+# `xiaomi-router-install` technical reference
 
 This document preserves the implementation details, recovery commands, flash
 layout, and advanced controls. Start with the concise [README](../README.md)
@@ -9,9 +9,9 @@ adapter or soldering — and put pristine stock back the same way.
 
 ## Supported devices
 
-| profile | hardware | tested stock | install | return to stock |
-|---|---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2 (Qualcomm IPQ5018) | 2.0.28 | Hardware-validated V1 → V2 root, RAM pivot, and NAND install | Xiaomi 2.0.28 hardware-validated; signed 2.0.12 image also recognized |
+| profile | hardware | implementation status |
+|---|---|---|
+| `rd03v2` | Xiaomi AX3000T RD03v2 (Qualcomm IPQ5018) | V1 → V2 root, RAM pivot, NAND install, and restore; see the README and approved-image table for validation status |
 
 Only `rd03v2` is enabled. The mesh vulnerabilities exist in firmware shared by
 other Xiaomi models, but that does not establish their flash layout, boot
@@ -23,20 +23,15 @@ a TFTP server over Ethernet, because the bootloader is locked. This drives it
 instead through a pre-auth root RCE in the stock firmware's mesh daemon, pivots
 into the OpenWrt RAM initramfs, and runs the sanctioned `sysupgrade` from there.
 
-> ### Published 2026-09-28
->
-> `chain.py` is a working exploit for a vulnerability that is **unpatched** as of
-> this date. This repository is the owner-facing half of
-> [`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure):
-> the stock firmware offers no supported path off itself, so getting OpenWrt onto
-> the device *is* the exploit chain, and the installer and the exploit cannot be
-> separated. The advisory, the PoC and the timeline are there.
->
-> Read [`NOTICE`](../NOTICE) before running anything, and note that this install is
-> effectively one-way — see [Going back to stock](#going-back-to-stock).
+`chain.py` implements the exploit documented in
+[`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure).
+The advisory contains the PoC and disclosure timeline. Read
+[`NOTICE`](../NOTICE) before running anything, and understand the recovery path
+in [Going back to stock](#going-back-to-stock).
 
-Verified end to end on hardware: factory unit → configured OpenWrt on NAND, and
-back to factory 2.0.28, repeatedly, in both directions.
+Verified end to end on hardware: factory state → configured OpenWrt on NAND,
+and back to the stock image marked hardware-tested below, repeatedly, in both
+directions.
 
 ## Prerequisites
 
@@ -51,18 +46,20 @@ sudo apt install sshpass openssl        # or your distro's equivalent
 like a wrong password rather than a missing package. `openssl` is used to hash
 the root password. `ping6`, `ip`, `ssh`, `scp` and `tar` are assumed present.
 
-**The laptop needs an address on the router's subnet.** Stock serves DHCP on
-`192.168.31.0/24`; the OpenWrt RAM system is reached by IPv6 link-local, so it
-does not care. Either:
+**The laptop needs an address on the router's stock setup network.** Stock
+serves DHCP there; the OpenWrt RAM system is reached by IPv6 link-local, so its
+IPv4 subnet does not matter. Either:
 
 ```sh
-# over Wi-Fi: join the factory SSID (open, named minet_rd03_* or similar)
-nmcli dev wifi connect '<factory SSID>'
+# over Wi-Fi: join the router's open factory SSID
+FACTORY_SSID='YOUR_FACTORY_SSID'
+nmcli dev wifi connect "$FACTORY_SSID"
 
 # or over a cable, into any LAN port
-nmcli con add type ethernet ifname <iface> con-name rd03v2 \
+IFACE=enx00e04c125990
+nmcli con add type ethernet ifname "$IFACE" con-name xiaomi-router \
     ipv4.method auto ipv6.method link-local autoconnect no
-nmcli con up rd03v2
+nmcli con up xiaomi-router
 ```
 
 Over Wi-Fi the laptop's address gets baked into the exploit payload, so it
@@ -81,58 +78,68 @@ to revert:
 
 | version | download | SHA-256 |
 |---|---|---|
-| **2.0.28** (newest) | [`miwifi_rd03v2_firmware_31bf9_2.0.28.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_31bf9_2.0.28.bin) | `3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f` |
-| 2.0.12 | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
+| 2.0.28 (hardware-tested) | [`miwifi_rd03v2_firmware_31bf9_2.0.28.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_31bf9_2.0.28.bin) | `3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f` |
+| 2.0.12 (recognized) | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
 
-Genuine, Xiaomi-signed, served from Xiaomi's own CDN. `restore.py` and
-`revert.py` refuse any image whose full hash is not approved by the selected
-device profile; `--yes` only skips confirmation prompts.
+These are Xiaomi-signed images served from Xiaomi's CDN. In normal use,
+`restore.py` and `revert.py` refuse any image whose full hash is not approved
+by the selected device profile; `--yes` only skips confirmation prompts. The
+development-only `--expected-image-sha256` override proves that the supplied
+file matches an operator-provided digest. It does not establish vendor
+provenance, device compatibility, or hardware validation.
 
 ```sh
 sha256sum miwifi_rd03v2_firmware_31bf9_2.0.28.bin
 ```
 
-Take 2.0.28 unless you have a reason not to: the bootloader's anti-rollback
-refuses only images *older* than the version the unit last ran.
+Choose the newest profile-approved stock image that is not older than the
+version the unit last ran. The bootloader's anti-rollback rejects older images.
 
 ## Two commands
 
 ```sh
-# stock -> OpenWrt on NAND, with WiFi and a root password already set
-python3 install.py --device rd03v2 --host 192.168.31.1 --stage all --discover <iface> \
-    --wifi-ssid '<SSID>' --wifi-key '<passphrase>' \
-    --wifi-country <CC> --root-password '<password>'
+IFACE=enx00e04c125990
 
-# OpenWrt -> pristine stock 2.0.28
-python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin --discover <iface> \
-    --root-password '<the installed system's password>'
+# stock -> OpenWrt on NAND, with optional first-boot configuration
+python3 install.py standard --interface "$IFACE" --configure
+
+# OpenWrt -> a profile-approved stock image
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
+    --interface "$IFACE" \
+    --root-password 'YOUR_OPENWRT_PASSWORD'
 ```
 
-Both are re-runnable: every step re-checks the state it needs instead of
-assuming the previous run got there. Add `--yes` to skip the prompts at the
-irreversible points, `--dry-run` (revert) to see the plan without touching
-anything.
+`revert.py` rechecks its state and can be rerun after interruption. Once the
+install exploit fires, its V2 trigger is spent until factory reset; continue an
+interrupted install with the exact command and private `resume.json` printed by
+`install.py`. Add `--yes` to skip prompts at irreversible points, or `--dry-run`
+to validate images and show the revert plan without writing.
 
-`<iface>` is the interface facing the router — a USB Ethernet adapter, or your
+`$IFACE` is the interface facing the router — a USB Ethernet adapter, or your
 Wi-Fi interface joined to the installer SSID. Discovery finds the box by its
 IPv6 link-local, which sidesteps the fact that OpenWrt's `192.168.1.1` is also
 a very common gateway address.
+
+The beaconing RAM image uses fixed public Wi-Fi credentials and has a
+passwordless root account. Keep that link isolated. During a Wi-Fi install or
+revert, the driver prints the temporary SSID and key before the pivot and waits
+while the operator reconnects.
 
 ## What is here
 
 | file | role |
 |---|---|
-| `devices.py` | device-profile registry and the complete RD03v2 identity, release, NAND, partition and restore safety boundary |
+| `devices.py` | device-profile registry and each device's identity, release, NAND, partition and restore safety boundary |
 | `install.py` | the installer: pre-flight → pivot into the idle A/B slot → `sysupgrade` from the RAM system, with optional first-boot config |
 | `revert.py` | one command back to stock: pivot into RAM if needed, then restore |
 | `restore.py` | the restore itself, from Xiaomi's own signed image. Runs only from RAM |
-| `chain.py` | stock 2.0.28 → root: wizard completion, V1 admin takeover, the `encryption` plant, the `cap_init` trigger |
+| `chain.py` | supported stock firmware → root: wizard completion, V1 admin takeover, the `encryption` plant, the `cap_init` trigger |
 | `channel.py` | operator side: stager delivery over HTTP, a durable root command channel, a bulk file sink |
 | `release.py` | fetch + sha256-verify a release, and refuse one whose kernel cannot drive this unit's NAND |
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
-| `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
+| `probe.py` | fact-finding run used to establish the layout below; avoids raw firmware-partition writes but changes stock configuration and mesh state |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (204 checks, 207 once you have a release artifact, 211 with its matching `.itb`) |
+| `selftest.py` | checks that run without a router, with additional coverage when matching release artifacts are available |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
 | `LICENSE` | GPL-2.0-only |
 | `NOTICE` | authorised-use, one-way-install and no-warranty terms — **read first** |
@@ -143,15 +150,14 @@ implementations of the same chain, which is also what makes one a useful check
 on the other.
 
 ```sh
-python3 selftest.py                          # 204 checks, no hardware, no network
+python3 selftest.py                          # no hardware or network
 
-# three more run against a real release artifact, if you have one:
-python3 release.py --device rd03v2 --download --wifi --dest images
-RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 207
-
-# a fourth check compares the kernel volume against the .itb it wraps, so it
-# needs that file too -- release.py fetches the .ubi and the sysupgrade only:
-RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 211
+# Add checks against the selected profile's default release artifacts:
+DEFAULT_RELEASE=$(python3 -c \
+    'import devices; print(devices.get_profile("rd03v2").default_release)')
+python3 release.py --device rd03v2 --tag "$DEFAULT_RELEASE" \
+    --download --wifi --dest images
+RD03V2_IMAGES="images/$DEFAULT_RELEASE" python3 selftest.py
 ```
 
 ## Interrupted runs
@@ -249,12 +255,8 @@ radios off, no root password, reachable over Ethernet only.
 
 **The installed system's LAN address is `192.168.1.1`, and so is a great many
 people's own gateway.** If yours is one of them, that address is ambiguous on
-your machine and your existing route almost certainly wins on metric — so you
-will silently talk to your own gateway and draw conclusions about the router
-from it. This is not hypothetical: a reviewer handed only this repo did exactly
-that, found `dropbear` there offering only `publickey`, and concluded the root
-password this tool had just set was broken. It was not; they were logged into
-something else.
+your machine and the existing route may win on metric, causing commands to
+reach the wrong device.
 
 The scripts avoid the question by addressing the box on its IPv6 link-local,
 and refuse outright to talk to this host's default gateway. Do the same by
@@ -262,9 +264,11 @@ hand:
 
 ```sh
 # find it -- this returns only a neighbour that answers as dropbear
-python3 -c "import install; print(install.discover_linklocal('<iface>'))"
+export IFACE=enx00e04c125990
+HOST=$(python3 -c \
+    'import install, os; print(install.discover_linklocal(os.environ["IFACE"]))')
 
-ssh root@fe80::xxxx:xxxx:xxxx:xxxx%<iface>          # password: what you set
+ssh "root@$HOST"                              # password: what you set
 ```
 
 Sanity-check what answered before believing anything it tells you:
@@ -279,11 +283,11 @@ applies to `192.168.1.1` from there, so prefer the link-local either way.
 
 ## Going back to stock
 
-No backup is needed. `miwifi_rd03v2_*_2.0.28.bin` is a 756-byte `HDR1` header,
-a **complete raw UBI image**, and a 272-byte RSA signature — and that UBI holds
-exactly the two volumes stock boots from. Verified against a live unit: both
-byte-identical to what was physically on its stock slot, so **the official
-signed download is the backup**.
+Each approved official stock image contains a 756-byte `HDR1` header, a
+**complete raw UBI image**, and a 272-byte RSA signature. For the image marked
+hardware-tested above, its two boot volumes were verified byte-for-byte against
+a live unit's stock slot, so **the official signed download is the backup** for
+that validated restore path.
 
 The signature is only checked by U-Boot's TFTP recovery path; there is no secure
 boot on the kernel, which is why writing the payload straight in works and needs
@@ -320,12 +324,6 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   the host's own default gateway is refused outright.
 
 Run only against a device you own.
-
-## Not done
-
-- The installer beacon should drop to 2.4 GHz only, for the same reason.
-- The placeholder-shaped arguments in the docs have been bitten once already;
-  keep them unmistakable.
 
 ## License
 

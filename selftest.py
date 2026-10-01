@@ -65,9 +65,9 @@ def test_simple_installer_cli():
     import install
     print("\n== simple installer CLI ==")
     args = install.parse_args([])
-    check("default command selects standard v1.11 full install",
+    check("default command selects the profile's standard tested release",
           args.image == "standard" and args.flavour == "default"
-          and args.tag == "v1.11" and args.stage == "all"
+          and args.tag == devices.RD03V2.default_release and args.stage == "all"
           and args.transport == "auto")
     args = install.parse_args(["nss", "--interface", "enx0", "--dry-run"])
     check("NSS selection maps to the NSS release family",

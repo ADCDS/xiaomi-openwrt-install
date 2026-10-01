@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Xiaomi AX3000T (RD03v2) stock 2.0.28 -> root, as a reusable library.
+"""Obtain a root channel on supported stock Xiaomi firmware.
 
 This is the exploitation half of the OpenWrt installer: everything needed to
 take a factory unit from the setup wizard to a root shell over Wi-Fi, with no
@@ -51,8 +51,8 @@ import urllib.request
 
 # ---- firmware constants -----------------------------------------------------
 
-# The mesh authenticator, literal @0xcabb in /usr/sbin/cab_meshd.  Identical on
-# every RD03v2 of this firmware and present in sibling XiaoQiang mesh models.
+# The mesh authenticator, literal @0xcabb in /usr/sbin/cab_meshd. Identical on
+# every validated unit and present in sibling XiaoQiang mesh models.
 MESH_KEY = b"838d364d8ed3bd085e150211ea6b3715"
 MESH_PORT = 19553
 MESH_VER = 0x1001

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One command: an RD03v2 running OpenWrt -> pristine stock MiWiFi 2.0.28.
+"""Return a supported OpenWrt router to an approved stock image.
 
 `restore.py` does the actual restoring, but it can only run from the RAM
 initramfs -- it erases `rootfs`, which on an installed system is the partition
@@ -22,11 +22,7 @@ Already in RAM? Step 2 is skipped. Interrupted halfway? Re-run it -- every
 step re-checks the state it needs rather than assuming the previous run got
 there.
 
-Usage:
-    python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin --discover enx0 \\
-        --root-password hunter2
-    python3 revert.py --device rd03v2 miwifi_rd03v2_2.0.28.bin \\
-        --host fe80::...%eth0 --dry-run
+Use `python3 revert.py --help` for profile, image, and connection options.
 """
 
 import argparse
@@ -198,8 +194,9 @@ def main():
                     default="auto")
     ap.add_argument("--images", default="images",
                     help="directory holding the initramfs pair")
-    ap.add_argument("--release", default=devices.RD03V2.default_release,
-                    help="release tag used for the cached RAM image")
+    ap.add_argument("--release", default=None,
+                    help="release tag used for the RAM image "
+                         "(default: selected profile's tested release)")
     ap.add_argument("--flavour", choices=("default", "nss"), default="default")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--root-password", default=None,
@@ -212,6 +209,7 @@ def main():
                     help="clear an inactive stale writer lock after inspection")
     args = ap.parse_args()
     profile = devices.get_profile(args.device)
+    args.release = args.release or profile.default_release
     if args.transport == "auto" and args.discover:
         args.transport = install.detect_transport(args.discover)
     elif args.transport == "auto":
@@ -266,6 +264,11 @@ def main():
 
     if rtype != "tmpfs":
         log("\n=== step 1: pivot into the RAM initramfs ===")
+        if args.transport == "wifi":
+            log("[1] when the installed network disappears, join "
+                f"{profile.installer_wifi_ssid!r} with key "
+                f"{profile.installer_wifi_key!r}; this temporary RAM system "
+                "has a passwordless root account, so keep the link isolated")
         if not args.yes and not args.dry_run:
             if input(f"[?] write {os.path.basename(ubi)} to ubi_kernel and "
                      "reboot? [type YES] ").strip() != "YES":

@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Fact-finding run against a stock RD03v2, over Wi-Fi, before anything is written.
+"""Collect install-safety evidence from a supported stock Xiaomi router.
 
 This answers the questions that decide whether an unattended, cable-free
-OpenWrt install is safe on this hardware.  It writes nothing to flash --
-every command below is a read, and the UBI layout is recovered by dumping the
-partition and parsing it here rather than by attaching it on the device.
+OpenWrt install is safe on this hardware. It does not write raw firmware
+partitions, and the UBI layout is recovered by dumping the partition and
+parsing it here rather than by attaching it on the device. Reaching those
+reads is stateful: the probe may initialize and reboot stock, temporarily
+change Wi-Fi settings, and consume the one-shot mesh trigger. Factory-reset
+the router before a later install attempt.
 
   1. Does stock keep a second, idle kernel volume in `ubi_kernel`?
      If yes, the RAM initramfs can be written into the idle one with
@@ -29,13 +32,10 @@ environment.
 
 Getting there costs the one-shot exploit: cap_init persists NETMODE=whc_cap,
 so the sink is gated until a factory reset.  Reset the unit and re-run if a
-probe goes wrong -- phases 1-4 leave nothing else behind.
+probe goes wrong; that reset also clears the initialization, Wi-Fi, and mesh
+state changed while reaching the probe channel.
 
-Usage:
-    python3 probe.py --device rd03v2 --host 192.168.31.1
-    python3 probe.py --device rd03v2 --host 192.168.31.1 --skip-init
-    python3 probe.py --device rd03v2 --skip-exploit       # stager already running
-    python3 probe.py --device rd03v2 --print-stager       # show payload, exit
+Use `python3 probe.py --help` for profile and connection options.
 """
 
 import argparse
@@ -57,7 +57,9 @@ from chain import ChainError, log
 
 # ---- what we want off the device -------------------------------------------
 
-# (key, description, command).  Read-only, every one of them.
+# (key, description, command). These data-collection commands are read-only;
+# the exploit setup that reaches them changes stock control state as described
+# in the module documentation.
 FACTS = [
     ("uname",       "kernel",                "uname -a"),
     ("version",     "/proc/version",         "cat /proc/version"),
@@ -274,7 +276,7 @@ def write_session_manifest(outdir, bind, peer, serve_port, shell_port,
 def main():
     os.umask(0o077)
     ap = argparse.ArgumentParser(
-        description="Read-only fact-finding run on a supported stock Xiaomi router.")
+        description="Collect install-safety evidence from supported stock firmware.")
     devices.add_device_argument(ap)
     ap.add_argument("--host", default=None,
                     help="stock address (default: selected profile's address)")
@@ -559,7 +561,8 @@ def main():
     log("")
     log(f"  full report: {outdir}/report.md")
     log("  the one-shot is spent: factory-reset the unit to re-arm cap_init.")
-    log("  nothing was written to flash by this run.")
+    log("  no raw firmware partition was written; stock configuration and "
+        "mesh state were changed.")
 
     if not args.no_hold:
         hold(ch, outdir)
@@ -581,7 +584,7 @@ def hold(ch, outdir):
     with open(f"{outdir}/adhoc.log", "a") as fh:
         while True:
             try:
-                cmd = input("rd03v2# ").strip()
+                cmd = input("router# ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 break
@@ -603,13 +606,14 @@ def hold(ch, outdir):
 
 def write_report(outdir, result, facts, ubi_report):
     lines = [
-        f"# RD03v2 probe -- {result['when']}",
+        f"# Router probe -- {result['when']}",
         "",
         f"- target `{result['host']}`, operator `{result['attacker']}`",
         f"- init_info: `{json.dumps(result.get('init_info', {}))}`",
         f"- root callback: `{result.get('callback')}`",
         "",
-        "Read-only run: no flash writes, UBI parsed from a dump rather than attached.",
+        "No raw firmware-partition writes; stock configuration and mesh state changed. "
+        "UBI was parsed from a dump rather than attached.",
         "",
         "## NAND",
         "",

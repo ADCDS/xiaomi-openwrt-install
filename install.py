@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Install OpenWrt on a stock Xiaomi AX3000T (RD03v2), over Wi-Fi, no UART.
+"""Install a profile-selected OpenWrt image on supported Xiaomi hardware.
 
 The route, and why it is this one
 --------------------------------
-The probe settled the layout question.  Stock partitions the NAND as a real
+For the enabled profile, the probe established that stock partitions NAND as a real
 A/B pair -- `rootfs` and `rootfs_1`, 30 MiB each, each a complete UBI holding
 a `kernel` volume and a `ubi_rootfs` volume -- with a third 57.5 MiB `overlay`
 UBI for data.  `bootargs` carries `ubi.mtd=<slot>` and `nvram
@@ -76,7 +76,6 @@ import release
 import ubiparse
 from chain import ChainError, log
 
-DEFAULT_RELEASE = devices.RD03V2.default_release
 IMAGE_FLAVOURS = {"standard": "default", "nss": "nss"}
 
 # Written to /tmp by the operator and run detached: a NAND write must not die
@@ -1031,8 +1030,9 @@ def parse_args(argv=None):
         "image", nargs="?", choices=tuple(IMAGE_FLAVOURS),
         help="image to install (default: standard)")
     ap.add_argument(
-        "--release", "--tag", dest="tag", default=DEFAULT_RELEASE,
-        help=f"OpenWrt release tag (default: {DEFAULT_RELEASE}; use 'latest' to follow latest)")
+        "--release", "--tag", dest="tag", default=None,
+        help="OpenWrt release tag (default: selected profile's tested release; "
+             "use 'latest' to follow latest)")
     ap.add_argument(
         "--interface", "--discover", dest="discover", metavar="IFACE",
         help="router-facing network interface (normally detected automatically)")
@@ -1090,6 +1090,7 @@ def parse_args(argv=None):
         ap.error(f"image {args.image!r} conflicts with --flavour {args.flavour!r}")
     args.image = args.image or legacy_image or "standard"
     args.flavour = IMAGE_FLAVOURS[args.image]
+    args.tag = args.tag or devices.get_profile(args.device).default_release
     if args.no_wifi_initramfs:
         if args.transport == "wifi":
             ap.error("--transport wifi conflicts with --no-wifi-initramfs")

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""Put stock MiWiFi back on an RD03v2 running OpenWrt -- over the air, no cable.
+"""Restore a profile-approved stock image from an OpenWrt RAM system.
 
-The insight this rests on is that Xiaomi's own firmware image is already the
-artifact you need.  `miwifi_rd03v2_*_2.0.28.bin` is a 756-byte `HDR1` header,
-then a **complete raw UBI image**, then a 272-byte RSA signature.  That UBI
-holds exactly the two volumes stock boots from:
+For the enabled profile, Xiaomi's own firmware image is already the artifact
+needed for restoration: a 756-byte `HDR1` header, then a **complete raw UBI
+image**, then a 272-byte RSA signature. That UBI holds exactly the two volumes
+stock boots from:
 
     kernel      dynamic   29 LEBs   3682304 B   FIT (d00dfeed)
     ubi_rootfs  dynamic  149 LEBs  18919424 B   squashfs (hsqs)
 
-Verified against a live unit: both volumes are byte-identical to what was
-physically on its stock slot.  So no backup is needed to go back -- the
-official download *is* the backup, and it is signed and hash-published.
+For the profile's stock image marked hardware-tested, both volumes are
+byte-identical to what was physically on a live unit's stock slot. So no backup
+is needed for that validated restore path: the official download *is* the
+backup, and it is signed and hash-published.
 
 The signature is only checked by U-Boot's TFTP recovery path.  There is no
 secure boot on the kernel, which is precisely why writing the payload straight
@@ -170,7 +171,7 @@ def mtd_map(host):
 
 
 def check_target(host, profile):
-    """Refuse anything that is not an RD03v2 running OpenWrt *from RAM*.
+    """Require the selected board running OpenWrt *from RAM*.
 
     This has to run from the initramfs, for the same reason the install does:
     it erases `rootfs`, and on an installed system that is the partition the
@@ -192,8 +193,8 @@ def check_target(host, profile):
             f"rootfs_type is {rtype.strip()!r}, not tmpfs. This restore erases "
             "the rootfs partition, so it must run from the RAM initramfs -- "
             "running it from the installed system would kill the machine "
-            "mid-write. Pivot to the initramfs first (docs/no-uart-reflash.md, "
-            "using the -wifi image so it stays cable-free), then re-run.")
+            "mid-write. Use revert.py to perform the verified RAM pivot, then "
+            "re-run only if you are deliberately driving restore.py directly.")
     mtd = mtd_map(host)
     for name, (_start, size) in profile.openwrt_partitions.items():
         if name not in mtd:

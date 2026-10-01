@@ -1,18 +1,17 @@
 Subject: [PATCH] ipq50xx: bring the radios up when running from the RAM initramfs
 
-The RAM initramfs is the only sanctioned way to write this board's NAND, and
-`docs/no-uart-reflash.md` reaches it without serial -- but it still assumes a
-LAN cable, because the image comes up with both radios disabled. That is the
-right default for the installed system (the generated wireless config carries
-no encryption, so a box that came up beaconing would bridge an open SSID into
-br-lan before anyone had set a root password), but it is the one thing that
-stops an install being driven entirely over the air.
+The RAM initramfs is the only sanctioned way to write this board's NAND. The
+flow in `docs/technical.md` reaches it without serial, but the normal image
+comes up with both radios disabled. That is the right default for the installed
+system: its generated wireless config initially has no encryption, so enabling
+it would bridge an open SSID into br-lan before anyone had set a root password.
+The release process applies this change to the separate beaconing initramfs
+artifact used for Wi-Fi installation.
 
 Gate it on where the rootfs actually is. `rootfs_type` returns tmpfs exactly
-when we are running from RAM -- the same test `platform_check_image` already
-uses to decide whether a sysupgrade is allowed -- so one image can beacon
-while it is the installer and stay silent once it is installed. No second
-build variant, no new artifact.
+when running from RAM -- the same test `platform_check_image` already uses to
+decide whether a sysupgrade is allowed -- so the beaconing artifact stays
+silent if it is ever booted as an installed system.
 
 The window this opens is the flash itself: a few minutes, on a system whose
 root account has no password either way, with the operator standing next to
@@ -71,7 +70,6 @@ Notes for whoever applies this:
 * Both radios get the same SSID deliberately: the installer does not care
   which band it lands on, and one name is one thing for a user to look for.
 
-* This wants to ride along with the release that carries 4d074a2 (the Winbond
-  W25N01KW spinand entry). A Winbond unit cannot be flashed with v1.6 at all,
-  and a cable-free install cannot be driven with v1.6 either, so the same tag
-  fixes both.
+* Selecting this artifact does not bypass the NAND gate. The installer still
+  verifies the running unit's NAND against the selected release before any
+  permanent write.

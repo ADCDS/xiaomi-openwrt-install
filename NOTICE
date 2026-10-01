@@ -1,8 +1,8 @@
 NOTICE
 ======
 
-This repository installs OpenWrt onto a Xiaomi AX3000T (RD03v2) by exploiting an
-unpatched vulnerability in the stock firmware. Read this before running anything.
+This repository installs OpenWrt on supported Xiaomi routers by exploiting a
+vulnerability in the stock firmware. Read this before running anything.
 
 1. Authorised use only
 ----------------------

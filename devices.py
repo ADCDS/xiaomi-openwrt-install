@@ -94,7 +94,7 @@ RD03V2 = DeviceProfile(
     ),
     stock_images={
         "3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f":
-            "miwifi_rd03v2 2.0.28 (newest, version code 131100)",
+            "miwifi_rd03v2 2.0.28 (hardware-tested, version code 131100)",
         "be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3":
             "miwifi_rd03v2 2.0.12 (version code 131084)",
     },
@@ -116,7 +116,7 @@ PROFILES = {RD03V2.slug: RD03V2}
 def add_device_argument(parser):
     parser.add_argument(
         "--device", required=True, choices=tuple(sorted(PROFILES)),
-        help="device profile; currently only rd03v2 is supported")
+        help="device profile")
 
 
 def get_profile(slug):
