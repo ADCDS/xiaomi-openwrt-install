@@ -58,6 +58,7 @@ Usage:
 import argparse
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -650,10 +651,8 @@ def password_hash(plain):
 def ssh_banner(host, timeout=10):
     """Read port 22's greeting without offering any credentials.
 
-    The RAM system answers on 192.168.1.1, and so does a great many people's
-    own gateway -- including the machine this was developed on, where
-    `192.168.1.1` resolved over the wired interface to a production router.
-    Logging in there as root with an empty password is not something to
+    The RAM system's common private address may also belong to the operator's
+    own gateway. Logging in to the wrong device as root is not something to
     discover afterwards. A banner is passive: it identifies the far end before
     anything is offered to it.
 
@@ -759,12 +758,10 @@ def discover_linklocal(iface, timeout=15):
 def check_is_openwrt_ram(host):
     """Refuse to touch anything that is not plainly the RAM initramfs.
 
-    The banner alone does not settle it: the OpenWrt initramfs runs dropbear,
-    and so do a lot of the consumer gateways that also sit on 192.168.1.1 --
-    on the machine this was developed on, both ends answered
-    `SSH-2.0-dropbear`. So the real guard is the collision itself: if the
-    target is this host's own default gateway, it is not the router, and we
-    must not so much as offer it a password.
+    The banner alone does not settle it: the OpenWrt initramfs and many consumer
+    gateways both run dropbear on the same common private address. The real
+    guard is the collision itself: if the target is this host's own default
+    gateway, it is not the router, and we must not offer it a password.
     """
     gws = default_gateways()
     bare = host.split("%", 1)[0].strip("[]")
@@ -1041,6 +1038,9 @@ def parse_args(argv=None):
         help="installation transport (default: detect from the interface)")
     ap.add_argument("--host", default=None,
                     help="stock router address (default: profile address)")
+    ap.add_argument("--attacker", default=None,
+                    help="callback IPv4 address on the router-facing interface "
+                         "(normally route-derived)")
     ap.add_argument("--wifi-ssid", default=None,
                     help="configure this SSID on the installed system")
     ap.add_argument("--wifi-key", default=None,
@@ -1070,7 +1070,6 @@ def parse_args(argv=None):
     ap.add_argument("--offline", action="store_true", help=hidden)
     ap.add_argument("--images", default="images", help=hidden)
     ap.add_argument("--outdir", default=None, help=hidden)
-    ap.add_argument("--attacker", default=None, help=hidden)
     ap.add_argument("--serve-port", type=int, default=8000, help=hidden)
     ap.add_argument("--shell-port", type=int, default=4444, help=hidden)
     ap.add_argument("--file-port", type=int, default=4445, help=hidden)
@@ -1104,6 +1103,72 @@ def detect_transport(interface, sysfs_root="/sys/class/net"):
         raise Abort("cannot detect transport without a network interface")
     wireless = os.path.join(sysfs_root, interface, "wireless")
     return "wifi" if os.path.isdir(wireless) else "wired"
+
+
+def interface_ipv4_networks(interface):
+    """Return IPv4 interface objects assigned to one operator-side link."""
+    try:
+        result = subprocess.run(
+            ["ip", "-o", "-4", "addr", "show", "dev", interface],
+            capture_output=True, text=True, timeout=5)
+    except Exception as exc:                                    # noqa: BLE001
+        raise Abort(f"cannot inspect IPv4 addresses on {interface}: {exc}")
+    if result.returncode != 0:
+        raise Abort(f"cannot inspect IPv4 addresses on {interface}: "
+                    f"{result.stderr.strip() or 'ip failed'}")
+    networks = []
+    for line in result.stdout.splitlines():
+        match = re.search(r"\binet\s+(\S+)", line)
+        if match:
+            try:
+                networks.append(ipaddress.ip_interface(match.group(1)))
+            except ValueError:
+                continue
+    return networks
+
+
+def callback_address(host, interface, override=None):
+    """Choose a callback only when the selected link owns the stock route.
+
+    Control requests and the one-shot callback must traverse the same
+    router-facing interface. On a multihomed host, silently choosing another
+    route can consume the trigger with an unreachable address in the stager.
+    """
+    routed_interface = chain.local_interface(host)
+    if not routed_interface:
+        raise Abort(f"cannot determine the route to {host}; configure the "
+                    "router-facing link before running the exploit")
+    if interface and routed_interface != interface:
+        raise Abort(
+            f"--interface {interface} does not match the kernel route to "
+            f"{host} via {routed_interface}. Disconnect the competing link or "
+            "correct the route before consuming the one-shot trigger.")
+    selected_interface = interface or routed_interface
+    raw_address = override or chain.local_ip(host)
+    if not raw_address:
+        raise Abort("cannot determine this host's callback address; pass "
+                    "--attacker ADDRESS after verifying the selected route")
+    try:
+        address = ipaddress.ip_address(raw_address)
+    except ValueError:
+        raise Abort(f"callback address {raw_address!r} is not numeric IPv4")
+    if address.version != 4:
+        raise Abort(f"callback address {raw_address!r} is not IPv4")
+    if address.is_unspecified or address.is_loopback or address.is_multicast:
+        raise Abort(f"callback address {address} is not a usable unicast address")
+
+    assigned = interface_ipv4_networks(selected_interface)
+    own = next((item for item in assigned if item.ip == address), None)
+    if own is None:
+        shown = ", ".join(str(item.ip) for item in assigned) or "none"
+        raise Abort(f"callback address {address} is not assigned to "
+                    f"{selected_interface} (assigned: {shown})")
+    if (own.network.prefixlen <= 30
+            and address in (own.network.network_address,
+                            own.network.broadcast_address)):
+        raise Abort(f"callback address {address} is not a host address on "
+                    f"{own.network}")
+    return str(address)
 
 
 def prompt_firstboot(args):
@@ -1170,6 +1235,7 @@ def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
         "images": {kind: {"name": item["name"], "sha256": item["sha256"]}
                    for kind, item in images.items()},
         "session_token": token,
+        "callback_address": getattr(args, "attacker", None),
         "config_tar": os.path.abspath(cfg_tar) if cfg_tar else None,
         "root_password_set": bool(args.root_password),
     }
@@ -1182,9 +1248,9 @@ def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
     return data
 
 
-def update_resume_phase(path, phase):
+def update_resume(path, **changes):
     data = load_resume_manifest(path)
-    data["phase"] = phase
+    data.update(changes)
     tmp = path + ".tmp"
     with open(tmp, "w") as output:
         json.dump(data, output, indent=2, sort_keys=True)
@@ -1192,6 +1258,10 @@ def update_resume_phase(path, phase):
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
     return data
+
+
+def update_resume_phase(path, phase):
+    return update_resume(path, phase=phase)
 
 
 def verify_resume_selection(resume, args, profile, rel, images):
@@ -1216,6 +1286,7 @@ def verify_resume_selection(resume, args, profile, rel, images):
 def main(argv=None):
     os.umask(0o077)
     args = parse_args(argv)
+    requested_attacker = args.attacker
     resume = load_resume_manifest(args.resume_manifest) if args.resume_manifest else None
     if resume:
         args.device = resume["profile"]
@@ -1227,6 +1298,12 @@ def main(argv=None):
         args.images = resume["images_dir"]
         args.session_token = resume["session_token"]
         args.config_tar = resume.get("config_tar")
+        recorded_attacker = resume.get("callback_address")
+        if (requested_attacker and recorded_attacker
+                and requested_attacker != recorded_attacker):
+            raise Abort("--attacker does not match the callback address recorded "
+                        "in resume.json")
+        args.attacker = recorded_attacker or requested_attacker
         args.configure = False
     if args.configure and not args.dry_run:
         prompt_firstboot(args)
@@ -1236,9 +1313,10 @@ def main(argv=None):
 
     cfg_tar = args.config_tar
     validate_firstboot_config(args.wifi_ssid, args.wifi_key, args.wifi_country)
-    outdir = (args.outdir or (os.path.dirname(os.path.abspath(args.resume_manifest))
-                              if args.resume_manifest else None)
-              or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
+    outdir = os.path.abspath(
+        args.outdir or (os.path.dirname(os.path.abspath(args.resume_manifest))
+                        if args.resume_manifest else None)
+        or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
     chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
@@ -1315,6 +1393,9 @@ def main(argv=None):
     if args.skip_exploit and not (args.session_token or resume):
         raise Abort("--skip-exploit requires --resume-manifest or the original "
                     "--session-token")
+    if args.skip_exploit and args.stage != "flash" and not args.attacker:
+        raise Abort("--skip-exploit reuses an existing stager; pass its original "
+                    "callback address with --attacker ADDRESS")
     if resume:
         verify_resume_selection(resume, args, profile, rel, images)
         if cfg_tar and not os.path.isfile(cfg_tar):
@@ -1328,12 +1409,29 @@ def main(argv=None):
         }[args.stage]
         if phase not in allowed:
             raise Abort(f"resume phase {phase!r} is not valid for stage {args.stage!r}")
-        if phase == "preflight-complete" and args.stage in ("pivot", "all"):
+        reusing_stager = (args.skip_exploit
+                          or (phase == "preflight-complete"
+                              and args.stage in ("preflight", "pivot", "all")))
+        if (reusing_stager and not resume.get("callback_address")
+                and not requested_attacker):
+            raise Abort(
+                "this legacy resume.json predates callback recording. Pass "
+                "the original stager address with --attacker ADDRESS; deriving "
+                "a new address could consume the existing callback.")
+        if phase == "preflight-complete" and args.stage in (
+                "preflight", "pivot", "all"):
             args.skip_exploit = True
     elif args.stage == "flash" and not args.standalone_flash:
         raise Abort("direct --stage flash requires --resume-manifest; use "
                     "--standalone-flash only for a separately validated RAM boot")
-    manifest_path = args.resume_manifest or os.path.join(outdir, "resume.json")
+    manifest_path = os.path.abspath(
+        args.resume_manifest or os.path.join(outdir, "resume.json"))
+    attacker = None
+    if not args.dry_run and args.stage != "flash":
+        attacker = callback_address(args.host, args.discover, args.attacker)
+        args.attacker = attacker
+        if resume and not resume.get("callback_address"):
+            resume = update_resume(manifest_path, callback_address=attacker)
     if not resume and not args.dry_run:
         resume = write_resume_manifest(
             manifest_path, args, profile, rel, images, token, cfg_tar)
@@ -1364,9 +1462,8 @@ def main(argv=None):
         update_resume_phase(manifest_path, "flash-complete")
         return 0
 
-    attacker = args.attacker or chain.local_ip(args.host)
     if not attacker:
-        raise Abort("cannot work out this host's address; pass --attacker")
+        raise Abort("this stage needs the recorded exploit callback address")
 
     if not args.skip_exploit:
         info = chain.init_info(args.host)
@@ -1418,7 +1515,8 @@ def main(argv=None):
 
     if args.stage == "preflight":
         log("\n[+] pre-flight passed. Nothing was written.")
-        command = ["python3", "install.py", args.image, "--stage", "pivot",
+        command = ["python3", os.path.realpath(__file__), args.image,
+                   "--stage", "pivot",
                    "--skip-exploit", "--resume-manifest", manifest_path]
         log("    " + shlex.join(command))
         return 0
@@ -1444,7 +1542,8 @@ def main(argv=None):
         update_resume_phase(manifest_path, "flash-complete")
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")
-        command = ["python3", "install.py", args.image, "--stage", "flash",
+        command = ["python3", os.path.realpath(__file__), args.image,
+                   "--stage", "flash",
                    "--resume-manifest", manifest_path]
         log("    " + shlex.join(command))
     return 0

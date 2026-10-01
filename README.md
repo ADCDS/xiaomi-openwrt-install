@@ -88,7 +88,8 @@ lists the approved images for the enabled profiles.
 From an installed OpenWrt system, run:
 
 ```sh
-IFACE=enx00e04c125990
+nmcli device status
+IFACE=YOUR_ROUTER_INTERFACE
 python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
     --interface "$IFACE"
 ```

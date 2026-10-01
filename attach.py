@@ -6,9 +6,9 @@ stays up, so losing the driver does not lose root -- only a reboot does.  That
 matters because the trigger is one-shot: without this, a driver bug costs a
 factory reset and a fresh exploit run to get back to the same place.
 
-    python3 attach.py --bind 192.168.31.231 \
+    python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS \
         --session-token TOKEN_FROM_RESUME_JSON 'cat /proc/mtd'
-    python3 attach.py --bind 192.168.31.231 \
+    python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS \
         --session-token TOKEN_FROM_RESUME_JSON -f commands.txt
 """
 

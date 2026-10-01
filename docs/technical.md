@@ -56,7 +56,8 @@ FACTORY_SSID='YOUR_FACTORY_SSID'
 nmcli dev wifi connect "$FACTORY_SSID"
 
 # or over a cable, into any LAN port
-IFACE=enx00e04c125990
+nmcli device status
+IFACE=YOUR_ROUTER_INTERFACE
 nmcli con add type ethernet ifname "$IFACE" con-name xiaomi-router \
     ipv4.method auto ipv6.method link-local autoconnect no
 nmcli con up xiaomi-router
@@ -98,7 +99,8 @@ version the unit last ran. The bootloader's anti-rollback rejects older images.
 ## Two commands
 
 ```sh
-IFACE=enx00e04c125990
+nmcli device status
+IFACE=YOUR_ROUTER_INTERFACE
 
 # stock -> OpenWrt on NAND, with optional first-boot configuration
 python3 install.py standard --interface "$IFACE" --configure
@@ -158,16 +160,19 @@ DEFAULT_RELEASE=$(python3 -c \
 python3 release.py --device rd03v2 --tag "$DEFAULT_RELEASE" \
     --download --wifi --dest images
 RD03V2_IMAGES="images/$DEFAULT_RELEASE" python3 selftest.py
+
+# Optionally add stock-image carving and layout checks:
+XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
 ```
 
 ## Interrupted runs
 
 Each run writes a mode-`0600` `resume.json` inside its mode-`0700` output
 directory. It records the device profile, release, flavor, transport, exact
-image hashes, configuration archive, and callback token. When a manual stage
-is needed, use the continuation command printed by `install.py`; the flash
-stage refuses selection drift. `attach.py` likewise requires the bind address
-and token from this manifest.
+image hashes, configuration archive, callback address, and callback token. When
+a manual stage is needed, use the continuation command printed by `install.py`;
+the flash stage refuses selection drift. `attach.py` likewise requires the
+bind address and token from this manifest.
 
 Detached NAND writers use atomic directory locks. A live writer is never
 restarted. An inactive stale lock is preserved for inspection unless the
@@ -264,7 +269,7 @@ hand:
 
 ```sh
 # find it -- this returns only a neighbour that answers as dropbear
-export IFACE=enx00e04c125990
+export IFACE=YOUR_ROUTER_INTERFACE
 HOST=$(python3 -c \
     'import install, os; print(install.discover_linklocal(os.environ["IFACE"]))')
 
