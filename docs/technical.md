@@ -1,4 +1,4 @@
-# `xiaomi-router-install` technical reference
+# `xiaomi-openwrt-install` technical reference
 
 This document preserves the implementation details, recovery commands, flash
 layout, and advanced controls. Start with the concise [README](../README.md)

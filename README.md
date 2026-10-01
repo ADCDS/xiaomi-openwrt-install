@@ -1,4 +1,4 @@
-# xiaomi-router-install
+# xiaomi-openwrt-install
 
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
@@ -30,8 +30,8 @@ exploit stage.
 Clone this repository:
 
 ```sh
-git clone https://github.com/ADCDS/xiaomi-router-install.git
-cd xiaomi-router-install
+git clone https://github.com/ADCDS/xiaomi-openwrt-install.git
+cd xiaomi-openwrt-install
 ```
 
 ## Install OpenWrt

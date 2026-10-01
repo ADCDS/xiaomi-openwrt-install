@@ -49,7 +49,7 @@ def _api(path):
     url = f"https://api.github.com/{path}"
     req = urllib.request.Request(url)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "xiaomi-router-installer")
+    req.add_header("User-Agent", "xiaomi-openwrt-install")
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         req.add_header("Authorization", f"Bearer {token}")
@@ -230,7 +230,7 @@ def download(rel, name, destdir, progress=True):
             return path
         print(f"[!] cached {name} failed GitHub's asset digest; downloading again")
     req = urllib.request.Request(rel.assets[name]["url"])
-    req.add_header("User-Agent", "xiaomi-router-installer")
+    req.add_header("User-Agent", "xiaomi-openwrt-install")
     tmp = path + ".part"
     got = 0
     with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as fh:
