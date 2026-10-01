@@ -916,6 +916,7 @@ def parse_args(argv=None):
     ap.add_argument("--flavour", choices=("default", "nss"), default=None,
                     help=hidden)
     ap.add_argument("--no-wifi-initramfs", action="store_true", help=hidden)
+    ap.add_argument("--offline", action="store_true", help=hidden)
     ap.add_argument("--images", default="images", help=hidden)
     ap.add_argument("--outdir", default=None, help=hidden)
     ap.add_argument("--attacker", default=None, help=hidden)
@@ -1020,8 +1021,18 @@ def main(argv=None):
     # The release first: no point touching a device for an image that cannot
     # drive its flash. The simple interface is pinned to a tested release, but
     # `--release latest` remains available deliberately.
-    rel = (release.latest(profile) if args.tag == "latest"
-           else release.by_tag(args.tag, profile))
+    if args.offline:
+        rel = release.from_cache(args.tag, profile, args.images)
+    else:
+        try:
+            rel = (release.latest(profile) if args.tag == "latest"
+                   else release.by_tag(args.tag, profile))
+        except release.ReleaseError as online_error:
+            try:
+                rel = release.from_cache(args.tag, profile, args.images)
+                log(f"[!] release API unavailable; using verified {args.tag} cache")
+            except release.ReleaseError:
+                raise online_error
     log(f"[*] selected {args.image} image from release {rel.tag} ({rel.published})")
     kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
     # The beaconing initramfs is what makes stage 3 cable-free, so it is the

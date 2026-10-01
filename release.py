@@ -151,6 +151,42 @@ def by_tag(tag, profile=devices.RD03V2):
     return Release(_api(f"repos/{profile.release_repo}/releases/tags/{tag}"), profile)
 
 
+def from_cache(tag, profile=devices.RD03V2, destdir="images"):
+    """Build release metadata from a previously verified tag-scoped cache."""
+    stub = Release({"tag_name": tag, "assets": []}, profile)
+    root = cache_dir(stub, destdir)
+    sums_path = os.path.join(root, "sha256sums.txt")
+    if not os.path.isfile(sums_path):
+        raise ReleaseError(f"offline cache has no {sums_path}")
+
+    sums = {}
+    with open(sums_path) as source:
+        for line in source:
+            parts = line.split()
+            if len(parts) == 2 and len(parts[0]) == 64:
+                sums[parts[1].lstrip("*")] = parts[0].lower()
+
+    assets = []
+    for name, expected in sums.items():
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        actual = sha256(path)
+        if actual != expected:
+            raise ReleaseError(
+                f"offline cache corruption for {name}: {actual} != {expected}")
+        assets.append({"name": name, "browser_download_url": "",
+                       "size": os.path.getsize(path),
+                       "digest": f"sha256:{actual}"})
+
+    manifest_digest = sha256(sums_path)
+    assets.append({"name": "sha256sums.txt", "browser_download_url": "",
+                   "size": os.path.getsize(sums_path),
+                   "digest": f"sha256:{manifest_digest}"})
+    return Release({"tag_name": tag, "published_at": "offline cache",
+                    "assets": assets}, profile)
+
+
 # ---- download + verify ------------------------------------------------------
 
 

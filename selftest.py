@@ -990,6 +990,22 @@ def test_release_integrity():
         check("conflicting release digests fail closed",
               "internally inconsistent" in str(exc))
 
+    root = tempfile.mkdtemp(prefix="xiaomi-offline-release-")
+    try:
+        tagged = os.path.join(root, "v1.11")
+        os.makedirs(tagged)
+        payload = os.path.join(tagged, "image.bin")
+        with open(payload, "wb") as output:
+            output.write(b"verified cache")
+        digest = release.sha256(payload)
+        with open(os.path.join(tagged, "sha256sums.txt"), "w") as output:
+            output.write(f"{digest}  image.bin\n")
+        cached = release.from_cache("v1.11", devices.RD03V2, root)
+        check("verified offline cache reconstructs release metadata",
+              release.api_digest(cached, "image.bin") == digest)
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
 
 def test_tagged_revert_cache():
     import revert
