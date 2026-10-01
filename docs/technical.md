@@ -4,8 +4,8 @@ This document preserves the implementation details, recovery commands, flash
 layout, and advanced controls. Start with the concise [README](../README.md)
 for the supported installation command.
 
-Install OpenWrt over the air on supported Xiaomi routers — no serial adapter,
-no soldering, and no LAN cable — and put pristine stock back the same way.
+Install OpenWrt over Ethernet or Wi-Fi on supported Xiaomi routers — no serial
+adapter or soldering — and put pristine stock back the same way.
 
 ## Supported devices
 
@@ -32,7 +32,7 @@ into the OpenWrt RAM initramfs, and runs the sanctioned `sysupgrade` from there.
 > the device *is* the exploit chain, and the installer and the exploit cannot be
 > separated. The advisory, the PoC and the timeline are there.
 >
-> Read [`NOTICE`](NOTICE) before running anything, and note that this install is
+> Read [`NOTICE`](../NOTICE) before running anything, and note that this install is
 > effectively one-way — see [Going back to stock](#going-back-to-stock).
 
 Verified end to end on hardware: factory unit → configured OpenWrt on NAND, and
@@ -84,8 +84,9 @@ to revert:
 | **2.0.28** (newest) | [`miwifi_rd03v2_firmware_31bf9_2.0.28.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_31bf9_2.0.28.bin) | `3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f` |
 | 2.0.12 | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
 
-Genuine, Xiaomi-signed, served from Xiaomi's own CDN. `restore.py` refuses any
-image whose hash is not one of these unless you pass `--yes`, so check it:
+Genuine, Xiaomi-signed, served from Xiaomi's own CDN. `restore.py` and
+`revert.py` refuse any image whose full hash is not approved by the selected
+device profile; `--yes` only skips confirmation prompts.
 
 ```sh
 sha256sum miwifi_rd03v2_firmware_31bf9_2.0.28.bin
@@ -131,7 +132,7 @@ a very common gateway address.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | read-only fact-finding run against a stock unit; how the layout below was established |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `selftest.py` | everything testable without the router (179 checks, 182 once you have a release artifact, 186 with its matching `.itb`) |
+| `selftest.py` | everything testable without the router (204 checks, 207 once you have a release artifact, 211 with its matching `.itb`) |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
 | `LICENSE` | GPL-2.0-only |
 | `NOTICE` | authorised-use, one-way-install and no-warranty terms — **read first** |
@@ -142,16 +143,29 @@ implementations of the same chain, which is also what makes one a useful check
 on the other.
 
 ```sh
-python3 selftest.py                          # 179 checks, no hardware, no network
+python3 selftest.py                          # 204 checks, no hardware, no network
 
 # three more run against a real release artifact, if you have one:
 python3 release.py --device rd03v2 --download --wifi --dest images
-RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 182
+RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 207
 
 # a fourth check compares the kernel volume against the .itb it wraps, so it
 # needs that file too -- release.py fetches the .ubi and the sysupgrade only:
-RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 186
+RD03V2_IMAGES=images/v1.11 python3 selftest.py     # 211
 ```
+
+## Interrupted runs
+
+Each run writes a mode-`0600` `resume.json` inside its mode-`0700` output
+directory. It records the device profile, release, flavor, transport, exact
+image hashes, configuration archive, and callback token. When a manual stage
+is needed, use the continuation command printed by `install.py`; the flash
+stage refuses selection drift. `attach.py` likewise requires the bind address
+and token from this manifest.
+
+Detached NAND writers use atomic directory locks. A live writer is never
+restarted. An inactive stale lock is preserved for inspection unless the
+operator deliberately passes `--recover-stale-lock`.
 
 ## How the device is laid out
 
@@ -309,14 +323,10 @@ Run only against a device you own.
 
 ## Not done
 
-- `--wifi-country` is optional and should be mandatory whenever the radios are
-  enabled: without a regulatory domain the installer AP runs under the world
-  domain, which is the objection upstream raises against enabled-by-default
-  radios independently of security.
 - The installer beacon should drop to 2.4 GHz only, for the same reason.
 - The placeholder-shaped arguments in the docs have been bitten once already;
   keep them unmistakable.
 
 ## License
 
-GPL-2.0-only. See [`LICENSE`](LICENSE).
+GPL-2.0-only. See [`LICENSE`](../LICENSE).

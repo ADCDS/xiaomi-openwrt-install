@@ -23,6 +23,7 @@ import socketserver
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -89,6 +90,172 @@ def test_simple_installer_cli():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_firstboot_configuration():
+    import install
+    print("\n== first-boot configuration ==")
+    root = tempfile.mkdtemp(prefix="xiaomi-firstboot-")
+    try:
+        archive = os.path.join(root, "root-only.tar.gz")
+        install.build_config_tar(
+            archive, "", "", devices.RD03V2, pwhash="$6$testhash")
+        with tarfile.open(archive) as tf:
+            member = tf.getmembers()[0]
+            body = tf.extractfile(member).read().decode()
+        check("root-password-only archive leaves wireless untouched",
+              "wireless." not in body and "/etc/shadow" in body)
+
+        archive = os.path.join(root, "wifi.tar.gz")
+        install.build_config_tar(
+            archive, "Bench", "ExamplePass123", devices.RD03V2,
+            country="BR")
+        with tarfile.open(archive) as tf:
+            body = tf.extractfile(tf.getmembers()[0]).read().decode()
+        check("Wi-Fi archive enables only explicit valid configuration",
+              "ssid='Bench'" in body and "key='ExamplePass123'" in body
+              and "country='BR'" in body)
+
+        rejected = 0
+        for values in (("x" * 33, "12345678", "BR"),
+                       ("ok", "short", "BR"),
+                       ("ok", "pässword", "BR"),
+                       ("ok", "12345678", "")):
+            try:
+                install.validate_firstboot_config(*values)
+            except install.Abort:
+                rejected += 1
+        check("invalid Wi-Fi values fail before flashing", rejected == 4,
+              str(rejected))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_restore_guards():
+    import restore
+    print("\n== restore trust and boot environment ==")
+    digest = "a" * 64
+    try:
+        restore.require_trusted_image(digest, None)
+        check("unknown stock image fails closed", False)
+    except restore.RestoreError:
+        check("unknown stock image fails closed", True)
+    restore.require_trusted_image(digest, None, digest)
+    check("exact explicit development digest is accepted", True)
+    parsed = restore.parse_env_values(
+        "flag_last_success=0\nflag_boot_rootfs=0\n",
+        ("flag_last_success", "flag_boot_rootfs"))
+    check("boot environment parser requires exact keys",
+          parsed == {"flag_last_success": "0", "flag_boot_rootfs": "0"})
+    try:
+        restore.parse_env_values("flag_last_success=0\n",
+                                 ("flag_last_success", "flag_boot_rootfs"))
+        check("missing boot environment value is refused", False)
+    except restore.RestoreError:
+        check("missing boot environment value is refused", True)
+
+    original_ssh = restore.ssh
+    writes = {}
+    def fake_ssh(_host, command, timeout=180, check=True):
+        if command.startswith("fw_setenv "):
+            _cmd, key, value = command.split()
+            writes[key] = value
+            return 0, ""
+        if command.startswith("fw_printenv "):
+            return 0, "\n".join(f"{key}={writes[key]}" for key in command.split()[1:])
+        return 1, "unexpected"
+    try:
+        restore.ssh = fake_ssh
+        wanted = {"flag_last_success": 0, "flag_boot_rootfs": 0,
+                  "flag_try_sys1_failed": 0, "flag_try_sys2_failed": 0,
+                  "flag_boot_success": 1, "flag_ota_reboot": 0}
+        got = restore.set_bootenv_verified("router", wanted)
+        check("all boot-critical flags are written and verified exactly",
+              got == {key: str(value) for key, value in wanted.items()})
+    finally:
+        restore.ssh = original_ssh
+
+
+def test_resume_manifest_and_flash_guards():
+    import install
+    print("\n== resume manifest and permanent flash guards ==")
+    root = tempfile.mkdtemp(prefix="xiaomi-resume-")
+    try:
+        image = os.path.join(root, "image.bin")
+        open(image, "wb").write(b"image")
+        args = install.parse_args(["nss", "--transport", "wired"])
+        args.images = root
+        args.discover = "eth0"
+        args.root_password = "secret-not-persisted"
+        rel = release.Release({"tag_name": "v1.11", "assets": []})
+        images = {"sysupgrade": {"name": "image.bin", "path": image,
+                                  "sha256": hashlib.sha256(b"image").hexdigest()}}
+        path = os.path.join(root, "resume.json")
+        data = install.write_resume_manifest(
+            path, args, devices.RD03V2, rel, images, "token", None)
+        check("resume manifest is private", (os.stat(path).st_mode & 0o777) == 0o600)
+        check("resume manifest records the prepared phase",
+              data["phase"] == "prepared")
+        check("resume records password requirement without plaintext",
+              data["root_password_set"] is True
+              and "secret-not-persisted" not in open(path).read())
+        advanced = install.update_resume_phase(path, "preflight-complete")
+        check("resume phase update is atomic and persistent",
+              advanced["phase"] == "preflight-complete"
+              and install.load_resume_manifest(path)["phase"] == "preflight-complete")
+        install.verify_resume_selection(
+            data, args, devices.RD03V2, rel, images)
+        check("matching resume selection is accepted", True)
+        bad = dict(data)
+        bad["flavour"] = "default"
+        try:
+            install.verify_resume_selection(
+                bad, args, devices.RD03V2, rel, images)
+            check("resume flavor drift is refused", False)
+        except install.Abort:
+            check("resume flavor drift is refused", True)
+
+        v16 = release.Release({"tag_name": "v1.6", "assets": []})
+        try:
+            install.require_permanent_nand_support(
+                "be", v16, devices.RD03V2, root)
+            check("direct flash applies permanent NAND gate", False)
+        except install.Abort:
+            check("direct flash applies permanent NAND gate", True)
+
+        mtd = ("mtd18: 02400000 00020000 \"ubi_kernel\"\n"
+               "mtd19: 05180000 00020000 \"rootfs\"\n")
+        check("permanent success requires overlay",
+              install.permanent_system_matches(
+                  devices.RD03V2, devices.RD03V2.openwrt_board, "overlay", mtd)
+              and not install.permanent_system_matches(
+                  devices.RD03V2, devices.RD03V2.openwrt_board, "tmpfs", mtd))
+        launcher = install.build_sysupgrade_launcher("")
+        check("sysupgrade waits for operator acknowledgement before execution",
+              "xiaomi-sysupgrade.ack" in launcher
+              and launcher.index("xiaomi-sysupgrade.ack")
+              < launcher.index("exec /sbin/sysupgrade"))
+        check("hostname peers normalize to numeric addresses",
+              channel.normalize_peer("localhost") == "127.0.0.1")
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_atomic_writer_scripts():
+    import inspect
+    import install
+    import restore
+    import revert
+    print("\n== detached writer locks ==")
+    scripts = (install.FLASH_SCRIPT, restore.RESTORE_SCRIPT, revert.PIVOT_SCRIPT)
+    check("all detached writers use atomic mkdir locks",
+          all("mkdir " in script and "/pid" in script for script in scripts))
+    check("detached writers do not use check-then-touch locks",
+          all("[ -e" not in script and ": >" not in script for script in scripts))
+    pivot_source = inspect.getsource(install.pivot)
+    check("install inspects writer state before staging remote inputs",
+          pivot_source.index("prepare_flash_job")
+          < pivot_source.index("perform_pivot_write"))
+
+
 # ---- 1. stager rendering ----------------------------------------------------
 
 
@@ -107,7 +274,8 @@ def test_stager():
         ],
     }
     for label, restore in cases.items():
-        blob = channel.build_stager("192.168.31.231", 8000, 4444, restore)
+        blob = channel.build_stager(
+            "192.168.31.231", 8000, 4444, restore, "testtoken")
         with tempfile.NamedTemporaryFile("wb", suffix=".sh", delete=False) as fh:
             fh.write(blob)
             path = fh.name
@@ -119,10 +287,12 @@ def test_stager():
                   r.stderr.strip())
         os.unlink(path)
 
-    wpa = channel.build_stager("10.0.0.1", 8000, 4444, cases["wpa2 with a known key"])
+    wpa = channel.build_stager(
+        "10.0.0.1", 8000, 4444, cases["wpa2 with a known key"], "testtoken")
     check("wpa2 case restores the captured cipher", b"encryption='psk2'" in wpa)
     check("wpa2 case restores the captured key", b"key='hunter22'" in wpa)
-    open_ = channel.build_stager("10.0.0.1", 8000, 4444, [])
+    open_ = channel.build_stager(
+        "10.0.0.1", 8000, 4444, [], "testtoken")
     check("unknown radio config falls back to an open AP",
           b"encryption='none'" in open_ and b"delete wireless.$s.key" in open_)
 
@@ -134,13 +304,14 @@ def test_stager():
 # ---- 2. command channel + bulk transfer -------------------------------------
 
 
-def _fake_device(shell_port, workdir):
+def _fake_device(shell_port, workdir, token):
     """The device half of the stager's channel loop, verbatim in shape."""
     script = (
         f"cd {workdir}; "
         "while true; do "
         "  rm -f ch; mkfifo ch 2>/dev/null; "
-        f"  /bin/sh < ch 2>&1 | busybox nc 127.0.0.1 {shell_port} > ch; "
+        f"  {{ printf 'AUTH %s\\n' {token}; /bin/sh < ch 2>&1; }} "
+        f"| busybox nc 127.0.0.1 {shell_port} > ch; "
         "  sleep 1; "
         "done"
     )
@@ -167,9 +338,13 @@ def test_channel():
     outdir = os.path.join(workdir, "out")
     os.makedirs(outdir)
 
-    ch = channel.ShellChannel(sport)
-    sink = channel.FileSink(fport, outdir)
-    dev = _fake_device(sport, workdir)
+    token = "selftesttoken"
+    payload_size = 3 * 1024 * 1024
+    ch = channel.ShellChannel("127.0.0.1", sport, token, "127.0.0.1")
+    sink = channel.FileSink(
+        "127.0.0.1", fport, outdir, token, "127.0.0.1",
+        {"blob.bin": payload_size})
+    dev = _fake_device(sport, workdir, token)
     try:
         check("device dialled in", ch.wait(timeout=20))
         if not ch.connected.is_set():
@@ -177,6 +352,21 @@ def test_channel():
 
         rc, out = ch.run("echo hello", quiet=True)
         check("simple command", rc == 0 and out == "hello", f"rc={rc} out={out!r}")
+
+        with socket.create_connection(("127.0.0.1", sport), timeout=5) as rogue:
+            rogue.sendall(b"AUTH wrong-token\n")
+        time.sleep(0.1)
+        rc, out = ch.run("echo authentic", quiet=True)
+        check("unauthenticated shell cannot replace router channel",
+              rc == 0 and out == "authentic")
+
+        escaped = os.path.join(workdir, "escaped.txt")
+        with socket.create_connection(("127.0.0.1", fport), timeout=5) as rogue:
+            rogue.sendall(
+                f"AUTH {token}\nFILE ../escaped.txt 1\nX".encode())
+        time.sleep(0.1)
+        check("file sink rejects traversal outside output directory",
+              not os.path.exists(escaped))
 
         # in a subshell: `exit 7` on the channel shell itself would end the
         # session, which is exactly what the reconnect loop is for but not
@@ -208,11 +398,11 @@ def test_channel():
         check("survives a reconnect", rc == 0 and out == "back", f"rc={rc} out={out!r}")
 
         # bulk transfer, the same shape probe.pull() uses
-        payload = os.urandom(3 * 1024 * 1024)
+        payload = os.urandom(payload_size)
         src = os.path.join(workdir, "blob.bin")
         with open(src, "wb") as fh:
             fh.write(payload)
-        cmd = (f'({{ echo "FILE blob.bin {len(payload)}"; '
+        cmd = (f'({{ echo "AUTH {token}"; echo "FILE blob.bin {len(payload)}"; '
                f'dd if={src} bs=65536 2>/dev/null; }} '
                f'| busybox nc 127.0.0.1 {fport}) >/dev/null 2>&1 &')
         ch.run(cmd, retries=0, quiet=True)
@@ -695,7 +885,8 @@ def test_pull_fallback():
         sink = _FakeSink()
         ch = _FakeChannel(sink, outdir, size)
         got = probe.pull(ch, sink, outdir, {"ubi_kernel": (17, size, 131072)},
-                         "ubi_kernel", ["ubi_kernel"], "10.0.0.1", 4445)
+                         "ubi_kernel", ["ubi_kernel"], "10.0.0.1", 4445,
+                         "testtoken")
         check("falls back past a missing nanddump", got is not None
               and got["reader"] == "dd", str(got and got["reader"]))
         check("records the partition it read", got and got["partition"] == "ubi_kernel")
@@ -703,8 +894,16 @@ def test_pull_fallback():
               got and got["sha256"] == hashlib.sha256(b"\xa5" * size).hexdigest())
 
         missing = probe.pull(ch, sink, outdir, {"rootfs": (18, 10, 1)},
-                             "appsbl", ["0:APPSBL"], "10.0.0.1", 4445)
+                             "appsbl", ["0:APPSBL"], "10.0.0.1", 4445,
+                             "testtoken")
         check("absent partition is skipped, not guessed", missing is None)
+        session = probe.write_session_manifest(
+            outdir, "10.0.0.1", "10.0.0.2", 8000, 4444, 4445,
+            "persisted-token")
+        saved = json.load(open(session))
+        check("probe persists private attachment token",
+              saved["session_token"] == "persisted-token"
+              and (os.stat(session).st_mode & 0o777) == 0o600)
     finally:
         shutil.rmtree(outdir, ignore_errors=True)
 
@@ -1006,6 +1205,24 @@ def test_release_integrity():
     finally:
         shutil.rmtree(root, ignore_errors=True)
 
+    unsigned_name = devices.RD03V2.release_prefix + "-squashfs-sysupgrade.bin"
+    unsigned = release.Release({
+        "tag_name": "dev",
+        "assets": [{"name": unsigned_name,
+                    "browser_download_url": "http://invalid/",
+                    "size": 1}],
+    })
+    unsigned_root = tempfile.mkdtemp(prefix="unsigned-release-")
+    try:
+        try:
+            release.get_images(unsigned, unsigned_root, kinds=("sysupgrade",))
+            check("length-only release asset is refused", False)
+        except release.ReleaseError as exc:
+            check("length-only release asset is refused",
+                  "no trusted SHA-256" in str(exc))
+    finally:
+        shutil.rmtree(unsigned_root, ignore_errors=True)
+
 
 def test_tagged_revert_cache():
     import revert
@@ -1014,12 +1231,18 @@ def test_tagged_revert_cache():
     try:
         tagged = os.path.join(root, "v1.11")
         os.makedirs(tagged)
-        ubi = os.path.join(tagged, "test-initramfs-factory-wifi.ubi")
-        itb = os.path.join(tagged, "test-initramfs-uImage-wifi.itb")
-        open(ubi, "wb").close()
-        open(itb, "wb").close()
-        got_ubi, got_itb = revert.find_ram_images(root, "v1.11")
-        check("revert finds the selected release's image pair",
+        prefix = devices.RD03V2.release_prefix
+        ubi = os.path.join(tagged, prefix + "-initramfs-factory-wifi.ubi")
+        itb = os.path.join(tagged, prefix + "-initramfs-uImage-wifi.itb")
+        open(ubi, "wb").write(b"ubi")
+        open(itb, "wb").write(b"itb")
+        with open(os.path.join(tagged, "sha256sums.txt"), "w") as output:
+            output.write(f"{release.sha256(ubi)}  {os.path.basename(ubi)}\n")
+            output.write(f"{release.sha256(itb)}  {os.path.basename(itb)}\n")
+        rel = release.from_cache("v1.11", devices.RD03V2, root)
+        got_ubi, got_itb = revert.verified_ram_images(
+            rel, root, wifi=True)
+        check("revert uses the exact verified release image pair",
               got_ubi == ubi and got_itb == itb)
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -1110,6 +1333,10 @@ def main():
     t0 = time.time()
     test_profiles()
     test_simple_installer_cli()
+    test_firstboot_configuration()
+    test_restore_guards()
+    test_resume_manifest_and_flash_guards()
+    test_atomic_writer_scripts()
     test_stager()
     test_ubi()
     test_ubi_live_hazards()

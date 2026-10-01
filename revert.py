@@ -30,7 +30,6 @@ Usage:
 """
 
 import argparse
-import glob
 import hashlib
 import os
 import sys
@@ -38,45 +37,28 @@ import time
 
 import devices
 import install
+import release
 import restore
 from chain import log
 
 
-def find_ram_images(images_dir, release_tag=devices.RD03V2.default_release):
-    """The RAM image to pivot through, and the .itb it wraps for verification.
-
-    Prefers the -wifi variant: it is the one that beacons, so if the cable
-    ever comes out mid-revert there is still a way back in.
-    """
-    roots = (os.path.join(images_dir, release_tag), images_dir)
-    ubi = []
-    for root in roots:
-        for pat in ("*initramfs-factory-wifi.ubi", "*initramfs-factory.ubi"):
-            ubi = sorted(glob.glob(os.path.join(root, pat)))
-            if ubi:
-                break
-        if ubi:
-            break
-    if not ubi:
-        raise restore.RestoreError(
-            f"no initramfs UBI in {images_dir}/{release_tag}. Fetch it first:\n"
-            f"  python3 release.py --device rd03v2 --tag {release_tag} --wifi "
-            "--download --dest images")
-    itb_pat = ("*initramfs-uImage-wifi.itb" if "-wifi" in os.path.basename(ubi[0])
-               else "*initramfs-uImage.itb")
-    itb = sorted(glob.glob(os.path.join(root, itb_pat)))
-    if not itb:
-        raise restore.RestoreError(
-            f"no initramfs pair in {images_dir}. Fetch one first:\n"
-            f"  python3 release.py --device rd03v2 --tag {release_tag} --wifi "
-            "--download --dest images")
-    return ubi[0], itb[0]
+def verified_ram_images(rel, images_dir, flavour="default", wifi=False):
+    images = release.get_images(
+        rel, images_dir, flavour,
+        kinds=("initramfs_ubi", "initramfs_itb"), wifi=wifi)
+    if not all(item.get("verified") for item in images.values()):
+        raise restore.RestoreError("RAM image pair lacks trusted SHA-256 values")
+    return images["initramfs_ubi"]["path"], images["initramfs_itb"]["path"]
 
 
 PIVOT_SCRIPT = """\
 #!/bin/sh
-[ -e /tmp/pv.lock ] && exit 0
-: > /tmp/pv.lock
+if ! mkdir /tmp/pv.lock 2>/dev/null; then
+    echo fail:locked > /tmp/pv.status
+    exit 1
+fi
+echo $$ > /tmp/pv.lock/pid
+trap 'rm -rf /tmp/pv.lock' EXIT
 exec >/tmp/pv.log 2>&1
 echo running > /tmp/pv.status
 ubiformat /dev/mtd{k} -f /tmp/ini.ubi -y
@@ -86,7 +68,20 @@ sync
 """
 
 
-def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False):
+def remote_job_state(host, status_path, lock_dir):
+    _rc, state = install.ssh(
+        host,
+        f"s=$(cat {status_path} 2>/dev/null); "
+        f"p=$(cat {lock_dir}/pid 2>/dev/null); "
+        "a=0; [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && a=1; "
+        f"printf 'status=%s pid=%s active=%s lock=%s' \"$s\" \"$p\" \"$a\" "
+        f"\"$([ -d {lock_dir} ] && echo 1 || echo 0)\"",
+        check=False)
+    return state
+
+
+def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
+                 recover_stale_lock=False):
     """Put the RAM image in `ubi_kernel` and boot it. Returns the new host.
 
     `ubi_kernel` is not attached while OpenWrt runs -- the kernel was read out
@@ -107,39 +102,57 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False):
         log("[1] [dry-run] stopping before the write")
         return None
 
-    log(f"[1] uploading {os.path.basename(ubi_path)}")
-    install.scp_to(host, ubi_path, "/tmp/ini.ubi")
-    rc, out = install.ssh(host, "md5sum /tmp/ini.ubi", timeout=300)
-    if local_md5 not in out:
-        raise restore.RestoreError(f"upload md5 mismatch: {out!r} != {local_md5}")
-    log(f"[1] md5 {local_md5} verified on the device")
+    state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
+    reuse_done = "status=done" in state
+    if "active=1" in state:
+        raise restore.RestoreError(f"pivot ubiformat is still running ({state})")
+    if not reuse_done and ("lock=1" in state or "status=fail" in state
+                           or "status=running" in state):
+        if not recover_stale_lock:
+            raise restore.RestoreError(
+                f"stale/failed pivot state requires --recover-stale-lock "
+                f"after inspection ({state})")
+        install.ssh(host, "rm -rf /tmp/pv.lock; rm -f /tmp/pv.status")
+        log(f"[1] explicitly cleared inactive stale pivot state: {state}")
 
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        sh = os.path.join(tmp, "pv.sh")
-        with open(sh, "w") as fh:
-            fh.write(PIVOT_SCRIPT.format(k=k))
-        install.scp_to(host, sh, "/tmp/pv.sh")
-    install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status /tmp/pv.lock",
-                check=False)
-    # -x names the script, not /bin/sh: start-stop-daemon -S refuses to start
-    # when it matches a running process, and our own session is a /bin/sh.
-    rc, out = install.ssh(host, "start-stop-daemon -S -b -x /tmp/pv.sh; echo rc=$?",
-                          check=False)
-    log(f"[1] launch: {out.strip()}")
+    if reuse_done:
+        log("[1] prior pivot write reports done; reusing it for readback")
+    else:
+        log(f"[1] uploading {os.path.basename(ubi_path)}")
+        install.scp_to(host, ubi_path, "/tmp/ini.ubi")
+        rc, out = install.ssh(host, "md5sum /tmp/ini.ubi", timeout=300)
+        if local_md5 not in out:
+            raise restore.RestoreError(f"upload md5 mismatch: {out!r} != {local_md5}")
+        log(f"[1] md5 {local_md5} verified on the device")
 
-    deadline = time.time() + 300
-    status = ""
-    while time.time() < deadline:
-        time.sleep(5)
-        _rc, status = install.ssh(host, "cat /tmp/pv.status 2>/dev/null",
-                                  check=False)
-        if status.startswith(("done", "fail")):
-            break
-    if not status.startswith("done"):
-        _rc, tail = install.ssh(host, "tail -20 /tmp/pv.log", check=False)
-        raise restore.RestoreError(f"pivot write did not finish ({status!r}):\n{tail}")
-    log("[1] ubiformat done")
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            sh = os.path.join(tmp, "pv.sh")
+            with open(sh, "w") as fh:
+                fh.write(PIVOT_SCRIPT.format(k=k))
+            install.scp_to(host, sh, "/tmp/pv.sh")
+        install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status",
+                    check=True)
+        rc, out = install.ssh(
+            host, "start-stop-daemon -S -b -x /tmp/pv.sh; echo rc=$?",
+            check=False)
+        log(f"[1] launch: {out.strip()}")
+        if "rc=0" not in out:
+            raise restore.RestoreError(f"pivot launcher failed: {out!r}")
+
+        deadline = time.time() + 300
+        status = ""
+        while time.time() < deadline:
+            time.sleep(5)
+            _rc, status = install.ssh(host, "cat /tmp/pv.status 2>/dev/null",
+                                      check=False)
+            if status.startswith(("done", "fail")):
+                break
+        if not status.startswith("done"):
+            _rc, tail = install.ssh(host, "tail -20 /tmp/pv.log", check=False)
+            raise restore.RestoreError(
+                f"pivot write did not finish ({status!r}):\n{tail}")
+        log("[1] ubiformat done")
 
     install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
     rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
@@ -159,7 +172,7 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False):
     install.ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
     log("[1] rebooting into the RAM initramfs")
     time.sleep(15)
-    return install.wait_and_discover(iface) if iface else host
+    return install.wait_and_discover(iface, fallback=fallback) if iface else host
 
 
 def state_of(host, profile):
@@ -178,27 +191,53 @@ def main():
     devices.add_device_argument(ap)
     ap.add_argument("image", help="official stock firmware image")
     ap.add_argument("--host", default=None, help="fe80::...%%iface of the box")
-    ap.add_argument("--discover", metavar="IFACE", default=None,
+    ap.add_argument("--interface", "--discover", dest="discover",
+                    metavar="IFACE", default=None,
                     help="find the box on IFACE (and again after the pivot)")
+    ap.add_argument("--transport", choices=("auto", "wired", "wifi"),
+                    default="auto")
     ap.add_argument("--images", default="images",
                     help="directory holding the initramfs pair")
     ap.add_argument("--release", default=devices.RD03V2.default_release,
                     help="release tag used for the cached RAM image")
+    ap.add_argument("--flavour", choices=("default", "nss"), default="default")
+    ap.add_argument("--offline", action="store_true")
     ap.add_argument("--root-password", default=None,
                     help="the installed system's root password, if one is set")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--expected-image-sha256", default=None,
+                    help="explicit digest for an unlisted development image")
+    ap.add_argument("--recover-stale-lock", action="store_true",
+                    help="clear an inactive stale writer lock after inspection")
     args = ap.parse_args()
     profile = devices.get_profile(args.device)
+    if args.transport == "auto" and args.discover:
+        args.transport = install.detect_transport(args.discover)
+    elif args.transport == "auto":
+        args.transport = "wired" if args.host and "%" not in args.host else "wifi"
+    fallback = profile.openwrt_host if args.transport == "wired" else None
+    if args.offline:
+        rel = release.from_cache(args.release, profile, args.images)
+    else:
+        try:
+            rel = release.by_tag(args.release, profile)
+        except release.ReleaseError as online_error:
+            try:
+                rel = release.from_cache(args.release, profile, args.images)
+                log(f"[!] release API unavailable; using verified "
+                    f"{args.release} cache")
+            except release.ReleaseError:
+                raise online_error
+    ram_wifi = args.transport == "wifi"
+    ubi, itb = verified_ram_images(
+        rel, args.images, args.flavour, wifi=ram_wifi)
 
     # Validate the stock image before touching the device: if it is not a
     # restorable image there is no point pivoting anything.
     payload, _digest, known = restore.carve(args.image, profile)
     restore.inspect(payload, profile)
-    if not known:
-        log("[!] this image's hash is not one the port publishes")
-        if not args.yes:
-            raise restore.RestoreError("refusing an unrecognised image without --yes")
+    restore.require_trusted_image(_digest, known, args.expected_image_sha256)
 
     if args.root_password:
         install.SSH_PASSWORDS.append(args.root_password)
@@ -206,7 +245,8 @@ def main():
 
     host = args.host
     if args.discover:
-        host = install.wait_and_discover(args.discover, deadline_s=120)
+        host = install.wait_and_discover(
+            args.discover, deadline_s=120, fallback=fallback)
     if not host:
         raise restore.RestoreError("give --host or --discover")
 
@@ -214,14 +254,25 @@ def main():
     board, rtype = state_of(host, profile)
     log(f"[*] {host}: {board}, rootfs_type={rtype}")
 
+    rc, raw_ft = install.ssh(
+        host, "fw_printenv -n flash_type 2>/dev/null", check=False)
+    if rc != 0 or not raw_ft.strip():
+        rc, raw_ft = install.ssh(
+            host, "fw_printenv flash_type 2>/dev/null", check=False)
+        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
+    _ft, _part, why = install.require_permanent_nand_support(
+        raw_ft, rel, profile, args.images)
+    log(f"[*] RAM-image NAND gate: PASS -- {why}")
+
     if rtype != "tmpfs":
         log("\n=== step 1: pivot into the RAM initramfs ===")
-        ubi, itb = find_ram_images(args.images, args.release)
         if not args.yes and not args.dry_run:
             if input(f"[?] write {os.path.basename(ubi)} to ubi_kernel and "
                      "reboot? [type YES] ").strip() != "YES":
                 raise restore.RestoreError("declined")
-        newhost = pivot_to_ram(host, ubi, itb, args.discover, args.dry_run)
+        newhost = pivot_to_ram(host, ubi, itb, args.discover, args.dry_run,
+                               fallback=fallback,
+                               recover_stale_lock=args.recover_stale_lock)
         if args.dry_run:
             log("\n[dry-run] would restore stock next; stopping.")
             return 0
@@ -249,7 +300,7 @@ def main():
                 != "RESTORE":
             raise restore.RestoreError("declined")
     restore.do_restore(host, payload, restore.img_volumes(payload, profile), plan,
-                       profile)
+                       profile, recover_stale_lock=args.recover_stale_lock)
 
     log("\n=== step 3: wait for stock ===")
     import chain
@@ -273,7 +324,7 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except restore.RestoreError as e:
+    except (restore.RestoreError, release.ReleaseError, install.Abort) as e:
         log(f"[-] {e}")
         sys.exit(1)
     except KeyboardInterrupt:

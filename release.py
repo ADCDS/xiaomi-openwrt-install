@@ -293,15 +293,16 @@ def get_images(rel, destdir, flavour="default", kinds=("initramfs_ubi", "sysupgr
     image has no such variant and is fetched unchanged either way.
     """
     sums = checksums(rel, destdir)
-    if not sums:
-        print(f"[!] {rel.tag} publishes no sha256sums.txt -- downloads are "
-              "unverified beyond their length")
     out = {}
     cachedir = cache_dir(rel, destdir)
     for kind in kinds:
         name = rel.require(kind, flavour, wifi and kind.startswith("initramfs"))
         print(f"[*] {kind}: {name}")
         want = expected_digest(rel, name, sums.get(name))
+        if not want:
+            raise ReleaseError(
+                f"{rel.tag} provides no trusted SHA-256 for {name}; refusing "
+                "to use a length-only download")
         path = download(rel, name, cachedir)
         digest = sha256(path)
         if want and digest != want:

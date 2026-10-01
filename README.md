@@ -22,6 +22,11 @@ Factory-reset the router and leave it at Xiaomi's setup wizard. **Do not finish
 the web wizard.** Connect the computer to a LAN port or to the open factory
 Wi-Fi network (`minet_rd03_*`). Keep the router on stable power.
 
+Use an isolated link: a direct Ethernet cable is preferred. If using the open
+factory Wi-Fi, ensure no other client is joined. The temporary root callback
+uses a per-run token and peer checks, while the stock firmware cannot provide
+an authenticated encrypted channel for this exploit stage.
+
 Clone this repository:
 
 ```sh

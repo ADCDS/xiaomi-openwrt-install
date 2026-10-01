@@ -62,6 +62,20 @@ class RestoreError(Exception):
     pass
 
 
+def require_trusted_image(digest, known, expected_digest=None):
+    """Require either a profile-approved image or an exact explicit digest."""
+    if known:
+        return
+    expected = (expected_digest or "").strip().lower()
+    if expected != digest:
+        raise RestoreError(
+            f"stock image SHA-256 {digest} is not approved for this profile. "
+            "Use a published image, or pass its exact digest with "
+            "--expected-image-sha256 for deliberate development testing.")
+    print("[!] accepting an unlisted stock image only because its exact "
+          "SHA-256 was supplied explicitly")
+
+
 def carve(path, profile):
     """HDR1 -> the raw UBI payload, checked rather than assumed."""
     d = open(path, "rb").read()
@@ -211,8 +225,12 @@ def plan(mtd, profile):
 
 RESTORE_SCRIPT = """\
 #!/bin/sh
-if [ -e /tmp/restore.lock ]; then exit 0; fi
-: > /tmp/restore.lock
+if ! mkdir /tmp/restore.lock 2>/dev/null; then
+    echo fail:locked > /tmp/restore.status
+    exit 1
+fi
+echo $$ > /tmp/restore.lock/pid
+trap 'rm -rf /tmp/restore.lock' EXIT
 exec >/tmp/restore.log 2>&1
 set -x
 echo running > /tmp/restore.status
@@ -241,14 +259,16 @@ def main():
     ap.add_argument("--dry-run", action="store_true",
                     help="carve, verify and print the plan; touch nothing")
     ap.add_argument("--yes", action="store_true")
+    ap.add_argument("--expected-image-sha256", default=None,
+                    help="explicit digest for an unlisted development image")
+    ap.add_argument("--recover-stale-lock", action="store_true",
+                    help="clear an inactive stale writer lock after inspection")
     args = ap.parse_args()
     profile = devices.get_profile(args.device)
 
     payload, digest, known = carve(args.image, profile)
     inspect(payload, profile)
-    if not known:
-        print("[!] this image's hash is not one the port publishes. It may be "
-              "genuine, but nothing here can vouch for it.")
+    require_trusted_image(digest, known, args.expected_image_sha256)
 
     if args.dry_run and not (args.host or args.discover):
         print("\n[dry-run] image is valid and restorable. Re-run with --host or "
@@ -288,7 +308,8 @@ def main():
         if input("\ntype RESTORE to continue: ").strip() != "RESTORE":
             print("declined")
             return 1
-    do_restore(host, payload, img_volumes(payload, profile), p, profile)
+    do_restore(host, payload, img_volumes(payload, profile), p, profile,
+               recover_stale_lock=args.recover_stale_lock)
     return 0
 
 
@@ -299,11 +320,63 @@ def img_volumes(payload, profile):
             for v in img.volumes.values() if v.lebs}
 
 
-def do_restore(host, payload, want_md5, p, profile):
+def parse_env_values(text, keys):
+    values = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        if key in values:
+            raise RestoreError(f"duplicate boot environment value for {key}")
+        values[key] = value
+    missing = [key for key in keys if key not in values]
+    if missing:
+        raise RestoreError(f"boot environment readback is missing {missing}")
+    return values
+
+
+def set_bootenv_verified(host, wanted):
+    for key, value in wanted.items():
+        ssh(host, f"fw_setenv {key} {value}", check=True)
+    keys = tuple(wanted)
+    _rc, output = ssh(host, "fw_printenv " + " ".join(keys), check=True)
+    got = parse_env_values(output, keys)
+    mismatched = {key: (str(wanted[key]), got[key]) for key in keys
+                  if got[key] != str(wanted[key])}
+    if mismatched:
+        raise RestoreError(f"boot environment readback mismatch: {mismatched}")
+    return got
+
+
+def remote_job_state(host, status_path, lock_dir):
+    _rc, state = ssh(
+        host,
+        f"s=$(cat {status_path} 2>/dev/null); "
+        f"p=$(cat {lock_dir}/pid 2>/dev/null); "
+        "a=0; [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && a=1; "
+        f"printf 'status=%s pid=%s active=%s lock=%s' \"$s\" \"$p\" \"$a\" "
+        f"\"$([ -d {lock_dir} ] && echo 1 || echo 0)\"",
+        check=False)
+    return state
+
+
+def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
     import tempfile
     k, _ = p["write"]
     _kd, tail_off, tail_cnt = p["erase_tail"]
     rd, _, rootfs_cnt = p["erase_rootfs"]
+
+    state = remote_job_state(host, "/tmp/restore.status", "/tmp/restore.lock")
+    reuse_done = "status=done" in state
+    reuse_active = "active=1" in state
+    if not (reuse_done or reuse_active) and (
+            "lock=1" in state or "status=fail" in state or "status=running" in state):
+        if not recover_stale_lock:
+            raise RestoreError(
+                f"stale/failed restore state requires --recover-stale-lock "
+                f"after inspection ({state})")
+        ssh(host, "rm -rf /tmp/restore.lock; rm -f /tmp/restore.status")
+        print(f"[1] explicitly cleared inactive stale restore state: {state}")
 
     with tempfile.TemporaryDirectory() as tmp:
         ubi = os.path.join(tmp, "stock.ubi")
@@ -316,28 +389,37 @@ def do_restore(host, payload, want_md5, p, profile):
         if avail < len(payload) + 2 * 1024 * 1024:
             raise RestoreError(f"/tmp has {avail} B free, need {len(payload)}")
 
-        print(f"\n[1] uploading {len(payload)} B ...")
-        scp(host, ubi, "/tmp/stock.ubi")
-        _rc, out = ssh(host, "md5sum /tmp/stock.ubi", timeout=300)
-        if local_md5 not in out:
-            raise RestoreError(f"upload md5 mismatch: {out!r} != {local_md5}")
-        print(f"[1] md5 {local_md5} verified on the device")
+        if not (reuse_done or reuse_active):
+            print(f"\n[1] uploading {len(payload)} B ...")
+            scp(host, ubi, "/tmp/stock.ubi")
+            _rc, out = ssh(host, "md5sum /tmp/stock.ubi", timeout=300)
+            if local_md5 not in out:
+                raise RestoreError(f"upload md5 mismatch: {out!r} != {local_md5}")
+            print(f"[1] md5 {local_md5} verified on the device")
 
-        script = os.path.join(tmp, "restore.sh")
-        with open(script, "w") as fh:
-            fh.write(RESTORE_SCRIPT.format(k=k, r=rd, tail_off=hex(tail_off),
-                                           tail_cnt=tail_cnt,
-                                           rootfs_cnt=rootfs_cnt))
-        scp(host, script, "/tmp/restore.sh")
-        ssh(host, "chmod +x /tmp/restore.sh; rm -f /tmp/restore.status "
-                  "/tmp/restore.lock")
+            script = os.path.join(tmp, "restore.sh")
+            with open(script, "w") as fh:
+                fh.write(RESTORE_SCRIPT.format(k=k, r=rd, tail_off=hex(tail_off),
+                                               tail_cnt=tail_cnt,
+                                               rootfs_cnt=rootfs_cnt))
+            scp(host, script, "/tmp/restore.sh")
+            ssh(host, "chmod +x /tmp/restore.sh; rm -f /tmp/restore.status")
 
-    # Detached, and proven started: `start-stop-daemon -S` matches on the -x
-    # binary, so it must name the script, not the shell.
-    print("[2] writing, detached")
-    ssh(host, "start-stop-daemon -S -b -x /tmp/restore.sh", check=False)
+    if reuse_done:
+        print("[2] prior restore reports done; reusing it for readback")
+    elif reuse_active:
+        print("[2] existing restore writer is active; waiting for it")
+    else:
+        # Detached, and proven started: `start-stop-daemon -S` matches on the
+        # -x binary, so it must name the script, not the shell.
+        print("[2] writing, detached")
+        _rc, launch = ssh(
+            host, "start-stop-daemon -S -b -x /tmp/restore.sh; echo rc=$?",
+            check=False)
+        if "rc=0" not in launch:
+            raise RestoreError(f"restore launcher failed: {launch!r}")
     deadline = time.time() + 900
-    status = ""
+    status = "done" if reuse_done else ""
     while time.time() < deadline:
         time.sleep(5)
         _rc, status = ssh(host, "cat /tmp/restore.status 2>/dev/null", check=False)
@@ -384,15 +466,16 @@ def do_restore(host, payload, want_md5, p, profile):
             "you to the initramfs and you can retry.")
 
     print("[4] pointing the bootloader back at stock's slot")
-    for key, val in (("flag_last_success", 0), ("flag_boot_rootfs", 0),
-                     ("flag_try_sys1_failed", 0), ("flag_try_sys2_failed", 0),
-                     ("flag_boot_success", 1)):
-        ssh(host, f"fw_setenv {key} {val}", check=False)
-    _rc, chk = ssh(host, "fw_printenv flag_last_success flag_try_sys1_failed "
-                         "flag_try_sys2_failed", check=False)
-    print(f"    {chk}")
-    if "flag_last_success=0" not in chk:
-        raise RestoreError("flag_last_success did not stick -- not rebooting")
+    wanted_env = {
+        "flag_last_success": 0,
+        "flag_boot_rootfs": 0,
+        "flag_try_sys1_failed": 0,
+        "flag_try_sys2_failed": 0,
+        "flag_boot_success": 1,
+        "flag_ota_reboot": 0,
+    }
+    got_env = set_bootenv_verified(host, wanted_env)
+    print("    " + " ".join(f"{key}={got_env[key]}" for key in wanted_env))
 
     print("[5] rebooting into stock")
     ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
