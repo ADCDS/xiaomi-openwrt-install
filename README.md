@@ -3,7 +3,7 @@
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
 
-The installer uses the documented V1 → V2 `cab_meshd` chain to obtain root,
+The installer uses the [documented V1 → V2](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure#combined-v1--v2-capuci-exploit) `cab_meshd` chain to obtain root,
 checks the exact board, NAND and partition layout, downloads the OpenWrt images
 selected by the device profile, boots the RAM installer, and writes the
 permanent image.
