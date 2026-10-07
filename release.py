@@ -82,7 +82,8 @@ def _api_via_gh(path):
                            text=True, timeout=30)
         if r.returncode != 0:
             return None
-        print("[*] (used an authenticated `gh api` -- anonymous quota exhausted)")
+        print("[*] (used an authenticated `gh api` -- anonymous quota exhausted)",
+              file=sys.stderr)
         return json.loads(r.stdout)
     except Exception:                                            # noqa: BLE001
         return None
@@ -144,15 +145,43 @@ class Release:
 
 
 def latest(profile=devices.RD03V2):
-    return Release(_api(f"repos/{profile.release_repo}/releases/latest"), profile)
+    meta = _api(f"repos/{profile.release_repo}/releases/latest")
+    if meta.get("draft") or meta.get("prerelease"):
+        raise ReleaseError("GitHub did not return a published stable release")
+    return Release(meta, profile)
 
 
 def by_tag(tag, profile=devices.RD03V2):
     return Release(_api(f"repos/{profile.release_repo}/releases/tags/{tag}"), profile)
 
 
+def resolve(tag=None, profile=devices.RD03V2, destdir="images", *, offline=False,
+            log=print):
+    """Resolve a release once; only concrete tags may use a verified cache."""
+    tag = tag or profile.default_release
+    if offline:
+        return from_cache(tag, profile, destdir)
+    try:
+        return latest(profile) if tag == "latest" else by_tag(tag, profile)
+    except ReleaseError as online_error:
+        if tag == "latest":
+            raise ReleaseError(
+                f"{online_error}\nTo use cached images, select an explicit release "
+                "tag with --release TAG or --tag TAG and --offline.") from online_error
+        try:
+            rel = from_cache(tag, profile, destdir)
+        except ReleaseError:
+            raise online_error
+        log(f"[!] release API unavailable; using verified {tag} cache")
+        return rel
+
+
 def from_cache(tag, profile=devices.RD03V2, destdir="images"):
     """Build release metadata from a previously verified tag-scoped cache."""
+    if not tag or tag == "latest":
+        raise ReleaseError(
+            "offline operation requires an explicit release tag; "
+            "use --release TAG or --tag TAG instead of 'latest'")
     stub = Release({"tag_name": tag, "assets": []}, profile)
     root = cache_dir(stub, destdir)
     sums_path = os.path.join(root, "sha256sums.txt")
@@ -413,10 +442,13 @@ def main(argv):
     import argparse
     ap = argparse.ArgumentParser(description="Inspect/fetch a supported OpenWrt release.")
     devices.add_device_argument(ap)
-    ap.add_argument("--tag", default=None, help="default: the latest release")
+    ap.add_argument("--tag", default=None,
+                    help="release tag or 'latest' (default: profile selection)")
     ap.add_argument("--flavour", default="default", choices=("default", "nss"))
     ap.add_argument("--dest", default="images")
     ap.add_argument("--download", action="store_true")
+    ap.add_argument("--offline", action="store_true",
+                    help="use verified cached images; requires an explicit --tag")
     ap.add_argument("--nand", default=None,
                     help="part name from the probe, e.g. 'Winbond W25N01KW'")
     ap.add_argument("--flash-type", default=None,
@@ -426,7 +458,7 @@ def main(argv):
     args = ap.parse_args(argv[1:])
     profile = devices.get_profile(args.device)
 
-    rel = by_tag(args.tag, profile) if args.tag else latest(profile)
+    rel = resolve(args.tag, profile, args.dest, offline=args.offline)
     print(f"{rel.tag}  published {rel.published}  ({len(rel.assets)} assets)")
     for n in sorted(rel.assets):
         print(f"  {rel.assets[n]['size']:>12} B  {n}")

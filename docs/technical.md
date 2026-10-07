@@ -159,12 +159,12 @@ on the other.
 ```sh
 python3 selftest.py                          # no hardware or network
 
-# Add checks against the selected profile's default release artifacts:
-DEFAULT_RELEASE=$(python3 -c \
-    'import devices; print(devices.get_profile("rd03v2").default_release)')
-python3 release.py --device rd03v2 --tag "$DEFAULT_RELEASE" \
+# Resolve the profile default once, then check that concrete release's artifacts:
+RELEASE_TAG=$(python3 -c \
+    'import release; print(release.resolve().tag)')
+python3 release.py --device rd03v2 --tag "$RELEASE_TAG" \
     --download --wifi --dest images
-RD03V2_IMAGES="images/$DEFAULT_RELEASE" python3 selftest.py
+RD03V2_IMAGES="images/$RELEASE_TAG" python3 selftest.py
 
 # Optionally add stock-image carving and layout checks:
 XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
@@ -179,6 +179,15 @@ its passphrase), and callback token. When a manual stage is needed, use the
 continuation command printed by `install.py`; the flash stage refuses selection
 drift. `attach.py` likewise requires the bind address and token from this
 manifest.
+
+New installations and stock-revert RAM images default to the firmware
+repository's latest published full release. `release.resolve` selects its
+concrete tag once per run; all images come from that release's tag-scoped cache.
+Resumed installations select the tag and validate the image hashes recorded in
+their manifest. Offline operation requires a concrete `--release TAG` (or
+`--tag TAG` in `release.py`), unless the install's resume manifest supplies it.
+An API failure can fall back to a verified cache only for a concrete tag;
+`latest` is never inferred from local cache directories.
 
 As soon as the RAM system reports that the detached sysupgrade launcher has
 started, the host atomically records `flash-started` before allowing the write

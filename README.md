@@ -46,10 +46,12 @@ python3 install.py standard
 python3 install.py nss
 ```
 
-The device profile supplies the tested default OpenWrt release. The installer
-downloads and verifies the matching RAM and permanent images, detects whether
-the router is connected by Ethernet or Wi-Fi, backs up device-specific
-partitions, and asks before each irreversible write.
+By default, the installer selects the latest published release from the device
+profile's firmware repository, excluding drafts and prereleases. It downloads
+and verifies the matching RAM and permanent images, detects whether the router
+is connected by Ethernet or Wi-Fi, backs up device-specific partitions, and asks
+before each irreversible write. New firmware releases become the default
+automatically.
 
 Override connection detection with `--transport wired` or `--transport wifi`.
 If route-based interface detection fails, append `--interface INTERFACE_NAME`.
@@ -85,16 +87,27 @@ interactively during installation with:
 python3 install.py standard --configure
 ```
 
-Download and fully verify the profile's default image set without contacting a
+Download and fully verify the latest release's image set without contacting a
 router:
 
 ```sh
 python3 install.py standard --dry-run
 ```
 
-Use `--release TAG` to select a particular release, or `--release latest` to
-follow the release repository's current latest tag instead of the profile's
-tested default.
+Use `--release TAG` to select a particular release. `--release latest` explicitly
+selects the default behavior. Each installation records the resolved tag and
+image hashes in its private resume manifest, so continuing an interrupted run
+keeps the original release even if a newer one has been published.
+
+Offline installs require an explicit tag and its verified cached images:
+
+```sh
+python3 install.py standard --release v1.13 --dry-run
+python3 install.py standard --release v1.13 --offline
+```
+
+If GitHub is unavailable, an explicitly selected tag can also use its verified
+cache. Selecting `latest` requires GitHub access.
 
 If the connection is lost after `sysupgrade` starts, do not repeat the flash
 stage. Use the private manifest printed by the original run to perform only
@@ -123,6 +136,8 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
 `revert.py` verifies the stock image, downloads and verifies the profile's RAM
 image pair, pivots the router into RAM, restores stock, and confirms that the
 setup wizard returns. It infers Ethernet or Wi-Fi from the selected interface.
+The RAM images default to the latest published release; use `--release TAG` to
+select a specific release, and add `--offline` to use its verified cache.
 During a Wi-Fi revert, join the temporary RAM network when `revert.py` prints
 its SSID and password. The useful overrides are:
 

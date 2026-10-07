@@ -1106,8 +1106,7 @@ def parse_args(argv=None):
         help="image to install (default: standard)")
     ap.add_argument(
         "--release", "--tag", dest="tag", default=None,
-        help="OpenWrt release tag (default: selected profile's tested release; "
-             "use 'latest' to follow latest)")
+        help="OpenWrt release tag or 'latest' (default: latest published release)")
     ap.add_argument(
         "--interface", "--discover", dest="discover", metavar="IFACE",
         help="router-facing network interface (normally detected automatically)")
@@ -1607,21 +1606,10 @@ def main(argv=None):
             root_password_set=(resume.get("root_password_set")
                                or bool(args.root_password)))
 
-    # The release first: no point touching a device for an image that cannot
-    # drive its flash. The simple interface is pinned to a tested release, but
-    # `--release latest` remains available deliberately.
-    if args.offline:
-        rel = release.from_cache(args.tag, profile, args.images)
-    else:
-        try:
-            rel = (release.latest(profile) if args.tag == "latest"
-                   else release.by_tag(args.tag, profile))
-        except release.ReleaseError as online_error:
-            try:
-                rel = release.from_cache(args.tag, profile, args.images)
-                log(f"[!] release API unavailable; using verified {args.tag} cache")
-            except release.ReleaseError:
-                raise online_error
+    # Resolve and verify one release before contacting the router. Resumed
+    # installs use the concrete tag restored from their manifest above.
+    rel = release.resolve(args.tag, profile, args.images,
+                          offline=args.offline, log=log)
     log(f"[*] selected {args.image} image from release {rel.tag} ({rel.published})")
     kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
     # A Wi-Fi transport requires a beaconing initramfs; a radio-silent fallback

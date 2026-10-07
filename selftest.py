@@ -15,6 +15,7 @@ import base64
 import hashlib
 import hmac
 import http.server
+import io
 import json
 import os
 import shutil
@@ -75,9 +76,10 @@ def test_simple_installer_cli():
     import install
     print("\n== simple installer CLI ==")
     args = install.parse_args([])
-    check("default command selects the profile's standard tested release",
+    check("default command selects the latest standard release",
           args.image == "standard" and args.flavour == "default"
-          and args.tag == devices.RD03V2.default_release and args.stage == "all"
+          and args.tag == devices.RD03V2.default_release == "latest"
+          and args.stage == "all"
           and args.transport == "auto")
     args = install.parse_args(["nss", "--interface", "enx0", "--dry-run"])
     check("NSS selection maps to the NSS release family",
@@ -204,6 +206,10 @@ def test_resume_manifest_and_flash_guards():
         check("resume manifest is private", (os.stat(path).st_mode & 0o777) == 0o600)
         check("resume manifest records the prepared phase",
               data["phase"] == "prepared")
+        check("latest selection records a concrete release and image hashes",
+              args.tag == "latest" and data["release"] == "v1.11"
+              and data["images"]["sysupgrade"]["sha256"]
+              == images["sysupgrade"]["sha256"])
         check("resume records password requirement without plaintext",
               data["root_password_set"] is True
               and "secret-not-persisted" not in open(path).read())
@@ -222,6 +228,14 @@ def test_resume_manifest_and_flash_guards():
             check("resume flavor drift is refused", False)
         except install.Abort:
             check("resume flavor drift is refused", True)
+
+        changed = {"sysupgrade": {**images["sysupgrade"], "sha256": "0" * 64}}
+        try:
+            install.verify_resume_selection(
+                data, args, devices.RD03V2, rel, changed)
+            check("resume image hash drift is refused", False)
+        except install.Abort:
+            check("resume image hash drift is refused", True)
 
         v16 = release.Release({"tag_name": "v1.6", "assets": []})
         try:
@@ -1178,6 +1192,208 @@ def test_v17_nand_support():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_release_selection():
+    print("\n== automatic release selection ==")
+    profile = devices.RD03V2
+    endpoint = f"repos/{profile.release_repo}/releases/"
+    meta = {"tag_name": "v1.13", "assets": [], "draft": False,
+            "prerelease": False}
+    for tag in (None, "latest", "v1.13"):
+        with mock.patch.object(release, "_api", return_value=meta) as api:
+            rel = release.resolve(tag)
+        suffix = "tags/v1.13" if tag == "v1.13" else "latest"
+        check(f"release selection {tag!r} resolves to a concrete tag",
+              rel.tag == "v1.13" and api.call_count == 1
+              and api.call_args == mock.call(endpoint + suffix)
+              and release.cache_dir(rel, "images") == "images/v1.13")
+
+    stdout, stderr = io.StringIO(), io.StringIO()
+    rate_limit = release.urllib.error.HTTPError("https://api.github.com/", 403,
+                                               "rate limited", {}, None)
+    gh_result = subprocess.CompletedProcess([], 0, json.dumps(meta), "")
+    with mock.patch.object(release.urllib.request, "urlopen", side_effect=rate_limit), \
+            mock.patch.object(release.shutil, "which", return_value="/usr/bin/gh"), \
+            mock.patch.object(release.subprocess, "run", return_value=gh_result), \
+            mock.patch.object(sys, "stdout", stdout), \
+            mock.patch.object(sys, "stderr", stderr):
+        print(release.resolve().tag)
+    check("authenticated API fallback keeps a captured tag free of diagnostics",
+          stdout.getvalue() == "v1.13\n" and "authenticated" in stderr.getvalue())
+
+    for flag in ("draft", "prerelease"):
+        with mock.patch.object(release, "_api", return_value={**meta, flag: True}):
+            try:
+                release.resolve()
+                check(f"latest rejects a {flag} response", False)
+            except release.ReleaseError as exc:
+                check(f"latest rejects a {flag} response",
+                      "published stable release" in str(exc))
+
+    with mock.patch.object(release, "_api") as api, \
+            mock.patch.object(release, "cache_dir") as cache:
+        for tag in (None, "latest"):
+            try:
+                release.resolve(tag, offline=True)
+                check(f"offline {tag!r} requires an explicit tag", False)
+            except release.ReleaseError as exc:
+                check(f"offline {tag!r} requires an explicit tag",
+                      "explicit release tag" in str(exc))
+        try:
+            release.from_cache("latest")
+            check("cache cannot represent an unresolved latest release", False)
+        except release.ReleaseError:
+            check("cache cannot represent an unresolved latest release", True)
+        check("offline latest never queries GitHub or opens a cache",
+              not api.called and not cache.called)
+
+    pinned = release.Release(meta)
+    with mock.patch.object(release, "_api") as api, \
+            mock.patch.object(release, "from_cache", return_value=pinned) as cache:
+        rel = release.resolve("v1.13", destdir="cache", offline=True)
+        check("explicit offline selection uses only its tagged cache",
+              rel is pinned and not api.called
+              and cache.call_args == mock.call("v1.13", profile, "cache"))
+
+    online_error = release.ReleaseError("GitHub unavailable")
+    with mock.patch.object(release, "_api", side_effect=online_error), \
+            mock.patch.object(release, "from_cache", return_value=pinned) as cache:
+        try:
+            release.resolve()
+            check("latest API failure requires explicit cached selection", False)
+        except release.ReleaseError as exc:
+            check("latest API failure requires explicit cached selection",
+                  "GitHub unavailable" in str(exc)
+                  and "explicit release tag" in str(exc) and not cache.called)
+        messages = []
+        rel = release.resolve("v1.13", destdir="cache", log=messages.append)
+        check("explicit tag retains verified cache fallback",
+              rel is pinned and cache.call_args == mock.call("v1.13", profile, "cache")
+              and messages == ["[!] release API unavailable; using verified v1.13 cache"])
+
+    with mock.patch.object(release, "_api", side_effect=online_error), \
+            mock.patch.object(release, "from_cache",
+                              side_effect=release.ReleaseError("bad cache")):
+        try:
+            release.resolve("v1.13")
+            check("failed fallback preserves the original API error", False)
+        except release.ReleaseError as exc:
+            check("failed fallback preserves the original API error", exc is online_error)
+
+
+def test_release_entrypoints():
+    import install
+    import revert
+    print("\n== release selection entrypoints and resume ==")
+    profile = devices.RD03V2
+    endpoint = f"repos/{profile.release_repo}/releases/"
+    meta = {"tag_name": "v1.13", "assets": []}
+    root = tempfile.mkdtemp(prefix="xiaomi-release-selection-")
+    old_umask = os.umask(0o077)
+    try:
+        images = {kind: {"name": kind, "path": os.path.join(root, kind),
+                         "sha256": "a" * 64}
+                  for kind in profile.image_kinds}
+        with mock.patch.object(chain, "local_interface", return_value=None), \
+                mock.patch.object(chain, "set_log_sink", side_effect=lambda fh: fh.close()), \
+                mock.patch.object(chain, "_LOG_SINK", None), \
+                mock.patch.object(chain, "init_info",
+                                  side_effect=AssertionError("router contacted")), \
+                mock.patch.object(release, "get_images", return_value=images), \
+                mock.patch.object(install, "expected_volume", return_value=(b"volume", "md5")):
+            for options, suffix in (([], "latest"), (["--release", "latest"], "latest"),
+                                    (["--release", "v1.13"], "tags/v1.13")):
+                with mock.patch.object(release, "_api", return_value=meta) as api, \
+                        mock.patch("builtins.print"):
+                    rc = install.main(["--dry-run", "--outdir", root] + options)
+                check(f"installer {options!r} selects the expected release",
+                      rc == 0 and api.call_count == 1
+                      and api.call_args == mock.call(endpoint + suffix))
+
+            args = install.parse_args(["--transport", "wired"])
+            args.images = root
+            args.discover = "eth0"
+            manifest = os.path.join(root, "resume.json")
+            install.write_resume_manifest(
+                manifest, args, profile, release.Release(meta), images, "token", None)
+
+            def updated_api(path):
+                return {**meta, "tag_name": "v1.14"} if path.endswith("/latest") else meta
+
+            with mock.patch.object(release, "_api", side_effect=updated_api) as api, \
+                    mock.patch("builtins.print"):
+                rc = install.main(["--resume-manifest", manifest, "--dry-run"])
+            check("resuming after a new release retains the recorded tag",
+                  rc == 0 and api.call_count == 1
+                  and api.call_args == mock.call(endpoint + "tags/v1.13"))
+
+            with mock.patch.object(release, "_api") as api, \
+                    mock.patch.object(release, "from_cache",
+                                      return_value=release.Release(meta)) as cache, \
+                    mock.patch("builtins.print"):
+                rc = install.main(["--resume-manifest", manifest, "--dry-run", "--offline"])
+            check("offline resume uses the recorded concrete tag without GitHub",
+                  rc == 0 and not api.called
+                  and cache.call_args == mock.call("v1.13", profile, root))
+
+            with mock.patch.object(release, "_api") as api, \
+                    mock.patch("builtins.print"):
+                try:
+                    install.main(["--dry-run", "--offline", "--outdir", root])
+                    check("installer rejects offline latest before router access", False)
+                except release.ReleaseError as exc:
+                    check("installer rejects offline latest before router access",
+                          "explicit release tag" in str(exc) and not api.called)
+
+        for options, suffix in (([], "latest"), (["--release", "latest"], "latest"),
+                                (["--release", "v1.13"], "tags/v1.13")):
+            argv = ["revert.py", "--device", "rd03v2", "stock.bin",
+                    "--transport", "wired", "--dry-run"] + options
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.object(release, "_api", return_value=meta) as api, \
+                    mock.patch.object(revert, "verified_ram_images",
+                                      side_effect=RuntimeError("stop before router")):
+                try:
+                    revert.main()
+                except RuntimeError as exc:
+                    if str(exc) != "stop before router":
+                        raise
+            check(f"revert {options!r} selects the expected release",
+                  api.call_count == 1 and api.call_args == mock.call(endpoint + suffix))
+
+        argv = ["revert.py", "--device", "rd03v2", "stock.bin",
+                "--transport", "wired", "--offline"]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(release, "_api") as api, \
+                mock.patch.object(revert, "verified_ram_images") as images_loader:
+            try:
+                revert.main()
+                check("revert rejects offline latest before loading RAM images", False)
+            except release.ReleaseError as exc:
+                check("revert rejects offline latest before loading RAM images",
+                      "explicit release tag" in str(exc)
+                      and not api.called and not images_loader.called)
+
+        for options, suffix in (([], "latest"), (["--tag", "latest"], "latest"),
+                                (["--tag", "v1.13"], "tags/v1.13")):
+            with mock.patch.object(release, "_api", return_value=meta) as api, \
+                    mock.patch("builtins.print"):
+                rc = release.main(["release.py", "--device", "rd03v2"] + options)
+            check(f"release CLI {options!r} selects the expected release",
+                  rc == 0 and api.call_count == 1
+                  and api.call_args == mock.call(endpoint + suffix))
+
+        with mock.patch.object(release, "_api") as api:
+            try:
+                release.main(["release.py", "--device", "rd03v2", "--offline"])
+                check("release CLI rejects offline latest without GitHub", False)
+            except release.ReleaseError as exc:
+                check("release CLI rejects offline latest without GitHub",
+                      "explicit release tag" in str(exc) and not api.called)
+    finally:
+        os.umask(old_umask)
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def test_release_integrity():
     print("\n== release cache and integrity ==")
     one = release.Release({"tag_name": "v1.10", "assets": []})
@@ -1210,7 +1426,7 @@ def test_release_integrity():
         digest = release.sha256(payload)
         with open(os.path.join(tagged, "sha256sums.txt"), "w") as output:
             output.write(f"{digest}  image.bin\n")
-        cached = release.from_cache("v1.11", devices.RD03V2, root)
+        cached = release.resolve("v1.11", devices.RD03V2, root, offline=True)
         check("verified offline cache reconstructs release metadata",
               release.api_digest(cached, "image.bin") == digest)
     finally:
@@ -1364,6 +1580,8 @@ def main():
     test_installer_preflight()
     test_v17_names()
     test_v17_nand_support()
+    test_release_selection()
+    test_release_entrypoints()
     test_release_integrity()
     test_tagged_revert_cache()
     test_stock_image()

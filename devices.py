@@ -55,7 +55,7 @@ RD03V2 = DeviceProfile(
     installer_wifi_key="rd03v2install",
     release_repo="ADCDS/openwrt-xiaomi-ax3000t-rd03v2",
     release_prefix="openwrt-qualcommax-ipq50xx-xiaomi_mi-router-ax3000t-v2",
-    default_release="v1.11",
+    default_release="latest",
     image_kinds={
         "initramfs_itb": "initramfs-uImage.itb",
         "initramfs_ubi": "initramfs-factory.ubi",

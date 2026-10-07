@@ -195,8 +195,8 @@ def main():
     ap.add_argument("--images", default="images",
                     help="directory holding the initramfs pair")
     ap.add_argument("--release", default=None,
-                    help="release tag used for the RAM image "
-                         "(default: selected profile's tested release)")
+                    help="release tag or 'latest' for the RAM image "
+                         "(default: latest published release)")
     ap.add_argument("--flavour", choices=("default", "nss"), default="default")
     ap.add_argument("--offline", action="store_true")
     ap.add_argument("--root-password", default=None,
@@ -215,18 +215,8 @@ def main():
     elif args.transport == "auto":
         args.transport = "wired" if args.host and "%" not in args.host else "wifi"
     fallback = profile.openwrt_host if args.transport == "wired" else None
-    if args.offline:
-        rel = release.from_cache(args.release, profile, args.images)
-    else:
-        try:
-            rel = release.by_tag(args.release, profile)
-        except release.ReleaseError as online_error:
-            try:
-                rel = release.from_cache(args.release, profile, args.images)
-                log(f"[!] release API unavailable; using verified "
-                    f"{args.release} cache")
-            except release.ReleaseError:
-                raise online_error
+    rel = release.resolve(args.release, profile, args.images,
+                          offline=args.offline, log=log)
     ram_wifi = args.transport == "wifi"
     ubi, itb = verified_ram_images(
         rel, args.images, args.flavour, wifi=ram_wifi)
