@@ -46,7 +46,7 @@ RD03V2 = DeviceProfile(
     display_name="Xiaomi AX3000T (RD03v2)",
     stock_hardware=("RD03v2",),
     stock_model="xiaomi.router.rd03v2",
-    tested_stock_roms=("2.0.28",),
+    tested_stock_roms=("2.0.28", "2.0.12"),
     nvram_model="RD03v2",
     openwrt_board="xiaomi,mi-router-ax3000t-v2",
     stock_host="192.168.31.1",
@@ -96,7 +96,7 @@ RD03V2 = DeviceProfile(
         "3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f":
             "miwifi_rd03v2 2.0.28 (hardware-tested, version code 131100)",
         "be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3":
-            "miwifi_rd03v2 2.0.12 (version code 131084)",
+            "miwifi_rd03v2 2.0.12 (hardware-tested, version code 131084)",
     },
     stock_image_glob="miwifi_rd03v2_*.bin",
     payload_offset=0x2F4,

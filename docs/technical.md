@@ -80,7 +80,7 @@ to revert:
 | version | download | SHA-256 |
 |---|---|---|
 | 2.0.28 (hardware-tested) | [`miwifi_rd03v2_firmware_31bf9_2.0.28.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_31bf9_2.0.28.bin) | `3138342e564c7d7482fde4a90e1778830180f0eac15e1de5f3ad269f9ba9940f` |
-| 2.0.12 (recognized) | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
+| 2.0.12 (hardware-tested) | [`miwifi_rd03v2_firmware_69eec_2.0.12.bin`](https://cdn.cnbj1.fds.api.mi-img.com/xiaoqiang/rom/rd03v2/miwifi_rd03v2_firmware_69eec_2.0.12.bin) | `be7af0e551d440a96757fe885dd775580fd8362addefb594b114f218ccc786c3` |
 
 These are Xiaomi-signed images served from Xiaomi's CDN. In normal use,
 `restore.py` and `revert.py` refuse any image whose full hash is not approved

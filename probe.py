@@ -368,6 +368,9 @@ def main():
         stok, cfg = chain.admin_session(args.host, args.id.encode())
         result["sync_config_keys"] = sorted(cfg)
 
+        log("[2] checking the V2 sink is armed (netmode==0)")
+        result["netmode"] = chain.require_cap_sink_ready(args.host, stok)
+
     # ---- build the payload around what the radios currently look like ------
     restore = []
     if stok:
