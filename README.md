@@ -174,7 +174,7 @@ stages, stock-image hashes, flash-layout details, and recovery procedures.
 
 | Profile | Hardware | Install source | Return to stock |
 |---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Stock 2.0.28, hardware-tested | 2.0.28 hardware-tested; 2.0.12 hash-recognized but not hardware-tested |
+| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Stock 2.0.28 and 2.0.12, hardware-tested | 2.0.28 and 2.0.12 hardware-tested |
 
 The exact tested stock ROMs, release source, NAND support, layouts, and accepted
 stock-image hashes live in [`devices.py`](devices.py). Other Xiaomi models may

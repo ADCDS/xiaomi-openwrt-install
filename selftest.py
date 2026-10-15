@@ -64,12 +64,15 @@ def test_profiles():
             "romversion": "2.0.28"}
     check("validated stock identity accepted",
           devices.stock_identity_error(profile, good) is None)
+    check("second validated stock ROM accepted",
+          devices.stock_identity_error(
+              profile, {**good, "romversion": "2.0.12"}) is None)
     check("wrong hardware rejected",
           "does not match" in devices.stock_identity_error(
               profile, {**good, "hardware": "RD23"}))
     check("untested stock ROM rejected",
           "not validated" in devices.stock_identity_error(
-              profile, {**good, "romversion": "2.0.12"}))
+              profile, {**good, "romversion": "2.0.99"}))
 
 
 def test_simple_installer_cli():
