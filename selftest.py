@@ -1153,6 +1153,40 @@ def test_v17_names():
         check("sysupgrade has no -wifi twin", "no -wifi variant" in str(e))
 
 
+def test_v2_names():
+    print("\n== v2 asset naming: one image set for both selections ==")
+    prefix = devices.RD03V2.release_prefix
+    for tag in ("v2.0.0", "v2.0.0-rc1", "v2.1"):
+        rel = release.Release({"tag_name": tag})
+        check(f"{tag} is a v2 release", rel.is_v2)
+        for flav in ("default", "nss"):
+            check(f"{tag} {flav}: sysupgrade without -nss",
+                  rel.name_for("sysupgrade", flav) == prefix + "-squashfs-sysupgrade.bin")
+            check(f"{tag} {flav}: Wi-Fi RAM installer has only the wifi suffix",
+                  rel.name_for("initramfs_ubi", flav, True) == prefix + "-initramfs-factory-wifi.ubi")
+    for tag in ("v1.14", "v1.7", "v20.0"):
+        rel = release.Release({"tag_name": tag})
+        check(f"{tag} is not a v2 release", not rel.is_v2)
+    check("a v1.x NSS selection keeps its -nss build",
+          release.Release({"tag_name": "v1.14"}).name_for("sysupgrade", "nss")
+          == prefix + "-squashfs-sysupgrade-nss.bin")
+    import install
+    args = install.parse_args(["nss", "--release", "v2.0.0", "--offline"])
+    check("a v2 release installs from the nss selection, offline kept",
+          args.flavour == "nss" and args.tag == "v2.0.0" and args.offline)
+    args = install.parse_args(["standard", "--release", "v2.0.0"])
+    check("a v2 release installs from the standard selection",
+          args.flavour == "default" and args.tag == "v2.0.0")
+    for argv in (["nss-v2"], ["--flavour", "v2"]):
+        with mock.patch("sys.stderr"):
+            try:
+                install.parse_args(argv)
+            except SystemExit as exc:
+                check("no separate v2 selection: " + " ".join(argv), exc.code == 2)
+            else:
+                check("no separate v2 selection: " + " ".join(argv), False)
+
+
 def test_v17_nand_support():
     print("\n== v1.7 nand-support.txt ==")
     d = tempfile.mkdtemp(prefix="rd03v2-nand-")
@@ -1335,6 +1369,18 @@ def test_release_entrypoints():
                     mock.patch("builtins.print"):
                 rc = install.main(["--resume-manifest", manifest, "--dry-run", "--offline"])
             check("offline resume uses the recorded concrete tag without GitHub",
+                  rc == 0 and not api.called
+                  and cache.call_args == mock.call("v1.13", profile, root))
+
+            args.offline = True
+            install.write_resume_manifest(
+                manifest, args, profile, release.Release(meta), images, "token", None)
+            with mock.patch.object(release, "_api") as api, \
+                    mock.patch.object(release, "from_cache",
+                                      return_value=release.Release(meta)) as cache, \
+                    mock.patch("builtins.print"):
+                rc = install.main(["--resume-manifest", manifest, "--dry-run"])
+            check("an offline install stays offline when resumed without --offline",
                   rc == 0 and not api.called
                   and cache.call_args == mock.call("v1.13", profile, root))
 
@@ -1582,6 +1628,7 @@ def main():
     test_pull_fallback()
     test_installer_preflight()
     test_v17_names()
+    test_v2_names()
     test_v17_nand_support()
     test_release_selection()
     test_release_entrypoints()

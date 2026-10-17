@@ -1398,6 +1398,7 @@ def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
         "interface": args.discover,
         "verify_interface": args.verify_interface,
         "images_dir": os.path.abspath(args.images),
+        "offline": args.offline,
         "images": {kind: {"name": item["name"], "sha256": item["sha256"]}
                    for kind, item in images.items()},
         "session_token": token,
@@ -1480,6 +1481,8 @@ def main(argv=None):
         args.transport = resume["transport"]
         args.discover = resume.get("interface")
         args.images = resume["images_dir"]
+        # offline if the interrupted install was, or this resume asks for it
+        args.offline = args.offline or bool(resume.get("offline"))
         args.session_token = resume["session_token"]
         args.config_tar = resume.get("config_tar")
         recorded_attacker = resume.get("callback_address")

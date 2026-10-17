@@ -89,6 +89,10 @@ def _api_via_gh(path):
         return None
 
 
+# v2 and later releases of the RD03v2 port: v2.0.0, v2.0.0-rc1, v2.1...
+V2_TAG = re.compile(r"^v2(?:[.-]|$)")
+
+
 def parse_version(tag):
     m = re.match(r"v?(\d+)\.(\d+)", str(tag))
     return (int(m.group(1)), int(m.group(2))) if m else None
@@ -108,6 +112,10 @@ class Release:
         }
         self.version = parse_version(self.tag)
 
+    @property
+    def is_v2(self):
+        return isinstance(self.tag, str) and bool(V2_TAG.match(self.tag))
+
     def name_for(self, kind, flavour="default", wifi=False):
         """`initramfs_itb` + nss + wifi -> ...-initramfs-uImage-nss-wifi.itb
 
@@ -121,10 +129,13 @@ class Release:
             raise ReleaseError(f"unknown image kind {kind!r}")
         base = self.profile.image_kinds[kind]
         stem, _, ext = base.rpartition(".")
-        if flavour == "nss":
-            stem += "-nss"
-        elif flavour != "default":
+        if flavour not in ("default", "nss"):
             raise ReleaseError(f"unknown flavour {flavour!r}")
+        # A v2 release ships one image set for both selections: the NSS data
+        # plane is always on, and Wi-Fi offload is a runtime setting. Only a
+        # v1.x release has a separate -nss build.
+        if flavour == "nss" and not self.is_v2:
+            stem += "-nss"
         if wifi:
             if not kind.startswith("initramfs"):
                 raise ReleaseError(f"{kind} has no -wifi variant")

@@ -36,14 +36,21 @@ cd xiaomi-openwrt-install
 
 ## Install OpenWrt
 
-Choose one image:
+```sh
+python3 install.py
+```
+
+On the AX3000T v2 (RD03v2) this installs the latest release, which is v2 of the
+[RD03v2 port](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2). v2 has one
+image: the NSS data plane is always on, and Wi-Fi offload is a setting
+(`nss.general.wifi_offload`), so `python3 install.py standard` and
+`python3 install.py nss` install the same v2 image.
+
+The v1.x releases still ship a standard and an NSS build. Select one with its tag:
 
 ```sh
-# Standard image (recommended)
-python3 install.py standard
-
-# Experimental NSS acceleration
-python3 install.py nss
+python3 install.py standard --release v1.14
+python3 install.py nss --release v1.14
 ```
 
 By default, the installer selects the latest published release from the device
