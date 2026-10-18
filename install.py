@@ -1103,7 +1103,8 @@ def parse_args(argv=None):
         description="Install a selected OpenWrt image on a supported Xiaomi router.")
     ap.add_argument(
         "image", nargs="?", choices=tuple(IMAGE_FLAVOURS),
-        help="image to install (default: standard)")
+        help="only for v1.x releases: standard (without NSS offload, the default) "
+             "or nss; later releases have a single image")
     ap.add_argument(
         "--release", "--tag", dest="tag", default=None,
         help="OpenWrt release tag or 'latest' (default: latest published release)")

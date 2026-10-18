@@ -3,7 +3,7 @@
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
 
-The installer uses the [documented V1 → V2](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure#combined-v1--v2-capuci-exploit) `cab_meshd` chain to obtain root,
+The installer uses the [documented `cab_meshd` exploit chain](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure#combined-v1--v2-capuci-exploit) to obtain root,
 checks the exact board, NAND and partition layout, downloads the OpenWrt images
 selected by the device profile, boots the RAM installer, and writes the
 permanent image.
@@ -40,18 +40,10 @@ cd xiaomi-openwrt-install
 python3 install.py
 ```
 
-On the AX3000T v2 (RD03v2) this installs the latest release, which is v2 of the
-[RD03v2 port](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2). v2 has one
-image: the NSS data plane is always on, and Wi-Fi offload is a setting
-(`nss.general.wifi_offload`), so `python3 install.py standard` and
-`python3 install.py nss` install the same v2 image.
-
-The v1.x releases still ship a standard and an NSS build. Select one with its tag:
-
-```sh
-python3 install.py standard --release v1.14
-python3 install.py nss --release v1.14
-```
+This installs the latest release of the
+[RD03v2 port](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2), with NSS hardware
+offload. For an image without NSS offload, install the port's last v1.x standard
+build instead: `python3 install.py standard --release v1.14`.
 
 By default, the installer selects the latest published release from the device
 profile's firmware repository, excluding drafts and prereleases. It downloads
@@ -76,7 +68,7 @@ To keep permanent Wi-Fi disabled, select an Ethernet interface for the final
 check and connect it when the installer asks:
 
 ```sh
-python3 install.py standard --transport wifi --interface WIFI_INTERFACE \
+python3 install.py --transport wifi --interface WIFI_INTERFACE \
     --verify-interface ETHERNET_INTERFACE
 ```
 
@@ -91,14 +83,14 @@ leaves OpenWrt Wi-Fi disabled and the root password unset. Configure both
 interactively during installation with:
 
 ```sh
-python3 install.py standard --configure
+python3 install.py --configure
 ```
 
 Download and fully verify the latest release's image set without contacting a
 router:
 
 ```sh
-python3 install.py standard --dry-run
+python3 install.py --dry-run
 ```
 
 Use `--release TAG` to select a particular release. `--release latest` explicitly
@@ -109,8 +101,8 @@ keeps the original release even if a newer one has been published.
 Offline installs require an explicit tag and its verified cached images:
 
 ```sh
-python3 install.py standard --release v1.13 --dry-run
-python3 install.py standard --release v1.13 --offline
+python3 install.py --release v2.0.0 --dry-run
+python3 install.py --release v2.0.0 --offline
 ```
 
 If GitHub is unavailable, an explicitly selected tag can also use its verified
