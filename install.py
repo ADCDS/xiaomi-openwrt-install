@@ -835,23 +835,63 @@ def scp_to(host, local, remote):
 def wait_and_discover(iface, deadline_s=420, fallback=None):
     """Find the box again after a reboot. Discovery has to happen *after* the
     pivot, not before it: run early it would answer with whatever is on the
-    link at the time, which is the stock system."""
+    link at the time, which is the stock system.
+
+    Failed attempts are expected while the box boots, so none is fatal on its
+    own -- but each path's latest reason is logged when it changes and kept
+    for the final error. Discarding them made a box that had been up the
+    whole time look like one that never came back (issue #4)."""
     log(f"[*] waiting for an OpenWrt system to appear on {iface}")
     end = time.time() + deadline_s
+    fallback_note = linklocal_note = None
     while time.time() < end:
-        if (fallback and fallback not in default_gateways()
-                and chain.local_interface(fallback) == iface):
-            banner, _error = ssh_banner(fallback, timeout=3)
-            if banner and "dropbear" in banner.lower():
-                log(f"[*] wired OpenWrt system found at {fallback}")
-                return fallback
+        if fallback:
+            gws = default_gateways()
+            if fallback in gws:
+                note = (f"{fallback} skipped: it is this host's default "
+                        f"gateway (via {gws[fallback]})")
+            elif chain.local_interface(fallback) != iface:
+                note = f"{fallback} skipped: not routed via {iface}"
+            else:
+                banner, error = ssh_banner(fallback, timeout=3)
+                if banner and "dropbear" in banner.lower():
+                    log(f"[*] wired OpenWrt system found at {fallback}")
+                    return fallback
+                note = f"{fallback}: " + (
+                    error or f"ssh banner {banner!r} is not dropbear")
+            if note != fallback_note:
+                log(f"[*] {note}")
+                fallback_note = note
         try:
             host = discover_linklocal(iface, timeout=10)
             log(f"[*] discovered {host}")
             return host
-        except Abort:
+        except Abort as e:
+            note = f"link-local: {e}"
+            if note != linklocal_note:
+                log(f"[*] {note}")
+                linklocal_note = note
             time.sleep(5)
-    raise Abort(f"nothing appeared on {iface} within {deadline_s}s")
+    reasons = "; ".join(n for n in (fallback_note, linklocal_note) if n)
+    raise Abort(f"nothing appeared on {iface} within {deadline_s}s"
+                + (f" -- last: {reasons}" if reasons else ""))
+
+
+def flash_stage_host(args, profile, explicit_host):
+    """The RAM system to flash on a `--stage flash` run.
+
+    A resume manifest records the install interface, which used to force
+    rediscovery and silently replace an explicit --openwrt-host. That left no
+    way past a discovery that keeps failing, even with the box's address in
+    hand. An address the operator typed wins; it is still identified by
+    wait_for_openwrt before anything is offered to it."""
+    if explicit_host:
+        log(f"[*] using --openwrt-host {explicit_host}; skipping discovery")
+        return explicit_host
+    if args.discover:
+        fallback = profile.openwrt_host if args.transport == "wired" else None
+        return wait_and_discover(args.discover, fallback=fallback)
+    return args.openwrt_host
 
 
 def wait_for_openwrt(host, deadline_s=420):
@@ -1471,6 +1511,9 @@ def main(argv=None):
     os.umask(0o077)
     args = parse_args(argv)
     requested_attacker = args.attacker
+    # Captured before the profile default fills it in, so flash_stage_host can
+    # tell an address the operator typed from the fallback.
+    explicit_openwrt_host = args.openwrt_host
     if args.resume_manifest:
         args.resume_manifest = os.path.abspath(args.resume_manifest)
     resume = load_resume_manifest(args.resume_manifest) if args.resume_manifest else None
@@ -1688,11 +1731,9 @@ def main(argv=None):
             "this process waits "
             "for the router on the selected interface")
 
-    if args.discover and args.stage == "flash":
-        fallback = profile.openwrt_host if args.transport == "wired" else None
-        args.openwrt_host = wait_and_discover(args.discover, fallback=fallback)
-
     if args.stage == "flash":
+        args.openwrt_host = flash_stage_host(args, profile,
+                                             explicit_openwrt_host)
         verify_transport = (detect_transport(args.verify_interface)
                             if args.verify_interface else None)
         verify_fallback = (profile.openwrt_host
