@@ -267,6 +267,56 @@ def test_resume_manifest_and_flash_guards():
         shutil.rmtree(root, ignore_errors=True)
 
 
+def test_rediscovery():
+    import install
+    print("\n== post-pivot rediscovery ==")
+    fallback = devices.RD03V2.openwrt_host
+
+    # Issue #4: the RAM system's DHCP made it the host's gateway, and the
+    # link-local failure was swallowed -- the timeout said neither.
+    with mock.patch.object(install, "default_gateways",
+                           return_value={fallback: "eth0"}), \
+            mock.patch.object(install, "discover_linklocal",
+                              side_effect=install.Abort(
+                                  "cannot probe eth0: no ping6")), \
+            mock.patch.object(install.time, "sleep"):
+        try:
+            install.wait_and_discover("eth0", deadline_s=0.2, fallback=fallback)
+            check("rediscovery timeout explains itself", False, "no Abort")
+        except install.Abort as e:
+            msg = str(e)
+            check("rediscovery timeout names the skipped gateway fallback",
+                  f"{fallback} skipped: it is this host's default gateway "
+                  "(via eth0)" in msg, msg)
+            check("rediscovery timeout keeps the link-local failure",
+                  "link-local: cannot probe eth0: no ping6" in msg, msg)
+
+    with mock.patch.object(install, "default_gateways", return_value={}), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="wlan0"), \
+            mock.patch.object(install, "discover_linklocal",
+                              return_value="fe80::1%eth0"):
+        check("rediscovery returns the link-local peer",
+              install.wait_and_discover("eth0", deadline_s=5,
+                                        fallback=fallback) == "fe80::1%eth0")
+
+    # A resume manifest sets args.discover; an explicit host must still win.
+    args = install.parse_args(["--transport", "wired"])
+    args.discover = "eth0"
+    args.openwrt_host = fallback
+    with mock.patch.object(install, "wait_and_discover",
+                           return_value="fe80::2%eth0") as wad:
+        host = install.flash_stage_host(args, devices.RD03V2, "fe80::1%eth0")
+    check("explicit --openwrt-host skips rediscovery on a resumed flash",
+          host == "fe80::1%eth0" and not wad.called)
+    with mock.patch.object(install, "wait_and_discover",
+                           return_value="fe80::2%eth0") as wad:
+        host = install.flash_stage_host(args, devices.RD03V2, None)
+    check("resumed flash still rediscovers without an explicit host",
+          host == "fe80::2%eth0"
+          and wad.call_args == mock.call("eth0", fallback=fallback))
+
+
 def test_atomic_writer_scripts():
     import inspect
     import install
@@ -1615,6 +1665,7 @@ def main():
     test_firstboot_configuration()
     test_restore_guards()
     test_resume_manifest_and_flash_guards()
+    test_rediscovery()
     test_atomic_writer_scripts()
     test_stager()
     test_ubi()
