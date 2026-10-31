@@ -232,7 +232,7 @@ def main():
         restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
 
     host = args.host
-    if args.discover:
+    if not host and args.discover:
         host = install.wait_and_discover(
             args.discover, deadline_s=120, fallback=fallback)
     if not host:
