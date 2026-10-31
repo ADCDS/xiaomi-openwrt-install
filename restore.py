@@ -151,6 +151,31 @@ def ssh(host, cmd, timeout=180, check=True):
     return last
 
 
+def locate(host, iface, profile):
+    """The RAM system to restore: found on `iface` when given, else `host`.
+
+    On a wired link the RAM system's own DHCP makes 192.168.1.1 this host's
+    gateway there, so it is accepted on that cable -- but only while all this
+    script offers is the RAM system's empty password. Should SSH_PASSWORDS
+    hold a configured root password (revert.py sets one for its own calls),
+    any gateway is refused as before (see install.gateway_conflict)."""
+    import install
+    router_iface = None
+    if not host and iface:
+        wired = install.detect_transport(iface) == "wired"
+        gateway_ok = wired and not any(SSH_PASSWORDS)
+        router_iface = iface if gateway_ok else None
+        host = install.wait_and_discover(
+            iface, deadline_s=30,
+            fallback=profile.openwrt_host if wired else None,
+            router_gateway_ok=gateway_ok)
+        print(f"[*] discovered {host}")
+    if not host:
+        raise RestoreError("give --host or --discover")
+    install.check_is_openwrt_ram(host, router_iface=router_iface)
+    return host
+
+
 def _have(x):
     # shutil.which, not `command -v` through subprocess: with shell=False that
     # execs bash with "-v" as a *flag*, so it only ever worked by falling
@@ -276,16 +301,7 @@ def main():
               "--discover to see the device-side plan.")
         return 0
 
-    host = args.host
-    if args.discover:
-        import install
-        host = install.discover_linklocal(args.discover)
-        print(f"[*] discovered {host}")
-    if not host:
-        raise RestoreError("give --host or --discover")
-
-    import install
-    install.check_is_openwrt_ram(host)      # refuses this host's own gateway
+    host = locate(args.host, args.discover, profile)
     mtd = check_target(host, profile)
     p = plan(mtd, profile)
 

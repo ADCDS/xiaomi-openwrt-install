@@ -44,7 +44,8 @@ sudo apt install sshpass openssl        # or your distro's equivalent
 `sshpass` is not optional. Without it the scripts fall back to an interactive
 `ssh` password prompt that fails as `Permission denied` — which looks exactly
 like a wrong password rather than a missing package. `openssl` is used to hash
-the root password. `ping6`, `ip`, `ssh`, `scp` and `tar` are assumed present.
+the root password. `ping` with IPv6 support (`ping6` is used when present),
+`ip`, `ssh`, `scp` and `tar` are assumed present.
 
 **The laptop needs an address on the router's stock setup network.** Stock
 serves DHCP there; the OpenWrt RAM system is reached by IPv6 link-local, so its
@@ -69,7 +70,9 @@ must not change mid-run. A cable is steadier; neither needs serial.
 > Do **not** put the router on a network that already has a `192.168.1.1` —
 > once OpenWrt is installed that is its LAN address, and it will serve DHCP.
 > The scripts refuse to talk to your own default gateway, but a second DHCP
-> server on your LAN is your problem, not theirs.
+> server on your LAN is your problem, not theirs. On a cable they also rely on
+> this rule: OpenWrt's own DHCP makes `192.168.1.1` your gateway through that
+> cable, so a gateway there, and only there, is taken to be the router.
 
 ## Getting the images
 
@@ -103,7 +106,7 @@ nmcli device status
 IFACE=YOUR_ROUTER_INTERFACE
 
 # stock -> OpenWrt on NAND, with optional first-boot configuration
-python3 install.py standard --interface "$IFACE" --configure
+python3 install.py --interface "$IFACE" --configure
 
 # OpenWrt -> a profile-approved stock image
 python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
@@ -301,8 +304,11 @@ your machine and the existing route may win on metric, causing commands to
 reach the wrong device.
 
 The scripts avoid the question by addressing the box on its IPv6 link-local,
-and refuse outright to talk to this host's default gateway. Do the same by
-hand:
+and refuse to talk to this host's default gateway. The one exception is a
+gateway reached only through the router's own cable on a wired install, which
+OpenWrt's DHCP puts there. The RAM system is then offered nothing but its
+empty password, and the installed system gets the root password only if it
+answers from the MAC the RAM stage recorded. Do the same by hand:
 
 ```sh
 # find it -- this returns only a neighbour that answers as dropbear
@@ -363,7 +369,10 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   `attach.py` exists so a driver bug does not cost one.
 - **Discovery identifies before it authenticates.** A reply to a multicast ping
   only proves something is on the link; candidates must answer as dropbear, and
-  the host's own default gateway is refused outright.
+  the host's own default gateway is refused. On a wired install, a gateway
+  reached only through the router's cable is the exception. There the RAM
+  system is offered only its empty password, and the root password goes only
+  to the MAC the RAM stage recorded.
 
 Run only against a device you own.
 

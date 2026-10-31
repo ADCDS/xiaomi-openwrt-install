@@ -274,8 +274,8 @@ def test_rediscovery():
 
     # Issue #4: the RAM system's DHCP made it the host's gateway, and the
     # link-local failure was swallowed -- the timeout said neither.
-    with mock.patch.object(install, "default_gateways",
-                           return_value={fallback: "eth0"}), \
+    with mock.patch.object(install, "default_routes",
+                           return_value=[(fallback, "eth0")]), \
             mock.patch.object(install, "discover_linklocal",
                               side_effect=install.Abort(
                                   "cannot probe eth0: no ping6")), \
@@ -291,7 +291,7 @@ def test_rediscovery():
             check("rediscovery timeout keeps the link-local failure",
                   "link-local: cannot probe eth0: no ping6" in msg, msg)
 
-    with mock.patch.object(install, "default_gateways", return_value={}), \
+    with mock.patch.object(install, "default_routes", return_value=[]), \
             mock.patch.object(install.chain, "local_interface",
                               return_value="wlan0"), \
             mock.patch.object(install, "discover_linklocal",
@@ -314,7 +314,284 @@ def test_rediscovery():
         host = install.flash_stage_host(args, devices.RD03V2, None)
     check("resumed flash still rediscovers without an explicit host",
           host == "fe80::2%eth0"
-          and wad.call_args == mock.call("eth0", fallback=fallback))
+          and wad.call_args == mock.call("eth0", fallback=fallback,
+                                         router_gateway_ok=True))
+
+
+def test_router_gateway():
+    import install
+    import restore
+    print("\n== router as this host's gateway (issue #4) ==")
+    fallback = devices.RD03V2.openwrt_host
+    dropbear = ("SSH-2.0-dropbear_2024.86", None)
+    mac, other_mac = "aa:aa:aa:aa:aa:aa", "bb:bb:bb:bb:bb:bb"
+
+    # ping6 is gone on some distributions; ping -6 does the same probe.
+    def fake_run_for(cmds):
+        def fake_run(cmd, **_kw):
+            cmds.append(cmd)
+            if cmd[0] == "ip":
+                return mock.Mock(stdout="2: eth0    inet6 fe80::aaaa/64 "
+                                        "scope link\n", stderr="")
+            return mock.Mock(stdout="64 bytes from fe80::aaaa%eth0: icmp_seq=1\n"
+                                    "64 bytes from fe80::2%eth0: icmp_seq=1 "
+                                    "(DUP!)\n", stderr="")
+        return fake_run
+    for which, first in ((None, ["ping", "-6"]), ("/usr/bin/ping6", ["ping6"])):
+        cmds = []
+        with mock.patch.object(install.subprocess, "run",
+                               side_effect=fake_run_for(cmds)), \
+                mock.patch.object(install.shutil, "which", return_value=which), \
+                mock.patch.object(install, "ssh_banner", return_value=dropbear):
+            found = install.discover_linklocal("eth0")
+        pings = [c for c in cmds if c[0] != "ip"]
+        check(f"link-local probe runs {' '.join(first)} "
+              f"({'ping6 present' if which else 'no ping6'})",
+              found == "fe80::2%eth0" and pings
+              and pings[0][:len(first)] == first, f"{found} {pings}")
+
+    routes = [("192.168.4.1", "wlp4s0"), (fallback, "eth0")]
+    with mock.patch.object(install, "default_routes", return_value=routes), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="eth0"), \
+            mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "discover_linklocal",
+                              side_effect=install.Abort("none")), \
+            mock.patch.object(install.time, "sleep"):
+        check("the reporter's routes: the router's gateway on the cable is "
+              "found when the caller opts in",
+              install.wait_and_discover("eth0", deadline_s=5, fallback=fallback,
+                                        router_gateway_ok=True) == fallback)
+        try:
+            install.wait_and_discover("eth0", deadline_s=0.2, fallback=fallback)
+            check("without the opt-in the gateway is still skipped", False)
+        except install.Abort as e:
+            check("without the opt-in the gateway is still skipped",
+                  "skipped: it is this host's default gateway (via eth0)"
+                  in str(e), str(e))
+        with mock.patch.object(install, "neighbour_mac",
+                               return_value=other_mac):
+            try:
+                install.wait_and_discover("eth0", deadline_s=0.2,
+                                          fallback=fallback,
+                                          router_gateway_ok=True,
+                                          router_mac=mac)
+                check("a gateway answering from another MAC is not taken",
+                      False)
+            except install.Abort as e:
+                check("a gateway answering from another MAC is not taken",
+                      f"answers from MAC {other_mac}" in str(e), str(e))
+        with mock.patch.object(install, "neighbour_mac", return_value=mac):
+            check("a gateway answering from the recorded MAC is taken",
+                  install.wait_and_discover(
+                      "eth0", deadline_s=5, fallback=fallback,
+                      router_gateway_ok=True, router_mac=mac) == fallback)
+
+    both = [(fallback, "wlan0"), (fallback, "eth0")]
+    with mock.patch.object(install, "default_routes", return_value=both), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="eth0"):
+        check("192.168.1.1 as gateway on another interface too is refused",
+              install.gateway_conflict(fallback, "eth0")
+              == "it is this host's default gateway (via wlan0)")
+    with mock.patch.object(install, "default_routes",
+                           return_value=[(fallback, "eth0")]), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="wlan0"):
+        check("a cable gateway this host reaches elsewhere is refused",
+              "reaches it via wlan0" in
+              (install.gateway_conflict(fallback, "eth0") or ""))
+
+    with mock.patch.object(install, "default_routes",
+                           return_value=[(fallback, "eth0")]), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="eth0"), \
+            mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "neighbour_mac", return_value=mac):
+        def refused(**kw):
+            try:
+                install.check_is_openwrt_ram(fallback, **kw)
+                return False
+            except install.Abort:
+                return True
+        check("identity check: gateway refused without router_iface",
+              refused())
+        check("identity check: gateway accepted on the router cable",
+              not refused(router_iface="eth0"))
+        check("identity check: gateway accepted with the recorded MAC",
+              not refused(router_iface="eth0", router_mac=mac))
+        check("identity check: gateway refused from another MAC",
+              refused(router_iface="eth0", router_mac=other_mac))
+        check("identity check: a link-local is not a gateway",
+              install.check_is_openwrt_ram("fe80::1%eth0") == dropbear[0])
+
+    # The RAM stage offers only the empty password.
+    tried = []
+
+    def denied(cmd, **_kw):
+        tried.append(cmd[2])
+        return mock.Mock(returncode=255, stdout="",
+                         stderr="root@h: Permission denied (password).")
+    with mock.patch.object(install.subprocess, "run", side_effect=denied), \
+            mock.patch.object(install.shutil, "which",
+                              return_value="/usr/bin/sshpass"), \
+            mock.patch.object(install, "SSH_PASSWORDS", ["", "secret"]):
+        install.ssh("h", "true", check=False, passwords=install.RAM_PASSWORDS)
+        ram_tried = list(tried)
+        tried.clear()
+        install.ssh("h", "true", check=False)
+    check("RAM-stage ssh offers only the empty password", ram_tried == [""],
+          str(ram_tried))
+    check("default ssh still tries the configured password",
+          tried == ["", "secret"], str(tried))
+
+    with mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "check_is_openwrt_ram") as chk, \
+            mock.patch.object(install, "ssh",
+                              return_value=(255, "Permission denied")), \
+            mock.patch.object(install.time, "sleep"):
+        try:
+            install.wait_for_openwrt(fallback, deadline_s=5,
+                                     router_iface="eth0",
+                                     passwords=install.RAM_PASSWORDS)
+            check("a box refusing the empty password is not the RAM system",
+                  False)
+        except install.Abort as e:
+            check("a box refusing the empty password is not the RAM system",
+                  "refused the empty root password" in str(e)
+                  and chk.call_args == mock.call(fallback,
+                                                 router_iface="eth0"), str(e))
+
+    seen = []
+
+    def fake_ssh(_host, cmd, timeout=120, check=True, passwords=None):
+        seen.append(passwords)
+        if "board_name" in cmd:
+            return 0, devices.RD03V2.openwrt_board
+        if "rootfs_type" in cmd:
+            return 0, "tmpfs"
+        if "/proc/mtd" in cmd:
+            return 0, ('mtd18: 02400000 00020000 "ubi_kernel"\n'
+                       'mtd19: 05180000 00020000 "rootfs"\n')
+        return 0, ""
+    with mock.patch.object(install, "wait_for_openwrt",
+                           return_value=True) as wfo, \
+            mock.patch.object(install, "ssh", side_effect=fake_ssh), \
+            mock.patch.object(install, "neighbour_mac", return_value=mac), \
+            mock.patch.object(install, "update_resume_fields") as urf, \
+            mock.patch.object(install, "require_permanent_nand_support",
+                              side_effect=install.Abort("stop here")):
+        try:
+            install.flash(fallback, None, {}, True, devices.RD03V2, "images",
+                          manifest_path="/x/resume.json", transport="wired",
+                          verify_interface="eth0", router_iface="eth0")
+        except install.Abort:
+            pass
+    check("flash identifies the RAM system on the router cable, empty "
+          "password only",
+          wfo.call_args == mock.call(fallback, router_iface="eth0",
+                                     passwords=install.RAM_PASSWORDS))
+    check("flash offers the RAM system only the empty password",
+          seen and all(p == install.RAM_PASSWORDS for p in seen), str(seen))
+    check("flash records the RAM system's MAC in the manifest",
+          urf.call_args == mock.call("/x/resume.json", router_mac=mac))
+
+    # Review finding #1: a MAC must still be checked once recorded, even in
+    # the moment it is not *currently* read back as a default gateway (e.g. a
+    # DHCP window with only a connected route so far).
+    with mock.patch.object(install, "default_routes", return_value=[]), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="eth0"), \
+            mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "neighbour_mac",
+                              return_value=other_mac), \
+            mock.patch.object(install.time, "sleep"):
+        try:
+            install.wait_and_discover("eth0", deadline_s=0.2, fallback=fallback,
+                                      router_gateway_ok=True, router_mac=mac)
+            check("finding #1: discovery still checks the MAC outside the "
+                  "gateway window", False)
+        except install.Abort as e:
+            check("finding #1: discovery still checks the MAC outside the "
+                  "gateway window",
+                  f"answers from MAC {other_mac}" in str(e), str(e))
+    with mock.patch.object(install, "default_routes", return_value=[]), \
+            mock.patch.object(install.chain, "local_interface",
+                              return_value="eth0"), \
+            mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "neighbour_mac",
+                              return_value=other_mac):
+        try:
+            install.check_is_openwrt_ram(fallback, router_iface="eth0",
+                                         router_mac=mac)
+            check("finding #1: identity check still checks the MAC outside "
+                  "the gateway window", False)
+        except install.Abort as e:
+            check("finding #1: identity check still checks the MAC outside "
+                  "the gateway window",
+                  f"answers from MAC {other_mac}" in str(e), str(e))
+
+    # A link-local candidate is exempt: it already identifies the one device
+    # on the link, so it is not bound to the RAM stage's recorded MAC.
+    with mock.patch.object(install, "ssh_banner", return_value=dropbear), \
+            mock.patch.object(install, "neighbour_mac") as nbr:
+        result = install.check_is_openwrt_ram(
+            "fe80::1%eth0", router_iface="eth0", router_mac=mac)
+        check("a link-local candidate is not bound to the recorded MAC",
+              result == dropbear[0] and not nbr.called)
+
+    # Gap noted in review: the MAC can't always be read; flash() must not
+    # crash, and must not teach the manifest a MAC it never confirmed.
+    with mock.patch.object(install, "wait_for_openwrt", return_value=True), \
+            mock.patch.object(install, "ssh", side_effect=fake_ssh), \
+            mock.patch.object(install, "neighbour_mac", return_value=None), \
+            mock.patch.object(install, "update_resume_fields") as urf_none, \
+            mock.patch.object(install, "require_permanent_nand_support",
+                              side_effect=install.Abort("stop here")):
+        try:
+            install.flash(fallback, None, {}, True, devices.RD03V2, "images",
+                          manifest_path="/x/resume.json", transport="wired",
+                          verify_interface="eth0", router_iface="eth0")
+        except install.Abort:
+            pass
+    check("flash does not record a MAC it could not read", not urf_none.called)
+
+    def verify_kwargs(passwords, router_mac):
+        with mock.patch.object(install, "SSH_PASSWORDS", passwords), \
+                mock.patch.object(install, "wait_and_discover",
+                                  side_effect=install.Abort("none")) as wad, \
+                mock.patch.object(install.time, "sleep"):
+            try:
+                install.verify_permanent_system(
+                    devices.RD03V2, interface="eth0", fallback=fallback,
+                    deadline_s=0.2, router_mac=router_mac)
+            except install.Abort:
+                pass
+        kw = wad.call_args.kwargs
+        return kw["router_gateway_ok"], kw["router_mac"]
+    check("verification: password set, no recorded MAC -> gateway refused",
+          verify_kwargs(["", "secret"], None) == (False, None))
+    check("verification: password set, recorded MAC -> gateway bound to it",
+          verify_kwargs(["", "secret"], mac) == (True, mac))
+    check("verification: no password -> gateway accepted, no MAC needed",
+          verify_kwargs([""], mac) == (True, None))
+
+    with mock.patch.object(install, "detect_transport", return_value="wired"), \
+            mock.patch.object(install, "wait_and_discover",
+                              return_value=fallback) as wad, \
+            mock.patch.object(install, "check_is_openwrt_ram") as chk:
+        with mock.patch.object(restore, "SSH_PASSWORDS", [""]):
+            host = restore.locate(None, "eth0", devices.RD03V2)
+        check("restore finds the RAM system at 192.168.1.1 on a cable",
+              host == fallback
+              and wad.call_args.kwargs["fallback"] == fallback
+              and wad.call_args.kwargs["router_gateway_ok"] is True
+              and chk.call_args == mock.call(fallback, router_iface="eth0"))
+        with mock.patch.object(restore, "SSH_PASSWORDS", ["", "secret"]):
+            restore.locate(None, "eth0", devices.RD03V2)
+        check("restore keeps refusing gateways once a password is involved",
+              wad.call_args.kwargs["router_gateway_ok"] is False
+              and chk.call_args == mock.call(fallback, router_iface=None))
 
 
 def test_atomic_writer_scripts():
@@ -1666,6 +1943,7 @@ def main():
     test_restore_guards()
     test_resume_manifest_and_flash_guards()
     test_rediscovery()
+    test_router_gateway()
     test_atomic_writer_scripts()
     test_stager()
     test_ubi()

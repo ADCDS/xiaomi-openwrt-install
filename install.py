@@ -50,10 +50,12 @@ Notes that cost something to learn
   rehearsal; the idle slot is the substitute.
 
 Usage:
-    python3 install.py standard
-    python3 install.py nss
-    python3 install.py standard --dry-run
+    python3 install.py
+    python3 install.py --dry-run
     python3 install.py --verify-only /path/to/resume.json --verify-interface IFACE
+
+v1.x only: `install.py standard` / `install.py nss` pick the no-NSS/NSS
+build. v2.x and later publish a single image and ignore this.
 """
 
 import argparse
@@ -691,19 +693,69 @@ def ssh_banner(host, timeout=10):
     return None, f"nothing answering ssh on {host}: {last}"
 
 
-def default_gateways():
-    """{gateway address: egress device} for this host's IPv4 default routes."""
-    out = {}
+def default_routes():
+    """[(gateway address, egress device)] for this host's IPv4 default routes."""
     try:
         r = subprocess.run(["ip", "-4", "route", "show", "default"],
                            capture_output=True, text=True, timeout=5).stdout
-        for line in r.splitlines():
-            m = re.search(r"default via (\S+) dev (\S+)", line)
-            if m:
-                out[m.group(1)] = m.group(2)
     except Exception:                                            # noqa: BLE001
-        pass
-    return out
+        return []
+    return re.findall(r"default via (\S+) dev (\S+)", r)
+
+
+def default_gateways():
+    """{gateway address: egress device} for this host's IPv4 default routes."""
+    return dict(default_routes())
+
+
+def gateway_devices(addr):
+    """Every interface on which `addr` is one of this host's default gateways.
+
+    A dict keyed by gateway keeps only one of them, and two default routes via
+    the same address -- a home router on Wi-Fi, ours on the cable -- is exactly
+    the case where losing one matters."""
+    return {dev for gw, dev in default_routes() if gw == addr}
+
+
+def gateway_conflict(addr, router_iface=None):
+    """Why `addr` may be this host's own router rather than ours, or None.
+
+    Both OpenWrt systems serve DHCP and name themselves the default gateway, so
+    on a wired install our router *is* a gateway: through the router-facing
+    interface, and nowhere else. Callers pass router_iface only where that
+    holds -- a cable cannot roam, but Wi-Fi can rejoin a home network on the
+    same interface -- and without it any gateway is refused (issue #4)."""
+    devs = gateway_devices(addr)
+    if not devs:
+        return None
+    others = devs - {router_iface} if router_iface else devs
+    if others:
+        return (f"it is this host's default gateway "
+                f"(via {', '.join(sorted(others))})")
+    via = chain.local_interface(addr)
+    if via != router_iface:
+        return (f"it is a default gateway on {router_iface}, but this host "
+                f"reaches it via {via}")
+    return None
+
+
+def neighbour_mac(host, iface=None):
+    """The MAC this machine has on record for `host`, or None.
+
+    Read just after talking to it, so the entry is fresh. A scoped link-local
+    names its own interface."""
+    bare, _, scope = host.strip().strip("[]").partition("%")
+    dev = scope or iface or chain.local_interface(bare)
+    if not dev:
+        return None
+    family = "-6" if ":" in bare else "-4"
+    try:
+        out = subprocess.run(["ip", family, "neigh", "show", bare, "dev", dev],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:                                            # noqa: BLE001
+        return None
+    m = re.search(r"\blladdr ([0-9a-fA-F:]{17})\b", out)
+    return m.group(1).lower() if m else None
 
 
 def discover_linklocal(iface, timeout=15):
@@ -727,8 +779,11 @@ def discover_linklocal(iface, timeout=15):
     # deprecated one keeps answering multicast for a while. Reading our own
     # addresses once let a stale address of ours look like a stranger.
     ours = our_addrs()
+    # iputils merged ping6 into ping; some distributions (Arch) no longer ship
+    # the ping6 name at all (issue #4).
+    ping = ["ping6"] if shutil.which("ping6") else ["ping", "-6"]
     try:
-        r = subprocess.run(["ping6", "-c", "4", "-I", iface, "ff02::1"],
+        r = subprocess.run(ping + ["-c", "4", "-I", iface, "ff02::1"],
                            capture_output=True, text=True, timeout=timeout)
     except Exception as e:                                       # noqa: BLE001
         raise Abort(f"cannot probe {iface}: {e}")
@@ -756,23 +811,29 @@ def discover_linklocal(iface, timeout=15):
     return f"{good[0]}%{iface}"
 
 
-def check_is_openwrt_ram(host):
+def check_is_openwrt_ram(host, router_iface=None, router_mac=None):
     """Refuse to touch anything that is not plainly the RAM initramfs.
 
     The banner alone does not settle it: the OpenWrt initramfs and many consumer
     gateways both run dropbear on the same common private address. The real
     guard is the collision itself: if the target is this host's own default
     gateway, it is not the router, and we must not offer it a password.
+
+    Except that our router's DHCP makes it a gateway too, on the cable it is
+    on. With router_iface (wired only) a gateway reached through that interface
+    alone is accepted -- see gateway_conflict. What that may cost is the
+    caller's to bound: offered only the RAM system's empty password, a wrong
+    device learns nothing; a configured root password needs router_mac, and is
+    offered only to the MAC the RAM stage identified.
     """
-    gws = default_gateways()
     bare = host.split("%", 1)[0].strip("[]")
-    if bare in gws:
+    why = gateway_conflict(bare, router_iface)
+    if why:
         raise Abort(
-            f"{bare} is this host's own default gateway (via {gws[bare]}). The "
-            "RAM system uses that address too, so this would log in to the "
-            "wrong device as root. Address the box unambiguously by its IPv6 "
-            "link-local instead -- `--openwrt-host fe80::...%wlan0`, or "
-            "`--discover wlan0` to find it.")
+            f"{bare}: {why}. The RAM system uses that address too, so this "
+            "could log in to the wrong device as root. Address the box "
+            "unambiguously by its IPv6 link-local instead -- `--openwrt-host "
+            "fe80::...%wlan0`, or `--discover wlan0` to find it.")
 
     banner, err = ssh_banner(host)
     if err:
@@ -782,6 +843,18 @@ def check_is_openwrt_ram(host):
         raise Abort(
             f"{host} answers ssh with {banner!r}, not the dropbear the OpenWrt "
             "initramfs runs -- this is not the router.")
+    # Checked whenever a MAC is on record for this IPv4 address, not only
+    # while it is currently a default gateway: a moment of DHCP churn can
+    # put it outside that window, and the point is to bind the password to
+    # the device, not to the gateway collision alone. A link-local candidate
+    # (":" in bare) needs no such binding -- it already identifies the one
+    # device on the link, see discover_linklocal.
+    if router_mac and ":" not in bare:
+        mac = neighbour_mac(host, router_iface)
+        if mac != router_mac:
+            raise Abort(
+                f"{bare} answers from MAC {mac or 'unknown'}, not the "
+                f"router's {router_mac}; it is not offered the root password")
     return banner
 
 
@@ -792,11 +865,16 @@ def check_is_openwrt_ram(host):
 # out. main() appends the configured password here.
 SSH_PASSWORDS = [""]
 
+# What the RAM system is offered, and all it is offered: it has no password,
+# so whatever refuses this is not it, and a configured root password never
+# goes to a device the RAM stage only presumed was the router.
+RAM_PASSWORDS = ("",)
 
-def ssh(host, cmd, timeout=120, check=True):
+
+def ssh(host, cmd, timeout=120, check=True, passwords=None):
     """Root over dropbear, trying each password we might have set."""
     last = (1, "")
-    for pw in SSH_PASSWORDS:
+    for pw in SSH_PASSWORDS if passwords is None else passwords:
         base = ["ssh", "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=10",
                 "-o", "PubkeyAuthentication=no", "-o", "LogLevel=ERROR",
@@ -815,11 +893,11 @@ def ssh(host, cmd, timeout=120, check=True):
     return last
 
 
-def scp_to(host, local, remote):
+def scp_to(host, local, remote, passwords=None):
     """scp needs an IPv6 literal bracketed, or its colons read as host:path."""
     dest = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
-    for pw in SSH_PASSWORDS:
+    for pw in SSH_PASSWORDS if passwords is None else passwords:
         r = subprocess.run(
             (["sshpass", "-p", pw] if shutil.which("sshpass") else []) +
             ["scp", "-O", "-o", "StrictHostKeyChecking=no",
@@ -832,7 +910,8 @@ def scp_to(host, local, remote):
     raise Abort(f"scp to {remote} failed: {last}")
 
 
-def wait_and_discover(iface, deadline_s=420, fallback=None):
+def wait_and_discover(iface, deadline_s=420, fallback=None,
+                      router_gateway_ok=False, router_mac=None):
     """Find the box again after a reboot. Discovery has to happen *after* the
     pivot, not before it: run early it would answer with whatever is on the
     link at the time, which is the stock system.
@@ -840,25 +919,39 @@ def wait_and_discover(iface, deadline_s=420, fallback=None):
     Failed attempts are expected while the box boots, so none is fatal on its
     own -- but each path's latest reason is logged when it changes and kept
     for the final error. Discarding them made a box that had been up the
-    whole time look like one that never came back (issue #4)."""
+    whole time look like one that never came back (issue #4).
+
+    `fallback` is the router's IPv4 address, passed on wired installs only.
+    With router_gateway_ok it is tried even when the router's own DHCP has
+    made it this host's gateway on `iface` (see gateway_conflict); with
+    router_mac as well, only while it answers from that MAC -- the caller's
+    condition for offering it a configured root password."""
     log(f"[*] waiting for an OpenWrt system to appear on {iface}")
     end = time.time() + deadline_s
     fallback_note = linklocal_note = None
     while time.time() < end:
         if fallback:
-            gws = default_gateways()
-            if fallback in gws:
-                note = (f"{fallback} skipped: it is this host's default "
-                        f"gateway (via {gws[fallback]})")
-            elif chain.local_interface(fallback) != iface:
-                note = f"{fallback} skipped: not routed via {iface}"
+            why = gateway_conflict(fallback,
+                                   iface if router_gateway_ok else None)
+            if why is None and chain.local_interface(fallback) != iface:
+                why = f"not routed via {iface}"
+            if why:
+                note = f"{fallback} skipped: {why}"
             else:
                 banner, error = ssh_banner(fallback, timeout=3)
-                if banner and "dropbear" in banner.lower():
+                if not (banner and "dropbear" in banner.lower()):
+                    why = error or f"ssh banner {banner!r} is not dropbear"
+                elif router_mac:
+                    # Same widening as check_is_openwrt_ram: don't wait for
+                    # this to still read as a default gateway.
+                    mac = neighbour_mac(fallback, iface)
+                    if mac != router_mac:
+                        why = (f"answers from MAC {mac or 'unknown'}, not the "
+                               f"router's {router_mac}")
+                if not why:
                     log(f"[*] wired OpenWrt system found at {fallback}")
                     return fallback
-                note = f"{fallback}: " + (
-                    error or f"ssh banner {banner!r} is not dropbear")
+                note = f"{fallback}: {why}"
             if note != fallback_note:
                 log(f"[*] {note}")
                 fallback_note = note
@@ -890,22 +983,32 @@ def flash_stage_host(args, profile, explicit_host):
         return explicit_host
     if args.discover:
         fallback = profile.openwrt_host if args.transport == "wired" else None
-        return wait_and_discover(args.discover, fallback=fallback)
+        # flash() offers the RAM system only RAM_PASSWORDS.
+        return wait_and_discover(args.discover, fallback=fallback,
+                                 router_gateway_ok=True)
     return args.openwrt_host
 
 
-def wait_for_openwrt(host, deadline_s=420):
+def wait_for_openwrt(host, deadline_s=420, router_iface=None, passwords=None):
     log(f"[3] waiting up to {deadline_s}s for the RAM system on {host}")
     end = time.time() + deadline_s
     while time.time() < end:
         banner, err = ssh_banner(host, timeout=5)
         if banner:
             # Identify before authenticating -- see check_is_openwrt_ram.
-            check_is_openwrt_ram(host)
-            rc, out = ssh(host, "echo up", timeout=30, check=False)
+            check_is_openwrt_ram(host, router_iface=router_iface)
+            rc, out = ssh(host, "echo up", timeout=30, check=False,
+                          passwords=passwords)
             if rc == 0 and "up" in out:
                 log("[3] ssh is answering")
                 return True
+            if (passwords is not None and not any(passwords)
+                    and "Permission denied" in out):
+                raise Abort(
+                    f"{host} refused the empty root password. The RAM system "
+                    "has none, so either this is not the router or a password "
+                    "was set on it (in LuCI, for example); that lasts only "
+                    "until the RAM system reboots.")
         time.sleep(5)
     return False
 
@@ -929,13 +1032,25 @@ def permanent_system_matches(profile, board, rootfs_type, mtd_text):
 
 
 def verify_permanent_system(profile, interface=None, fallback=None, host=None,
-                            deadline_s=600):
-    """Rediscover and prove the permanent system without writing anything."""
+                            deadline_s=600, router_mac=None):
+    """Rediscover and prove the permanent system without writing anything.
+
+    These checks log in with the configured root password. The router's DHCP
+    makes `fallback` this host's gateway on the cable, and that is accepted
+    only where it cannot leak the password: none is configured, or the address
+    still answers from the MAC the RAM stage recorded (router_mac)."""
     if not interface and not host:
         raise Abort("permanent verification needs --verify-interface or an "
                     "explicit OpenWrt host")
     where = interface or host
     log(f"[3] waiting up to {deadline_s}s for permanent OpenWrt on {where}")
+    secret = any(SSH_PASSWORDS)
+    gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
+    mac = router_mac if secret else None
+    router_iface = interface if gateway_ok else None
+    if fallback and not gateway_ok:
+        log(f"[3] no RAM-stage MAC recorded: {fallback} is not offered the "
+            "root password while it is this host's gateway")
     end = time.time() + deadline_s
     last = "no OpenWrt peer discovered"
     while time.time() < end:
@@ -944,12 +1059,14 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
             try:
                 candidate = wait_and_discover(
                     interface, deadline_s=min(30, max(1, int(end - time.time()))),
-                    fallback=fallback)
+                    fallback=fallback, router_gateway_ok=gateway_ok,
+                    router_mac=mac)
             except Abort as exc:
                 last = str(exc)
                 continue
         try:
-            check_is_openwrt_ram(candidate)
+            check_is_openwrt_ram(candidate, router_iface=router_iface,
+                                 router_mac=mac)
         except Abort as exc:
             last = str(exc)
             time.sleep(5)
@@ -998,8 +1115,19 @@ def build_sysupgrade_launcher(opts):
 def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           manifest_path=None, transport="wired", verify_interface=None,
           permanent_wifi_ssid=None, verify_fallback=None,
-          verify_transport=None):
+          verify_transport=None, router_iface=None):
+    """router_iface: the router-facing interface on a wired install, where the
+    RAM system's own DHCP makes it this host's gateway (gateway_conflict)."""
     log("\n=== stage 3: flash (sysupgrade from the RAM system) ===")
+
+    # Everything up to the sysupgrade launch talks to the RAM system, which is
+    # offered only its own empty password -- see RAM_PASSWORDS.
+    def ram_ssh(*a, **kw):
+        return ssh(*a, passwords=RAM_PASSWORDS, **kw)
+
+    def ram_scp(*a, **kw):
+        return scp_to(*a, passwords=RAM_PASSWORDS, **kw)
+
     if verify_transport == "wifi" and not permanent_wifi_ssid:
         raise Abort("Wi-Fi final verification needs a configured permanent "
                     "SSID; refusing to launch sysupgrade because the installed "
@@ -1007,15 +1135,16 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     if not verify_interface:
         raise Abort("final verification needs --verify-interface before "
                     "sysupgrade can be launched")
-    if not wait_for_openwrt(host):
+    if not wait_for_openwrt(host, router_iface=router_iface,
+                            passwords=RAM_PASSWORDS):
         raise Abort(
             f"nothing answering ssh on {host}. If the release initramfs does "
             "not bring the radios up, this needs a LAN cable -- see the note "
             "in the README about the installer Wi-Fi build.")
 
-    _rc, board = ssh(host, ". /lib/functions.sh 2>/dev/null; board_name")
-    _rc, rtype = ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
-    _rc, mtdtext = ssh(host, "cat /proc/mtd")
+    _rc, board = ram_ssh(host, ". /lib/functions.sh 2>/dev/null; board_name")
+    _rc, rtype = ram_ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
+    _rc, mtdtext = ram_ssh(host, "cat /proc/mtd")
     log(f"[3] board_name={board!r} rootfs_type={rtype!r}")
     if board.strip() != profile.openwrt_board:
         raise Abort(f"board_name is {board!r}, expected {profile.openwrt_board}")
@@ -1033,9 +1162,22 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         f"{[p for p in mtd if p in ('ubi_kernel', 'rootfs')]}")
     log("[3] the NAND probed under OpenWrt -- the flash chip is supported")
 
-    rc, raw_ft = ssh(host, "fw_printenv -n flash_type 2>/dev/null", check=False)
+    # The box is now identified (empty-password login, board, tmpfs). Its MAC
+    # is what lets verification offer the installed system the configured
+    # root password at an address that is also this host's gateway.
+    router_mac = neighbour_mac(host, router_iface)
+    if router_mac:
+        log(f"[3] RAM system MAC: {router_mac}")
+        if manifest_path:
+            update_resume_fields(manifest_path, router_mac=router_mac)
+    else:
+        log(f"[3] could not read {host}'s MAC from the neighbour table")
+
+    rc, raw_ft = ram_ssh(host, "fw_printenv -n flash_type 2>/dev/null",
+                         check=False)
     if rc != 0 or not raw_ft.strip():
-        rc, raw_ft = ssh(host, "fw_printenv flash_type 2>/dev/null", check=False)
+        rc, raw_ft = ram_ssh(host, "fw_printenv flash_type 2>/dev/null",
+                             check=False)
         raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
     ft, part, why = require_permanent_nand_support(
         raw_ft, rel, profile, image_cache)
@@ -1054,20 +1196,21 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     confirm(f"write {img['name']} to NAND? This is the point of no return.",
             assume_yes)
 
-    scp_to(host, img["path"], "/tmp/fw.bin")
-    _rc, out = ssh(host, "sha256sum /tmp/fw.bin", timeout=300)
+    ram_scp(host, img["path"], "/tmp/fw.bin")
+    _rc, out = ram_ssh(host, "sha256sum /tmp/fw.bin", timeout=300)
     if img["sha256"] not in out:
         raise Abort(f"uploaded image sha256 mismatch: {out!r}")
     log(f"[3] uploaded and verified: {img['sha256'][:16]}...")
 
-    ssh(host, "sysupgrade -T /tmp/fw.bin", timeout=300)
+    ram_ssh(host, "sysupgrade -T /tmp/fw.bin", timeout=300)
     log("[3] sysupgrade -T accepted the image")
 
     opts = ""
     if cfg_tar:
-        scp_to(host, cfg_tar, "/tmp/cfg.tar.gz")
-        rc, out = ssh(host, "gzip -t /tmp/cfg.tar.gz && tar tzf /tmp/cfg.tar.gz",
-                      timeout=60, check=False)
+        ram_scp(host, cfg_tar, "/tmp/cfg.tar.gz")
+        rc, out = ram_ssh(host,
+                          "gzip -t /tmp/cfg.tar.gz && tar tzf /tmp/cfg.tar.gz",
+                          timeout=60, check=False)
         if rc != 0:
             raise Abort(f"the config tarball did not survive the upload: {out}")
         log(f"[3] first-boot config uploaded: {out.strip()}")
@@ -1083,15 +1226,15 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         launcher = os.path.join(tmp, "run-sysupgrade.sh")
         with open(launcher, "w") as output:
             output.write(script_body)
-        scp_to(host, launcher, "/tmp/run-sysupgrade.sh")
-    rc, active_upgrade = ssh(
+        ram_scp(host, launcher, "/tmp/run-sysupgrade.sh")
+    rc, active_upgrade = ram_ssh(
         host, "pgrep -f '[s]ysupgrade' | head -1", check=False)
     if rc == 0 and active_upgrade.strip():
         raise Abort(f"sysupgrade is already running (pid {active_upgrade.strip()})")
-    ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
-              "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
-        check=True)
-    rc, out = ssh(
+    ram_ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
+                  "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
+            check=True)
+    rc, out = ram_ssh(
         host,
         "start-stop-daemon -S -b -x /tmp/run-sysupgrade.sh; rc=$?; "
         "i=0; while [ $i -lt 10 ]; do "
@@ -1111,8 +1254,8 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
                     "will time out without writing")
     update_resume_phase(manifest_path, "flash-started")
     log(f"[3] resume phase -> flash-started ({manifest_path})")
-    rc, ack = ssh(host, "touch /tmp/xiaomi-sysupgrade.ack && echo ack-sent",
-                  timeout=10, check=False)
+    rc, ack = ram_ssh(host, "touch /tmp/xiaomi-sysupgrade.ack && echo ack-sent",
+                      timeout=10, check=False)
     if rc != 0 or "ack-sent" not in ack:
         raise Abort("could not acknowledge sysupgrade start. Its outcome is "
                     "uncertain; do not launch sysupgrade again. Use the "
@@ -1126,7 +1269,8 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     try:
         verify_permanent_system(
             profile, interface=verify_interface, fallback=verify_fallback,
-            host=host if not verify_interface else None)
+            host=host if not verify_interface else None,
+            router_mac=router_mac)
     except Abort as exc:
         log("[!] sysupgrade was launched; do not run the flash stage again")
         log("[!] verification-only continuation:")
@@ -1141,10 +1285,6 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Install a selected OpenWrt image on a supported Xiaomi router.")
-    ap.add_argument(
-        "image", nargs="?", choices=tuple(IMAGE_FLAVOURS),
-        help="only for v1.x releases: standard (without NSS offload, the default) "
-             "or nss; later releases have a single image")
     ap.add_argument(
         "--release", "--tag", dest="tag", default=None,
         help="OpenWrt release tag or 'latest' (default: latest published release)")
@@ -1189,6 +1329,13 @@ def parse_args(argv=None):
     ap.add_argument("--stage", default="all",
                     choices=("preflight", "pivot", "flash", "verify", "all"),
                     help=hidden)
+    # v1.x only: the last v1.x release predates five releases of v2.x, which
+    # publishes a single image regardless of either of these (see
+    # IMAGE_FLAVOURS and release.py's Release.name_for). Still accepted for
+    # that line, just no longer advertised -- there is nothing current to
+    # point it at.
+    ap.add_argument(
+        "image", nargs="?", choices=tuple(IMAGE_FLAVOURS), help=hidden)
     ap.add_argument("--flavour", choices=("default", "nss"), default=None,
                     help=hidden)
     ap.add_argument("--no-wifi-initramfs", action="store_true", help=hidden)
@@ -1608,7 +1755,8 @@ def main(argv=None):
                     if verify_transport == "wired" else None)
         verify_permanent_system(
             profile, interface=args.verify_interface, fallback=fallback,
-            host=args.openwrt_host if not args.verify_interface else None)
+            host=args.openwrt_host if not args.verify_interface else None,
+            router_mac=resume.get("router_mac"))
         update_resume_phase(args.resume_manifest, "flash-complete")
         return 0
 
@@ -1740,7 +1888,9 @@ def main(argv=None):
                            if verify_transport == "wired" else None)
         flash(args.openwrt_host, rel, images, args.yes, profile, args.images,
               cfg_tar, manifest_path, args.transport, args.verify_interface,
-              args.wifi_ssid, verify_fallback, verify_transport)
+              args.wifi_ssid, verify_fallback, verify_transport,
+              router_iface=(args.discover if args.transport == "wired"
+                            else None))
         return 0
 
     if not attacker:
@@ -1817,7 +1967,9 @@ def main(argv=None):
     if args.stage == "all":
         # The pivot has just rebooted the box into RAM; find it again there.
         fallback = profile.openwrt_host if args.transport == "wired" else None
-        host = wait_and_discover(args.discover, fallback=fallback) \
+        # flash() offers the RAM system only RAM_PASSWORDS.
+        host = wait_and_discover(args.discover, fallback=fallback,
+                                 router_gateway_ok=True) \
             if args.discover else args.openwrt_host
         verify_transport = (detect_transport(args.verify_interface)
                             if args.verify_interface else None)
@@ -1825,7 +1977,9 @@ def main(argv=None):
                            if verify_transport == "wired" else None)
         flash(host, rel, images, args.yes, profile, args.images, cfg_tar,
               manifest_path, args.transport, args.verify_interface,
-              args.wifi_ssid, verify_fallback, verify_transport)
+              args.wifi_ssid, verify_fallback, verify_transport,
+              router_iface=(args.discover if args.transport == "wired"
+                            else None))
     else:
         log("\n[+] pivot done. When the RAM system is reachable, run:")
         command = ["python3", os.path.realpath(__file__), args.image,
