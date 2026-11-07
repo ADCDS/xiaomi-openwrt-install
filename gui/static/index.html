@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenWrt для Xiaomi AX3000T (RD03v2)</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="shell">
+  <header class="top">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">ow</span>
+      <div>
+        <div class="brand-title">OpenWrt · Xiaomi AX3000T</div>
+        <div class="brand-sub">RD03v2 (Qualcomm IPQ5018) — установщик</div>
+      </div>
+    </div>
+    <ol class="steps" id="steps">
+      <li data-step="mode">Режим</li>
+      <li data-step="check">Проверка</li>
+      <li data-step="config">Настройки</li>
+      <li data-step="review">Подтверждение</li>
+      <li data-step="run">Прошивка</li>
+    </ol>
+  </header>
+
+  <main class="stage" id="stage">
+
+    <!-- 1. MODE -->
+    <section class="panel" data-panel="mode">
+      <h1>Что сделать?</h1>
+      <p class="lede">Выберите действие. Установка и откат защищены A/B-резервом: пока новая система не поднимется, прежняя остаётся целой и загрузится обратно.</p>
+      <div class="cards">
+        <button class="card" data-mode="install">
+          <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 11 5 4 5-4"/><path d="M5 21h14"/></svg></span>
+          <span class="card-h">Установить OpenWrt</span>
+          <span class="card-p">Со стоковой прошивки Xiaomi на последний OpenWrt. Без пайки и UART.</span>
+          <span class="card-tag safe">A/B-резерв: сток остаётся целым</span>
+        </button>
+        <button class="card" data-mode="update">
+          <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg></span>
+          <span class="card-h">Обновить OpenWrt</span>
+          <span class="card-p">Уже установленный OpenWrt — на новый билд. По процедуре no-uart-reflash.</span>
+          <span class="card-tag warn">UART — страховка</span>
+        </button>
+        <button class="card" data-mode="revert">
+          <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/></svg></span>
+          <span class="card-h">Вернуть сток</span>
+          <span class="card-p">С OpenWrt обратно на официальную прошивку Xiaomi.</span>
+          <span class="card-tag safe">A/B-резерв: сток остаётся целым</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- 2. CHECK -->
+    <section class="panel" data-panel="check" hidden>
+      <h1>Проверка окружения</h1>
+      <p class="lede">Прошивка работает только на Linux. На Windows запускайте из-под WSL.</p>
+      <div id="platform-note" class="note"></div>
+      <ul class="checklist" id="checklist"></ul>
+      <div id="install-hint" class="hint" hidden></div>
+      <div class="actions">
+        <button class="btn ghost" data-nav="mode">Назад</button>
+        <button class="btn" id="recheck">Проверить снова</button>
+        <button class="btn primary" id="check-next" disabled>Далее</button>
+      </div>
+    </section>
+
+    <!-- 3. CONFIG -->
+    <section class="panel" data-panel="config" hidden>
+      <h1>Настройки</h1>
+      <p class="lede" id="config-lede"></p>
+
+      <div class="field">
+        <label>Сетевой интерфейс к роутеру</label>
+        <select id="interface"></select>
+        <small>Определяется автоматически. Проводной — надёжнее.</small>
+      </div>
+
+      <div class="field">
+        <label>Релиз OpenWrt</label>
+        <select id="release"></select>
+        <small id="release-note">По умолчанию — последний стабильный.</small>
+      </div>
+
+      <div class="field" data-when="revert" hidden>
+        <label>Путь к официальному стоковому образу (.bin)</label>
+        <input type="text" id="stock-image" placeholder="/path/to/miwifi_rd03v2_*.bin">
+        <small>SHA-256 должен совпадать с одобренным в профиле устройства.</small>
+      </div>
+
+      <details class="advanced" data-when="install update">
+        <summary>Wi-Fi и пароль установленной системы (необязательно)</summary>
+        <div class="grid2">
+          <div class="field"><label>Wi-Fi SSID</label><input id="wifi-ssid" type="text"></div>
+          <div class="field"><label>Wi-Fi пароль (8–63)</label><input id="wifi-key" type="text"></div>
+          <div class="field"><label>Страна (например RU)</label><input id="wifi-country" type="text" maxlength="2"></div>
+          <div class="field"><label>Пароль root</label><input id="root-password" type="text"></div>
+        </div>
+        <small>Оставьте пустым — Wi-Fi останется выключенным, пароль root не задан (для проводной проверки).</small>
+      </details>
+
+      <div class="field" data-when="update" hidden>
+        <label>Текущий пароль root установленного OpenWrt</label>
+        <input id="update-root" type="text" placeholder="пусто, если пароль не задан">
+      </div>
+
+      <div class="field check-field" data-when="update" hidden>
+        <label class="check"><input type="checkbox" id="keep-settings" checked>
+          <span>Сохранить настройки (как <code>sysupgrade</code>)</span></label>
+        <small>Делает <code>sysupgrade -b</code> и восстанавливает конфиг на новой прошивке. Снимите галочку для чистой установки. Бэкап настроек в любом случае сохраняется на ваш компьютер.</small>
+      </div>
+
+      <div class="actions">
+        <button class="btn ghost" data-nav="check">Назад</button>
+        <button class="btn primary" id="config-next">Далее</button>
+      </div>
+    </section>
+
+    <!-- 4. REVIEW -->
+    <section class="panel" data-panel="review" hidden>
+      <h1>Подтверждение</h1>
+      <div class="review" id="review"></div>
+      <div class="note" id="review-advisory" hidden></div>
+
+      <div class="safety">
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>Безопасность</h3>
+        <ul>
+          <li>Сначала запустите <b>пробный прогон</b>: он только скачает и проверит образы, роутер не трогается.</li>
+          <li>Необратимая запись происходит только после явного подтверждения.</li>
+          <li>Единственная страховка на случай неудачной записи — доступ по UART. Не отключайте питание во время записи.</li>
+        </ul>
+      </div>
+
+      <div class="actions">
+        <button class="btn ghost" data-nav="config">Назад</button>
+        <button class="btn" id="run-dry">Пробный прогон</button>
+        <button class="btn danger" id="run-real">Прошить по-настоящему</button>
+      </div>
+      <div class="confirm-real" id="confirm-real" hidden>
+        <label>Это перезапишет прошивку. Напишите <b>ПРОШИТЬ</b>, чтобы продолжить:</label>
+        <input id="confirm-word" type="text" autocomplete="off">
+        <button class="btn danger" id="confirm-go" disabled>Начать</button>
+      </div>
+    </section>
+
+    <!-- 5. RUN -->
+    <section class="panel wide" data-panel="run" hidden>
+      <h1 id="run-title">Прошивка</h1>
+      <div class="tracker" id="tracker"></div>
+
+      <div class="wifi-banner" id="wifi-banner" hidden>
+        <b>Подключитесь к Wi-Fi установщика</b>
+        <div>Сеть: <code id="wifi-ssid-out"></code> · ключ: <code id="wifi-key-out"></code></div>
+        <small>Эта сеть существует только пока работает RAM-установщик. Установщик сам дождётся подключения.</small>
+      </div>
+
+      <div class="term">
+        <div class="term-head" id="term-head">
+          <span class="sig"></span>
+          <span class="term-label" id="term-label">установщик · ожидание</span>
+        </div>
+        <pre class="log" id="log" aria-live="polite"></pre>
+      </div>
+
+      <div id="resume-box" class="note" hidden></div>
+
+      <div class="actions">
+        <button class="btn ghost" id="run-cancel">Отменить</button>
+        <button class="btn primary" id="run-done" hidden data-nav="mode">Готово</button>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="foot">
+    Локальный мастер · работает только на 127.0.0.1 · прошивайте только свой роутер
+  </footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
