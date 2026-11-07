@@ -2695,6 +2695,18 @@ def test_ubi9_reservation():
         check(f"the restore read-back fails closed on an {label}",
               wanted in error, error)
 
+    # do_restore runs from the RAM initramfs, where a successful, empty map is
+    # the normal case: nothing has to be attached there. Treating it as
+    # unreadable would abort every stock restore after the write.
+    with mock.patch.object(restore, "ssh", return_value=(0, "")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore read-back allows a clean empty map",
+          error == "no error", error)
+
     with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\n")):
         try:
             restore.require_own_ubi9("router.test", 9)
