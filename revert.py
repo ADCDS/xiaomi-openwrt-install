@@ -231,6 +231,15 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
         raise restore.RestoreError(
             "could not read which MTDs the running UBIs sit on "
             "(/sys/class/ubi/*/mtd_num) -- refusing to pick a target")
+    for other_mtd, devices in by_mtd.items():
+        if other_mtd != str(k) and "ubi9" in devices:
+            raise restore.RestoreError(
+                f"device 9 is attached to mtd{other_mtd}, not to ubi_kernel "
+                f"(mtd{k}). This tool reserves device 9 for its own read-back "
+                "and will not detach a device it does not own. Detach it on the "
+                "router (ubidetach -d 9) or reboot, then re-run. Nothing has "
+                "been written by this run.")
+
     on_target = by_mtd.get(str(k), set())
     # Device 9 is this tool's own scratch device, used only for the read-back;
     # it can outlive a run that died there. Anything else on ubi_kernel is live.
@@ -252,8 +261,9 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
             f"ubi_kernel (mtd{k}) has ubi9 attached, but this box has no record "
             f"of a pivot ({state.strip() or 'empty'}), so it cannot be told "
             "apart from a partition that is live. If you know device 9 is not "
-            "in use, detach it on the router (ubidetach -d 9) and re-run. "
-            "Nothing has been written.")
+            "in use, detach it on the router (ubidetach -d 9) and re-run. This "
+            "run has written nothing, but a previous pivot may have, so do not "
+            "reboot until you know what device 9 is.")
     log(f"[1] UBI attached on mtd{sorted(int(item) for item in by_mtd)}; "
         f"ubi_kernel is mtd{k}"
         + (", holding only our stale device 9" if stale_scratch else " and is idle"))
@@ -531,11 +541,12 @@ if __name__ == "__main__":
         # does not name (an OSError from the transport, for one). Show those
         # with their advice instead of a traceback, and leave every untagged
         # exception alone so real bugs still report a stack.
-        advice = pivot_advice(e)
-        if not advice:
+        if not hasattr(e, "pivot_stage"):
             raise
         log(f"[-] {e}")
-        log(f"[!] {advice}")
+        advice = pivot_advice(e)
+        if advice:
+            log(f"[!] {advice}")
         sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")

@@ -2736,6 +2736,11 @@ def test_revert_pivot_guards():
           and "no record of a pivot" in str(result)
           and "ubidetach -d 9" in str(result), str(result))
 
+    result, commands = dry("ubi0 10\nubi9 5\n")
+    check("a device 9 attached to another mtd is never detached",
+          isinstance(result, revert.restore.RestoreError)
+          and "attached to mtd5" in str(result), str(result))
+
     # Every one of those refusals happened before anything was erased, and
     # updater picks its advice from this tag: a wrong tag would tell the
     # operator that nothing bootable is left when the box is perfectly intact.
