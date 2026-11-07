@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OpenWrt для Xiaomi AX3000T (RD03v2)</title>
+<title>OpenWrt for Xiaomi AX3000T (RD03v2)</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -12,16 +12,17 @@
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">ow</span>
       <div>
-        <div class="brand-title">OpenWrt · Xiaomi AX3000T</div>
-        <div class="brand-sub">RD03v2 (Qualcomm IPQ5018) — установщик</div>
+        <div class="brand-title" data-i18n="brand.title"></div>
+        <div class="brand-sub" data-i18n="brand.sub"></div>
       </div>
+      <button class="btn ghost lang" id="lang-switch" type="button" data-i18n="lang.switch"></button>
     </div>
     <ol class="steps" id="steps">
-      <li data-step="mode">Режим</li>
-      <li data-step="check">Проверка</li>
-      <li data-step="config">Настройки</li>
-      <li data-step="review">Подтверждение</li>
-      <li data-step="run">Прошивка</li>
+      <li data-step="mode" data-i18n="step.mode"></li>
+      <li data-step="check" data-i18n="step.check"></li>
+      <li data-step="config" data-i18n="step.config"></li>
+      <li data-step="review" data-i18n="step.review"></li>
+      <li data-step="run" data-i18n="step.run"></li>
     </ol>
   </header>
 
@@ -29,155 +30,168 @@
 
     <!-- 1. MODE -->
     <section class="panel" data-panel="mode">
-      <h1>Что сделать?</h1>
-      <p class="lede">Выберите действие. Установка и откат защищены A/B-резервом: пока новая система не поднимется, прежняя остаётся целой и загрузится обратно.</p>
+      <h1 data-i18n="mode.h1"></h1>
+      <p class="lede" data-i18n="mode.lede"></p>
       <div class="cards">
         <button class="card" data-mode="install">
           <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 11 5 4 5-4"/><path d="M5 21h14"/></svg></span>
-          <span class="card-h">Установить OpenWrt</span>
-          <span class="card-p">Со стоковой прошивки Xiaomi на последний OpenWrt. Без пайки и UART.</span>
-          <span class="card-tag safe">A/B-резерв: сток остаётся целым</span>
+          <span class="card-h" data-i18n="mode.install.h"></span>
+          <span class="card-p" data-i18n="mode.install.p"></span>
+          <span class="card-tag safe" data-i18n="mode.install.tag"></span>
         </button>
         <button class="card" data-mode="update">
           <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg></span>
-          <span class="card-h">Обновить OpenWrt</span>
-          <span class="card-p">Уже установленный OpenWrt — на новый билд. По процедуре no-uart-reflash.</span>
-          <span class="card-tag warn">UART — страховка</span>
+          <span class="card-h" data-i18n="mode.update.h"></span>
+          <span class="card-p" data-i18n="mode.update.p"></span>
+          <span class="card-tag warn" data-i18n="mode.update.tag"></span>
         </button>
         <button class="card" data-mode="revert">
           <span class="card-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 8"/></svg></span>
-          <span class="card-h">Вернуть сток</span>
-          <span class="card-p">С OpenWrt обратно на официальную прошивку Xiaomi.</span>
-          <span class="card-tag safe">A/B-резерв: сток остаётся целым</span>
+          <span class="card-h" data-i18n="mode.revert.h"></span>
+          <span class="card-p" data-i18n="mode.revert.p"></span>
+          <span class="card-tag warn" data-i18n="mode.revert.tag"></span>
         </button>
       </div>
     </section>
 
     <!-- 2. CHECK -->
     <section class="panel" data-panel="check" hidden>
-      <h1>Проверка окружения</h1>
-      <p class="lede">Прошивка работает только на Linux. На Windows запускайте из-под WSL.</p>
+      <h1 data-i18n="check.h1"></h1>
+      <p class="lede" data-i18n="check.lede"></p>
       <div id="platform-note" class="note"></div>
       <ul class="checklist" id="checklist"></ul>
-      <div id="install-hint" class="hint" hidden></div>
+      <div id="install-hint" class="hint" hidden>
+        <span data-i18n="prereq.install_hint"></span><br><code id="install-hint-command"></code>
+      </div>
       <div class="actions">
-        <button class="btn ghost" data-nav="mode">Назад</button>
-        <button class="btn" id="recheck">Проверить снова</button>
-        <button class="btn primary" id="check-next" disabled>Далее</button>
+        <button class="btn ghost" data-nav="mode" data-i18n="btn.back"></button>
+        <button class="btn" id="recheck" data-i18n="btn.recheck"></button>
+        <button class="btn primary" id="check-next" disabled data-i18n="btn.next"></button>
       </div>
     </section>
 
     <!-- 3. CONFIG -->
     <section class="panel" data-panel="config" hidden>
-      <h1>Настройки</h1>
+      <h1 data-i18n="config.h1"></h1>
       <p class="lede" id="config-lede"></p>
 
       <div class="field">
-        <label>Сетевой интерфейс к роутеру</label>
+        <label for="interface" data-i18n="field.interface"></label>
         <select id="interface"></select>
-        <small>Определяется автоматически. Проводной — надёжнее.</small>
+        <small data-i18n="field.interface.help"></small>
       </div>
 
       <div class="field">
-        <label>Релиз OpenWrt</label>
+        <label for="release" data-i18n="field.release"></label>
         <select id="release"></select>
-        <small id="release-note">По умолчанию — последний стабильный.</small>
+        <small id="release-note"></small>
       </div>
 
       <div class="field" data-when="revert" hidden>
-        <label>Путь к официальному стоковому образу (.bin)</label>
-        <input type="text" id="stock-image" placeholder="/path/to/miwifi_rd03v2_*.bin">
-        <small>SHA-256 должен совпадать с одобренным в профиле устройства.</small>
+        <label for="stock-image" data-i18n="field.stock_image"></label>
+        <input type="text" id="stock-image" placeholder="/path/to/miwifi_rd03v2_*.bin" autocomplete="off">
+        <small data-i18n="field.stock_image.help"></small>
       </div>
 
-      <details class="advanced" data-when="install update">
-        <summary>Wi-Fi и пароль установленной системы (необязательно)</summary>
+      <details class="advanced" data-when="install" hidden>
+        <summary data-i18n="advanced.summary"></summary>
         <div class="grid2">
-          <div class="field"><label>Wi-Fi SSID</label><input id="wifi-ssid" type="text"></div>
-          <div class="field"><label>Wi-Fi пароль (8–63)</label><input id="wifi-key" type="text"></div>
-          <div class="field"><label>Страна (например RU)</label><input id="wifi-country" type="text" maxlength="2"></div>
-          <div class="field"><label>Пароль root</label><input id="root-password" type="text"></div>
+          <div class="field"><label for="wifi-ssid" data-i18n="field.wifi_ssid"></label><input id="wifi-ssid" type="text" autocomplete="off"></div>
+          <div class="field"><label for="wifi-key" data-i18n="field.wifi_key"></label><input id="wifi-key" type="password" autocomplete="new-password"></div>
+          <div class="field"><label for="wifi-country" data-i18n="field.wifi_country"></label><input id="wifi-country" type="text" maxlength="2" autocomplete="off"></div>
+          <div class="field"><label for="root-password" data-i18n="field.root_password"></label><input id="root-password" type="password" autocomplete="new-password"></div>
         </div>
-        <small>Оставьте пустым — Wi-Fi останется выключенным, пароль root не задан (для проводной проверки).</small>
+        <small data-i18n="advanced.help"></small>
       </details>
 
       <div class="field" data-when="update" hidden>
-        <label>Текущий пароль root установленного OpenWrt</label>
-        <input id="update-root" type="text" placeholder="пусто, если пароль не задан">
+        <label for="current-password" data-i18n="field.current_password"></label>
+        <input id="current-password" type="password" autocomplete="off" data-i18n-placeholder="field.current_password.placeholder">
       </div>
 
       <div class="field check-field" data-when="update" hidden>
         <label class="check"><input type="checkbox" id="keep-settings" checked>
-          <span>Сохранить настройки (как <code>sysupgrade</code>)</span></label>
-        <small>Делает <code>sysupgrade -b</code> и восстанавливает конфиг на новой прошивке. Снимите галочку для чистой установки. Бэкап настроек в любом случае сохраняется на ваш компьютер.</small>
+          <span data-i18n="field.keep"></span></label>
+        <small data-i18n="field.keep.help"></small>
       </div>
 
+      <div class="note bad" id="config-error" hidden></div>
+
       <div class="actions">
-        <button class="btn ghost" data-nav="check">Назад</button>
-        <button class="btn primary" id="config-next">Далее</button>
+        <button class="btn ghost" data-nav="check" data-i18n="btn.back"></button>
+        <button class="btn primary" id="config-next" data-i18n="btn.next"></button>
       </div>
     </section>
 
     <!-- 4. REVIEW -->
     <section class="panel" data-panel="review" hidden>
-      <h1>Подтверждение</h1>
+      <h1 data-i18n="review.h1"></h1>
       <div class="review" id="review"></div>
       <div class="note" id="review-advisory" hidden></div>
 
       <div class="safety">
-        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>Безопасность</h3>
+        <h3><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg><span data-i18n="safety.h"></span></h3>
         <ul>
-          <li>Сначала запустите <b>пробный прогон</b>: он только скачает и проверит образы, роутер не трогается.</li>
-          <li>Необратимая запись происходит только после явного подтверждения.</li>
-          <li>Единственная страховка на случай неудачной записи — доступ по UART. Не отключайте питание во время записи.</li>
+          <li data-i18n="safety.dry"></li>
+          <li data-i18n="safety.confirm"></li>
+          <li id="safety-route"></li>
+          <li data-i18n="safety.power"></li>
         </ul>
       </div>
 
+      <div class="note bad" id="review-error" hidden></div>
+
       <div class="actions">
-        <button class="btn ghost" data-nav="config">Назад</button>
-        <button class="btn" id="run-dry">Пробный прогон</button>
-        <button class="btn danger" id="run-real">Прошить по-настоящему</button>
+        <button class="btn ghost" data-nav="config" data-i18n="btn.back"></button>
+        <button class="btn" id="run-dry" data-i18n="btn.dry"></button>
+        <button class="btn danger" id="run-real" data-i18n="btn.real"></button>
       </div>
       <div class="confirm-real" id="confirm-real" hidden>
-        <label>Это перезапишет прошивку. Напишите <b>ПРОШИТЬ</b>, чтобы продолжить:</label>
+        <label for="confirm-word" id="confirm-label"></label>
         <input id="confirm-word" type="text" autocomplete="off">
-        <button class="btn danger" id="confirm-go" disabled>Начать</button>
+        <button class="btn danger" id="confirm-go" disabled data-i18n="btn.start"></button>
       </div>
     </section>
 
     <!-- 5. RUN -->
     <section class="panel wide" data-panel="run" hidden>
-      <h1 id="run-title">Прошивка</h1>
+      <h1 id="run-title"></h1>
       <div class="tracker" id="tracker"></div>
 
       <div class="wifi-banner" id="wifi-banner" hidden>
-        <b>Подключитесь к Wi-Fi установщика</b>
-        <div>Сеть: <code id="wifi-ssid-out"></code> · ключ: <code id="wifi-key-out"></code></div>
-        <small>Эта сеть существует только пока работает RAM-установщик. Установщик сам дождётся подключения.</small>
+        <b data-i18n="wifi.h"></b>
+        <div><span data-i18n="wifi.network"></span> <code id="wifi-ssid-out"></code> · <span data-i18n="wifi.key"></span> <code id="wifi-key-out"></code></div>
+        <small data-i18n="wifi.help"></small>
       </div>
+      <div class="note bad" id="run-hint" hidden></div>
 
       <div class="term">
         <div class="term-head" id="term-head">
           <span class="sig"></span>
-          <span class="term-label" id="term-label">установщик · ожидание</span>
+          <span class="term-label" id="term-label"></span>
         </div>
         <pre class="log" id="log" aria-live="polite"></pre>
       </div>
 
-      <div id="resume-box" class="note" hidden></div>
+      <div class="note" id="run-result" hidden></div>
+      <div class="note" id="run-message" hidden></div>
+      <div class="note" id="output-box" hidden><span data-i18n="run.output"></span> <code id="output-path"></code></div>
+      <div class="note" id="resume-box" hidden><span data-i18n="run.resume"></span> <code id="resume-path"></code></div>
 
       <div class="actions">
-        <button class="btn ghost" id="run-cancel">Отменить</button>
-        <button class="btn primary" id="run-done" hidden data-nav="mode">Готово</button>
+        <button class="btn ghost" id="run-cancel" data-i18n="btn.cancel"></button>
+        <button class="btn primary" id="run-done" hidden data-nav="mode" data-i18n="btn.finish"></button>
       </div>
     </section>
 
   </main>
 
-  <footer class="foot">
-    Локальный мастер · работает только на 127.0.0.1 · прошивайте только свой роутер
-  </footer>
+  <footer class="foot" data-i18n="footer"></footer>
 </div>
+
+<template id="icon-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></template>
+<template id="icon-bad"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></template>
+
 <script src="app.js"></script>
 </body>
 </html>

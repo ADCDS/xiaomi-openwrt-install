@@ -243,3 +243,8 @@ input:focus, select:focus { outline: none; border-color: var(--accent);
   accent-color: var(--accent); margin: 0; }
 .check span { user-select: none; }
 .check-field > small { margin-top: 0; }
+
+/* language switch */
+.brand .lang { margin-left: auto; padding: 6px 12px; font-size: 13px; }
+
+#run-result { margin-top: 14px; }
