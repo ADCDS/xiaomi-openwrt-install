@@ -409,10 +409,14 @@ def run(args):
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
-        except (Abort, restore.RestoreError) as exc:
+        except Exception as exc:            # noqa: BLE001 -- tagged by the pivot
             # What to say depends on how far the write got, and the exception
             # class cannot express that: pivot_to_ram tags the stage instead.
-            stage = getattr(exc, "pivot_stage", "not-written")
+            # Catching Exception rather than (Abort, RestoreError) keeps a
+            # transport timeout raised mid-write from escaping with no advice.
+            stage = getattr(exc, "pivot_stage", None)
+            if stage is None:
+                raise
             if stage == "write-unconfirmed":
                 # ubiformat was issued and its result is not known: the
                 # partition that held the installed kernel is not trustworthy,

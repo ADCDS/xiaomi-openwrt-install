@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -104,12 +105,19 @@ def read_back_kernel(host, k, want_md5):
     install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
     rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
     if rc != 0:
-        raise restore.RestoreError(f"the written UBI will not attach: {out!r}")
+        raise restore.RestoreError(
+            f"the written UBI will not attach: {out!r}. Do NOT reboot: "
+            "ubi_kernel held the installed kernel and now holds a write that "
+            "could not be verified. The running system is fine until it "
+            "reboots. Re-run now to retry the write.")
     _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
     vid = kernel_volume_id(vols)
     if vid is None:
         install.ssh(host, "ubidetach -d 9", check=False)
-        raise restore.RestoreError(f"no 'kernel' volume in the written UBI:\n{vols}")
+        raise restore.RestoreError(
+            f"no 'kernel' volume in the written UBI:\n{vols}\n"
+            "Do NOT reboot: ubi_kernel held the installed kernel and now holds "
+            "a write that could not be verified. Re-run now to retry the write.")
     dev = f"/dev/ubi9_{vid}"
     _rc, got = install.ssh(host, f"md5sum {dev}; wc -c < {dev}", timeout=300)
     install.ssh(host, "ubidetach -d 9", check=False)
@@ -179,7 +187,7 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
     # from the very check it is meant to satisfy.
     _rc, attached = install.ssh(
         host,
-        "for u in /sys/class/ubi/ubi[0-9]; do "
+        "for u in /sys/class/ubi/ubi*; do "
         "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
         check=False)
     by_mtd = {}
@@ -214,7 +222,13 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
 
     if stale_scratch:
         # Only now, so that a dry run really is read-only.
-        install.ssh(host, "ubidetach -d 9", check=False)
+        rc, out = install.ssh(host, "ubidetach -d 9", check=False)
+        if rc != 0:
+            # Device 9 sits on ubi_kernel, so an earlier read-back ran -- and
+            # that run may already have erased part of it.
+            phase["written"] = True
+            raise restore.RestoreError(
+                f"could not detach the stale read-back device 9: {out!r}")
         log("[1] dropped the stale read-back device 9 that sat on ubi_kernel")
 
     state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
@@ -268,6 +282,10 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
             check=False)
         log(f"[1] launch: {out.strip()}")
         if "rc=0" not in out:
+            # The launcher answered and refused, so no ubiformat started. A
+            # transport error above leaves the flag set instead, which is the
+            # conservative direction: a write may have begun.
+            phase["written"] = False
             raise restore.RestoreError(f"pivot launcher failed: {out!r}")
 
         deadline = time.time() + 300
@@ -443,6 +461,11 @@ def main():
             continue
         log(f"[+] stock is up: hardware={info.get('hardware')} "
             f"rom={info.get('romversion')} inited={info.get('inited')}")
+        identity_error = devices.stock_identity_error(profile, info)
+        if identity_error:
+            log(f"[!] stock answered, but it is not the restored router: "
+                f"{identity_error}")
+            return 1
         if info.get("inited") == 0:
             log(t("[+] factory defaults -- the setup wizard is waiting"))
         return 0
@@ -455,7 +478,8 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (restore.RestoreError, release.ReleaseError, install.Abort) as e:
+    except (restore.RestoreError, release.ReleaseError, install.Abort,
+            subprocess.TimeoutExpired) as e:
         log(f"[-] {e}")
         sys.exit(1)
     except KeyboardInterrupt:

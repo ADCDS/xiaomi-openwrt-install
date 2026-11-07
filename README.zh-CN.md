@@ -233,7 +233,7 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface 
 
 在 Windows 中：`py -3 revert.py ...`，这条路径尚未在真实路由器上验证。其他参数：`--transport wired`、`--root-password 'YOUR_OPENWRT_PASSWORD'`、`--dry-run`。确认擦除时必须用拉丁字母输入 `RESTORE`。
 
-`revert.py` 会校验原厂镜像，下载 RAM 系统镜像，把路由器切换到 RAM，恢复原厂固件，并确认设置向导重新出现。恢复请使用它，而不要重新执行固件写入：执行 `sysupgrade` 之后，原厂的 A/B 备份已经被擦除（见 [NOTICE](NOTICE)）。
+`revert.py` 会校验原厂镜像，下载 RAM 系统镜像，把路由器切换到 RAM，恢复原厂固件，并等待原厂系统响应，报告其硬件、ROM 以及设置向导是否在等待。恢复请使用它，而不要重新执行固件写入：执行 `sysupgrade` 之后，原厂的 A/B 备份已经被擦除（见 [NOTICE](NOTICE)）。
 
 ## 其他工具
 

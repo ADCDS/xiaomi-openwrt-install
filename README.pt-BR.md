@@ -346,8 +346,9 @@ real. Parâmetros adicionais: `--transport wired`, `--root-password 'YOUR_OPENWR
 em letras latinas.
 
 O `revert.py` verifica a imagem de fábrica, baixa as imagens do sistema em RAM,
-coloca o roteador em RAM, restaura o firmware de fábrica e confirma que o
-assistente de configuração voltou. Use-o para o retorno, e não uma nova execução da
+coloca o roteador em RAM, restaura o firmware de fábrica e aguarda a resposta do sistema de
+fábrica, informando o hardware, a ROM e se o assistente de configuração está
+aguardando. Use-o para o retorno, e não uma nova execução da
 gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (veja o
 [NOTICE](NOTICE)).
 

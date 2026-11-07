@@ -676,6 +676,9 @@ def test_stager():
     check("a key with meaningful spaces is not silently trimmed",
           b"' spaced key '" in spaced, spaced.decode(errors="replace")[-400:])
     check("wpa2 case restores the captured key", b"key='hunter22'" in wpa)
+    hint = channel.expected_wifi([{"encryption": "psk2", "password": " spaced key "}])
+    check("the reconnect hint does not trim a key's spaces",
+          hint[0][2].endswith("key= spaced key "), str(hint))
     open_ = channel.build_stager(
         "10.0.0.1", 8000, 4444, [], "testtoken")
     check("unknown radio config falls back to an open AP",
@@ -2274,6 +2277,13 @@ def test_updater():
           "do NOT reboot" in (r.error or ""), r.error or "")
 
     box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=subprocess.TimeoutExpired("ssh", 30),
+                    pivot_stage="write-unconfirmed")
+    check("a transport timeout mid-write still gets the retry advice",
+          "--config-backup" in (r.error or "") and "do NOT reboot" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox()
     r = _run_update(box, wired, pivot_error=restore.RestoreError(
         "img.ubi is 4096 B, ubi_kernel holds 1024 B -- refusing to erase the "
         "installed kernel for an image that cannot fit it"),
@@ -2600,6 +2610,32 @@ def test_gui_server():
         runner._RUNS.clear()
 
 
+def test_default_routes_fail_closed():
+    """An unreadable route table must not read as "not your gateway"."""
+    print("\n[host: default routes]")
+    with mock.patch.object(install.subprocess, "run", side_effect=OSError("no ip")):
+        try:
+            install.default_routes()
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+    check("an unreadable route table fails closed", "default routes" in error, error)
+
+    failed = mock.Mock(returncode=2, stdout="", stderr="ip: bad")
+    with mock.patch.object(install.subprocess, "run", return_value=failed):
+        try:
+            install.default_routes()
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+    check("a failing ip command fails closed", "default routes" in error, error)
+
+    empty = mock.Mock(returncode=0, stdout="", stderr="")
+    with mock.patch.object(install.subprocess, "run", return_value=empty):
+        check("a genuinely empty table is still no gateways",
+              install.default_routes() == [], "")
+
+
 def test_revert_pivot_guards():
     """The revert pivot must refuse what the A/B paths refuse, before erasing."""
     print("\n[revert: the pivot's preconditions]")
@@ -2750,7 +2786,7 @@ def test_pivot_stage_tagging():
              "rootfs": {"index": 10, "size": 8192}}
 
     def scripted(*, job_state="status= pid= active=0 lock=0", poll="fail:1",
-                 md5=None, discover=None):
+                 md5=None, discover=None, launch="rc=0"):
         def ssh(host, command, **kwargs):
             if command.startswith("for u in /sys/class/ubi/ubi"):
                 return 0, "ubi0 10\n"
@@ -2759,7 +2795,7 @@ def test_pivot_stage_tagging():
             if command.startswith("md5sum /tmp/ini.ubi"):
                 return 0, md5 + "  /tmp/ini.ubi"
             if command.startswith("start-stop-daemon -S -b -x /tmp/pv.sh"):
-                return 0, "rc=0"
+                return 0, launch
             if command.startswith("cat /tmp/pv.status"):
                 return 0, poll
             if command.startswith("tail -20 /tmp/pv.log"):
@@ -2808,6 +2844,11 @@ def test_pivot_stage_tagging():
     # The pivot script's EXIT trap removes the lock on a normal failed exit, so
     # this -- not the lock=1 variant above -- is the state real hardware leaves
     # behind. It also isolates the "any status means a write was issued" term.
+    error = run(launch="start-stop-daemon: not found")
+    check("a launcher that refuses outright is not called a write",
+          getattr(error, "pivot_stage", None) == "not-written",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
     error = run(job_state="status=fail:1 pid=1234 active=0 lock=0")
     check("a failed pivot that cleaned its lock up is still an unconfirmed write",
           getattr(error, "pivot_stage", None) == "write-unconfirmed",
@@ -2857,6 +2898,7 @@ def main():
     test_expected_volume()
     test_install_failure_hint()
     test_updater()
+    test_default_routes_fail_closed()
     test_revert_pivot_guards()
     test_kernel_volume_id()
     test_read_back_kernel()

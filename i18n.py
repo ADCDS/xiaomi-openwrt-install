@@ -497,8 +497,8 @@ def _canonical(value):
     tag = str(value).strip().replace("_", "-").lower()
     primary = tag.split("-")[0].split(".")[0]
     if primary in ("zh", "cn"):
-        # Traditional Chinese would get Simplified text; say so in the README
-        # rather than inventing a catalogue we do not have.
+        # Traditional Chinese gets Simplified text: there is one Chinese
+        # catalogue, and a variant tag does not say which script is wanted.
         return "zh-CN"
     if primary == "pt":
         return "pt-BR"

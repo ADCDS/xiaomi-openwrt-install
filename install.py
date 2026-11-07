@@ -717,11 +717,17 @@ def default_routes():
         except hostnet.NetworkError as exc:
             raise Abort(str(exc)) from exc
     try:
-        r = subprocess.run(["ip", "-4", "route", "show", "default"],
-                           capture_output=True, text=True, timeout=5).stdout
-    except Exception:                                            # noqa: BLE001
-        return []
-    return re.findall(r"default via (\S+) dev (\S+)", r)
+        result = subprocess.run(["ip", "-4", "route", "show", "default"],
+                                capture_output=True, text=True, timeout=5)
+    except Exception as exc:                                     # noqa: BLE001
+        # Fail closed, like the Windows branch: an unreadable route table must
+        # not read as "that address is not your gateway". A table that is
+        # genuinely empty still yields [], because `ip` says so successfully.
+        raise Abort(f"cannot read this host's default routes ({exc})") from exc
+    if result.returncode != 0:
+        raise Abort("cannot read this host's default routes: "
+                    f"{result.stderr.strip() or result.returncode}")
+    return re.findall(r"default via (\S+) dev (\S+)", result.stdout)
 
 
 def default_gateways():

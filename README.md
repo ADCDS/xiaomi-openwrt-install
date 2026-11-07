@@ -240,8 +240,8 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
 ```
 
 `revert.py` verifies the stock image, downloads and verifies the profile's RAM
-image pair, pivots the router into RAM, restores stock, and confirms that the
-setup wizard returns. It infers Ethernet or Wi-Fi from the selected interface.
+image pair, pivots the router into RAM, restores stock, and waits for the stock system to
+answer, reporting its hardware, ROM and whether the setup wizard is waiting. It infers Ethernet or Wi-Fi from the selected interface.
 The RAM images default to the latest published release; use `--release TAG` to
 select a specific release, and add `--offline` to use its verified cache.
 During a Wi-Fi revert, join the temporary RAM network when `revert.py` prints
