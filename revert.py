@@ -32,10 +32,12 @@ import sys
 import time
 
 import devices
+import i18n
 import install
 import release
 import restore
 from chain import log
+from i18n import t
 
 
 def verified_ram_images(rel, images_dir, flavour="default", wifi=False):
@@ -124,7 +126,7 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             sh = os.path.join(tmp, "pv.sh")
-            with open(sh, "w") as fh:
+            with open(sh, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(PIVOT_SCRIPT.format(k=k))
             install.scp_to(host, sh, "/tmp/pv.sh")
         install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status",
@@ -167,7 +169,7 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     log("[1] read-back matches the image byte for byte")
 
     install.ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
-    log("[1] rebooting into the RAM initramfs")
+    log(t("[1] rebooting into the RAM initramfs"))
     time.sleep(15)
     return install.wait_and_discover(iface, fallback=fallback) if iface else host
 
@@ -221,9 +223,16 @@ def main():
                     help="explicit digest for an unlisted development image")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
+    ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
+                    help="language for prompts and instructions (default: system)")
     args = ap.parse_args()
+    i18n.set_language(args.lang)
+    i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.release = args.release or profile.default_release
+    args.discover = install.canonical_interface(args.discover)
+    if not args.dry_run:
+        install.require_host_tools()
     if args.transport == "auto" and args.discover:
         args.transport = install.detect_transport(args.discover)
     elif args.transport == "auto":
@@ -260,16 +269,17 @@ def main():
     log(f"[*] RAM-image NAND gate: PASS -- {why}")
 
     if rtype != "tmpfs":
-        log("\n=== step 1: pivot into the RAM initramfs ===")
+        log(t("\n=== step 1: pivot into the RAM initramfs ==="))
         if args.transport == "wifi":
-            log("[1] when the installed network disappears, join "
-                f"{profile.installer_wifi_ssid!r} with key "
-                f"{profile.installer_wifi_key!r}; this temporary RAM system "
-                "has a passwordless root account, so keep the link isolated")
+            log(t("[1] when the installed network disappears, join {ssid!r} with "
+                  "key {key!r}; this temporary RAM system has a passwordless root "
+                  "account, so keep the link isolated",
+                  ssid=profile.installer_wifi_ssid,
+                  key=profile.installer_wifi_key))
         if not args.yes and not args.dry_run:
-            if input(f"[?] write {os.path.basename(ubi)} to ubi_kernel and "
-                     "reboot? [type YES] ").strip() != "YES":
-                raise restore.RestoreError("declined")
+            if input(t("[?] write {image} to ubi_kernel and reboot? [type YES] ",
+                       image=os.path.basename(ubi))).strip() != "YES":
+                raise restore.RestoreError(t("declined"))
         newhost = pivot_to_ram(host, ubi, itb, args.discover, args.dry_run,
                                fallback=fallback,
                                recover_stale_lock=args.recover_stale_lock)
@@ -289,20 +299,20 @@ def main():
     else:
         log("[*] already running from RAM -- skipping the pivot")
 
-    log("\n=== step 2: restore stock ===")
+    log(t("\n=== step 2: restore stock ==="))
     mtd = restore.check_target(host, profile)
     plan = restore.plan(mtd, profile)
     if args.dry_run:
         log("[dry-run] stopping before the restore write.")
         return 0
     if not args.yes:
-        if input("[?] erase OpenWrt and write stock? [type RESTORE] ").strip() \
+        if input(t("[?] erase OpenWrt and write stock? [type RESTORE] ")).strip() \
                 != "RESTORE":
-            raise restore.RestoreError("declined")
+            raise restore.RestoreError(t("declined"))
     restore.do_restore(host, payload, restore.img_volumes(payload, profile), plan,
                        profile, recover_stale_lock=args.recover_stale_lock)
 
-    log("\n=== step 3: wait for stock ===")
+    log(t("\n=== step 3: wait for stock ==="))
     import chain
     deadline = time.time() + 420
     while time.time() < deadline:
@@ -314,10 +324,11 @@ def main():
         log(f"[+] stock is up: hardware={info.get('hardware')} "
             f"rom={info.get('romversion')} inited={info.get('inited')}")
         if info.get("inited") == 0:
-            log("[+] factory defaults -- the setup wizard is waiting")
+            log(t("[+] factory defaults -- the setup wizard is waiting"))
         return 0
-    log(f"[!] stock did not answer on {profile.stock_host} within 7 minutes. It may "
-        "still be booting; check that this host has an address on that subnet.")
+    log(t("[!] stock did not answer on {host} within 7 minutes. It may still be "
+          "booting; check that this host has an address on that subnet.",
+          host=profile.stock_host))
     return 1
 
 

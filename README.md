@@ -1,5 +1,7 @@
 # xiaomi-openwrt-install
 
+**English** · [Русский](README.ru.md)
+
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
 
@@ -12,11 +14,13 @@ permanent image.
 
 ## Before starting
 
-You need a Linux computer with Python 3.9 or newer:
+You need a Linux or Windows 10/11 computer with Python 3.9 or newer. On Linux:
 
 ```sh
 sudo apt install sshpass openssl
 ```
+
+On Windows, see [Windows 10/11](#windows-1011) below.
 
 Factory-reset the router and leave it at Xiaomi's setup wizard. **Do not finish
 the web wizard.** Connect the computer to a LAN port or to the router's open
@@ -33,6 +37,56 @@ Clone this repository:
 git clone https://github.com/ADCDS/xiaomi-openwrt-install.git
 cd xiaomi-openwrt-install
 ```
+
+### Windows 10/11
+
+Native support, no WSL. Install Python from
+[python.org](https://www.python.org/downloads/windows/), including the `py`
+launcher, then open PowerShell in the repository folder:
+
+```powershell
+py -3 -m pip install -r requirements-windows.txt
+py -3 install.py --list-interfaces
+py -3 install.py --interface "Ethernet"
+```
+
+Use `py -3` wherever this document says `python3`. Pass the adapter name from
+`--list-interfaces`, or its numeric index, which is easier for names with spaces
+or Cyrillic. Install the dependencies while you still have Internet access: the
+factory network may not have any. `install.cmd` is an equivalent launcher.
+
+`sshpass`, `ip`, `nmcli` and OpenSSL are not needed; PowerShell 5.1 (included
+with Windows) reports the network state, and the Python dependencies provide
+password SSH, legacy SCP and root-password hashing. Keep IPv6 enabled on the
+selected adapter: rediscovery after a reboot uses link-local addresses. Join the
+temporary and permanent Wi-Fi networks by hand when prompted.
+
+If the router's callback never arrives (`no root shell`), first check that you
+are on a **LAN** port or the factory Wi-Fi with a `192.168.31.x` address and that
+no VPN or other network competes for the route. Then allow `python.exe` through
+Windows Defender Firewall for inbound TCP 8000, 4444 and 4445 from the router, in
+an elevated PowerShell. Factory links may be classified as Public, so a
+Private-only exception may not work. Do not disable the firewall globally:
+
+```powershell
+$python = py -3 -c "import sys; print(sys.executable)"
+New-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" -Direction Inbound -Action Allow -Program $python -Protocol TCP -LocalPort 8000,4444,4445 -RemoteAddress 192.168.31.1 -Profile Any
+# Remove it when finished:
+Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewallRule
+```
+
+Keep the run output somewhere private. Backups, configuration archives and
+`resume.json` hold device data and session secrets, and on Windows they inherit
+the folder's NTFS permissions rather than getting POSIX modes.
+
+**How far this has been tested.** The port is by
+[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install), who confirmed a
+complete native install on a physical RD03v2: Windows 10, Wi-Fi, stock 2.0.28 to
+release v1.14 standard, on 2026-10-11. This repository carries that port on newer
+installer code. The current code, v2.x releases, wired installs and `revert.py`
+have automated coverage on Windows but have not yet been run from Windows against
+a real router. Keep a Linux machine or a UART adapter within reach, and please
+report how it went.
 
 ## Install OpenWrt
 
@@ -85,6 +139,9 @@ interactively during installation with:
 ```sh
 python3 install.py --configure
 ```
+
+Prompts and instructions appear in Russian on a Russian system. Choose explicitly
+with `--lang ru` or `--lang en`; low-level diagnostics stay in English.
 
 Download and fully verify the latest release's image set without contacting a
 router:
@@ -197,8 +254,12 @@ and refuses to run unless the router is already booted from a RAM initramfs.
 | `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reattach to the authenticated callback from an interrupted run. |
 | `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE_NAME` | Run the low-level stock writer from an already-booted RAM system. |
 | `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspect a raw UBI dump offline. |
-| `python3 selftest.py` | Run checks that do not require a router. |
+| `python3 selftest.py` | Run checks that do not require a router (Linux). |
 | `python3 updater.py --dry-run` | Download and verify an update's images without contacting a router. |
+| `python3 -m unittest test_hostnet test_windows test_i18n` | Run the Windows and language checks; needs `requirements-windows.txt`. |
+
+`probe.py` has not been tested on Windows, and its automatic Wi-Fi reconnect is
+Linux-only.
 
 See the [technical reference](docs/technical.md) for interrupted runs, manual
 stages, stock-image hashes, flash-layout details, and recovery procedures.

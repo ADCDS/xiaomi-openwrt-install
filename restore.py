@@ -54,7 +54,9 @@ import sys
 import time
 
 import devices
+import hostnet
 import ubiparse
+import winssh
 
 HDR1_MAGIC = b"HDR1"
 
@@ -133,6 +135,16 @@ SSH_PASSWORDS = [""]
 
 
 def ssh(host, cmd, timeout=180, check=True):
+    if hostnet.is_windows():
+        try:
+            result = winssh.run(host, cmd, SSH_PASSWORDS, timeout)
+        except winssh.SSHError as exc:
+            if not check:
+                return 1, str(exc)
+            raise RestoreError(str(exc)) from exc
+        if check and result[0] != 0:
+            raise RestoreError(f"ssh {cmd[:60]!r}: {result[1]}")
+        return result
     last = (1, "")
     for pw in SSH_PASSWORDS:
         base = ["sshpass", "-p", pw] if _have("sshpass") else []
@@ -161,6 +173,7 @@ def locate(host, iface, profile):
     any gateway is refused as before (see install.gateway_conflict)."""
     import install
     router_iface = None
+    iface = install.canonical_interface(iface)
     if not host and iface:
         wired = install.detect_transport(iface) == "wired"
         gateway_ok = wired and not any(SSH_PASSWORDS)
@@ -415,7 +428,7 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
             print(f"[1] md5 {local_md5} verified on the device")
 
             script = os.path.join(tmp, "restore.sh")
-            with open(script, "w") as fh:
+            with open(script, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(RESTORE_SCRIPT.format(k=k, r=rd, tail_off=hex(tail_off),
                                                tail_cnt=tail_cnt,
                                                rootfs_cnt=rootfs_cnt))
@@ -501,6 +514,11 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
 
 
 def scp(host, local, remote):
+    if hostnet.is_windows():
+        try:
+            return winssh.upload(host, local, remote, SSH_PASSWORDS)
+        except winssh.SSHError as exc:
+            raise RestoreError(str(exc)) from exc
     base = ["sshpass", "-p", ""] if _have("sshpass") else []
     base += ["scp", "-O", "-o", "StrictHostKeyChecking=no",
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",

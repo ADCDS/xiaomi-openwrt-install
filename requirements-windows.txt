@@ -1,0 +1,2 @@
+paramiko>=3.4,<5
+passlib>=1.7.4,<2

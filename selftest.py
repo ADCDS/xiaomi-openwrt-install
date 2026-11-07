@@ -40,6 +40,9 @@ import probe
 import restore
 import ubiparse
 
+# Assertions below are on the English text, whatever this machine's language.
+os.environ["XIAOMI_INSTALL_LANG"] = "en"
+
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 NAND_SUPPORT_FIXTURE = os.path.join(
     REPO_ROOT, "testdata", "nand-support-v1.7.txt")

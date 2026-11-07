@@ -76,9 +76,13 @@ import time
 import chain
 import channel
 import devices
+import hostnet
+import i18n
 import release
 import ubiparse
+import winssh
 from chain import ChainError, log
+from i18n import t
 
 IMAGE_FLAVOURS = {"standard": "default", "nss": "nss"}
 
@@ -122,13 +126,14 @@ class Abort(Exception):
 
 def confirm(question, assume_yes):
     if assume_yes:
-        log(f"[?] {question} -- assumed yes (--yes)")
+        log(t("[?] {question} -- assumed yes (--yes)", question=question))
         return
     try:
-        if input(f"[?] {question} [type YES to continue] ").strip() != "YES":
-            raise Abort("declined")
+        if input(t("[?] {question} [type YES to continue] ",
+                   question=question)).strip() != "YES":
+            raise Abort(t("declined"))
     except (EOFError, KeyboardInterrupt):
-        raise Abort("declined")
+        raise Abort(t("declined"))
 
 
 # ---- stage 1: pre-flight ----------------------------------------------------
@@ -152,7 +157,7 @@ def nvram_get(ch, key):
 def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     """Everything that must be true before a single byte is written."""
     facts = {}
-    log("\n=== stage 1: pre-flight (nothing is written) ===")
+    log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
 
     if rel.profile.slug != profile.slug:
         raise Abort(f"release profile {rel.profile.slug!r} does not match "
@@ -276,7 +281,7 @@ def preflight(ch, rel, images, assume_yes, profile, destdir=None):
 
 def backup(ch, sink, outdir, mtd, attacker, file_port, profile, token):
     """Pull the partitions that are not reproducible if they are ever lost."""
-    log("\n=== backup ===")
+    log(t("\n=== backup ==="))
     got = {}
     for label, part in profile.backup_partitions:
         idx, size = mtd[part]["index"], mtd[part]["size"]
@@ -291,7 +296,7 @@ def backup(ch, sink, outdir, mtd, attacker, file_port, profile, token):
         log(f"[b] {part} -> {label}.bin ({n} B)")
         got[label] = path
     rc, env = ch.run("nvram show", quiet=True)
-    with open(f"{outdir}/nvram-before.txt", "w") as fh:
+    with open(f"{outdir}/nvram-before.txt", "w", encoding="utf-8") as fh:
         fh.write(env + "\n")
     log(f"[b] u-boot environment -> {outdir}/nvram-before.txt")
     return got
@@ -357,7 +362,8 @@ def prepare_flash_job(ch, recover_stale_lock=False):
 
 def perform_pivot_write(ch, http, ubi_path, outdir, attacker, serve_port,
                         target, tidx, assume_yes, recover_stale_lock):
-    confirm(f"write {os.path.basename(ubi_path)} to {target} (mtd{tidx}) and boot it?",
+    confirm(t("write {image} to {target} (mtd{index}) and boot it?",
+              image=os.path.basename(ubi_path), target=target, index=tidx),
             assume_yes)
     for key, value in (("boot_wait", "on"), ("uart_en", "1")):
         rc, out = ch.run(f"nvram set {key}={value}", retries=0, quiet=True)
@@ -409,7 +415,7 @@ def perform_pivot_write(ch, http, ubi_path, outdir, attacker, serve_port,
 
 def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
           profile, wifi=False, recover_stale_lock=False):
-    log("\n=== stage 2: pivot (writes the idle slot and the boot flags) ===")
+    log(t("\n=== stage 2: pivot (writes the idle slot and the boot flags) ==="))
     target = facts["target_slot"]
     tidx = facts["mtd"][target]["index"]
     ubi_path = images["initramfs_ubi"]["path"]
@@ -467,15 +473,15 @@ def pivot(ch, http, facts, images, outdir, attacker, serve_port, assume_yes,
         "-- six attempts before the loader falls back to "
         f"{facts['running_slot']}")
 
-    confirm("reboot into the RAM initramfs now?", assume_yes)
+    confirm(t("reboot into the RAM initramfs now?"), assume_yes)
     if wifi:
-        log("[2] Wi-Fi-only: when the stock network disappears, join "
-            f"{profile.installer_wifi_ssid!r} with key "
-            f"{profile.installer_wifi_key!r}")
+        log(t("[2] Wi-Fi-only: when the stock network disappears, join "
+              "{ssid!r} with key {key!r}",
+              ssid=profile.installer_wifi_ssid, key=profile.installer_wifi_key))
     ch.run("start-stop-daemon -S -b -x /sbin/reboot", retries=0, quiet=True)
-    log("[2] rebooting -- stock is still intact in "
-        f"{facts['running_slot']}; if the pivot does not come up, the "
-        "bootloader falls back to it")
+    log(t("[2] rebooting -- stock is still intact in {slot}; if the pivot does "
+          "not come up, the bootloader falls back to it",
+          slot=facts["running_slot"]))
 
 
 def launch_detached(ch, tidx, recover_stale_lock=False):
@@ -555,7 +561,8 @@ def verify_written(ch, tidx, want_md5, want_len):
 
 def write_tmp(outdir, name, text):
     path = os.path.join(outdir, name)
-    with open(path, "w") as fh:
+    # Served to the router's /bin/sh: LF even when this host is Windows.
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     os.chmod(path, 0o600)
     return path
@@ -643,6 +650,13 @@ def build_config_tar(path, ssid, key, profile, country=None, pwhash=None):
 
 def password_hash(plain):
     """SHA-512 crypt, via openssl -- python's crypt module is gone in 3.13."""
+    if hostnet.is_windows():
+        try:
+            from passlib.hash import sha512_crypt
+        except ImportError as exc:
+            raise Abort("run: py -3 -m pip install -r "
+                        "requirements-windows.txt") from exc
+        return sha512_crypt.using(rounds=100000).hash(plain)
     r = subprocess.run(["openssl", "passwd", "-6", "-stdin"],
                        input=plain + "\n", capture_output=True, text=True,
                        timeout=30)
@@ -695,6 +709,13 @@ def ssh_banner(host, timeout=10):
 
 def default_routes():
     """[(gateway address, egress device)] for this host's IPv4 default routes."""
+    if hostnet.is_windows():
+        # Fails closed, unlike the `ip` path below: an unreadable route table
+        # must not read as "that address is not your gateway".
+        try:
+            return hostnet.default_routes()
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
     try:
         r = subprocess.run(["ip", "-4", "route", "show", "default"],
                            capture_output=True, text=True, timeout=5).stdout
@@ -748,6 +769,11 @@ def neighbour_mac(host, iface=None):
     dev = scope or iface or chain.local_interface(bare)
     if not dev:
         return None
+    if hostnet.is_windows():
+        try:
+            return hostnet.neighbor_mac(bare, dev)
+        except hostnet.NetworkError:
+            return None
     family = "-6" if ":" in bare else "-4"
     try:
         out = subprocess.run(["ip", family, "neigh", "show", bare, "dev", dev],
@@ -765,6 +791,25 @@ def discover_linklocal(iface, timeout=15):
     which collides with an extremely common gateway address, and a link-local
     with a scope can only mean the device on that link.
     """
+    if hostnet.is_windows():
+        # Each PowerShell query takes a second or more to start, so the budget
+        # that suits `ping` on Linux would time out before the neighbour read.
+        try:
+            found = hostnet.discover_candidates(iface, max(timeout, 30))
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
+        good = [candidate for candidate in found
+                if (ssh_banner(candidate, timeout=5)[0] or "").lower()
+                .startswith("ssh-2.0-dropbear")]
+        if not good:
+            raise Abort(f"{len(found)} neighbour(s) on {iface} but none answered "
+                        "ssh as dropbear -- the box is not up yet, IPv6 is off on "
+                        "this adapter, or these are not it")
+        if len(good) > 1:
+            raise Abort(f"more than one dropbear on {iface}: {good}. Pass the "
+                        "right one explicitly as --openwrt-host fe80::...%INDEX")
+        return good[0]
+
     def our_addrs():
         try:
             r = subprocess.run(["ip", "-o", "-6", "addr", "show", "dev", iface,
@@ -873,6 +918,18 @@ RAM_PASSWORDS = ("",)
 
 def ssh(host, cmd, timeout=120, check=True, passwords=None):
     """Root over dropbear, trying each password we might have set."""
+    if hostnet.is_windows():
+        try:
+            result = winssh.run(host, cmd,
+                                SSH_PASSWORDS if passwords is None else passwords,
+                                timeout)
+        except winssh.SSHError as exc:
+            if not check:
+                return 1, str(exc)
+            raise Abort(str(exc)) from exc
+        if check and result[0] != 0:
+            raise Abort(f"ssh {cmd!r} failed: {result[1]}")
+        return result
     last = (1, "")
     for pw in SSH_PASSWORDS if passwords is None else passwords:
         base = ["ssh", "-o", "StrictHostKeyChecking=no",
@@ -895,6 +952,12 @@ def ssh(host, cmd, timeout=120, check=True, passwords=None):
 
 def scp_to(host, local, remote, passwords=None):
     """scp needs an IPv6 literal bracketed, or its colons read as host:path."""
+    if hostnet.is_windows():
+        try:
+            return winssh.upload(host, local, remote,
+                                 SSH_PASSWORDS if passwords is None else passwords)
+        except winssh.SSHError as exc:
+            raise Abort(str(exc)) from exc
     dest = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for pw in SSH_PASSWORDS if passwords is None else passwords:
@@ -931,8 +994,11 @@ def wait_and_discover(iface, deadline_s=420, fallback=None,
     fallback_note = linklocal_note = None
     while time.time() < end:
         if fallback:
-            why = gateway_conflict(fallback,
-                                   iface if router_gateway_ok else None)
+            try:
+                why = gateway_conflict(fallback,
+                                       iface if router_gateway_ok else None)
+            except Abort as exc:     # a query failed; it may not fail next time
+                why = str(exc)
             if why is None and chain.local_interface(fallback) != iface:
                 why = f"not routed via {iface}"
             if why:
@@ -1043,7 +1109,8 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
         raise Abort("permanent verification needs --verify-interface or an "
                     "explicit OpenWrt host")
     where = interface or host
-    log(f"[3] waiting up to {deadline_s}s for permanent OpenWrt on {where}")
+    log(t("[3] waiting up to {seconds}s for permanent OpenWrt on {where}",
+          seconds=deadline_s, where=where))
     secret = any(SSH_PASSWORDS)
     gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
     mac = router_mac if secret else None
@@ -1081,7 +1148,7 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
         if rc1 == rc2 == rc3 == 0 and permanent_system_matches(
                 profile, board, rtype, mtd_text):
             log(f"[3] installed board={board.strip()} rootfs_type=overlay")
-            log("[+] OpenWrt is installed on NAND.")
+            log(t("[+] OpenWrt is installed on NAND."))
             return candidate
         last = (f"board={board.strip()!r} rootfs={rtype.strip()!r}; expected "
                 f"board={profile.openwrt_board!r}, rootfs='overlay', and the "
@@ -1091,12 +1158,19 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
     raise Abort(f"permanent OpenWrt was not verified on {where}: {last}")
 
 
+def rerun_command(*arguments):
+    """This script's command line, as the operator's own shell would need it."""
+    if hostnet.is_windows():
+        return subprocess.list2cmdline(
+            ["py", "-3", os.path.realpath(__file__), *arguments])
+    return shlex.join(["python3", os.path.realpath(__file__), *arguments])
+
+
 def verification_command(manifest_path, interface=None):
-    command = ["python3", os.path.realpath(__file__), "--verify-only",
-               os.path.abspath(manifest_path)]
+    command = ["--verify-only", os.path.abspath(manifest_path)]
     if interface:
         command.extend(("--verify-interface", interface))
-    return shlex.join(command)
+    return rerun_command(*command)
 
 
 def build_sysupgrade_launcher(opts):
@@ -1118,7 +1192,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           verify_transport=None, router_iface=None):
     """router_iface: the router-facing interface on a wired install, where the
     RAM system's own DHCP makes it this host's gateway (gateway_conflict)."""
-    log("\n=== stage 3: flash (sysupgrade from the RAM system) ===")
+    log(t("\n=== stage 3: flash (sysupgrade from the RAM system) ==="))
 
     # Everything up to the sysupgrade launch talks to the RAM system, which is
     # offered only its own empty password -- see RAM_PASSWORDS.
@@ -1184,16 +1258,18 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     log(f"[3] permanent-image NAND gate: PASS -- {why}")
 
     if verify_transport == "wifi":
-        log(f"[3] after the RAM installer network disappears, join permanent "
-            f"SSID {permanent_wifi_ssid!r}; final verification will wait on "
-            f"{verify_interface} (the password is not printed)")
+        log(t("[3] after the RAM installer network disappears, join permanent "
+              "SSID {ssid!r}; final verification will wait on {iface} (the "
+              "password is not printed)",
+              ssid=permanent_wifi_ssid, iface=verify_interface))
     elif transport == "wifi":
-        log(f"[3] after the RAM installer network disappears, connect the "
-            f"router to {verify_interface}; final verification requires that "
-            "wired interface")
+        log(t("[3] after the RAM installer network disappears, connect the "
+              "router to {iface}; final verification requires that wired "
+              "interface", iface=verify_interface))
 
     img = images["sysupgrade"]
-    confirm(f"write {img['name']} to NAND? This is the point of no return.",
+    confirm(t("write {image} to NAND? This is the point of no return.",
+              image=img["name"]),
             assume_yes)
 
     ram_scp(host, img["path"], "/tmp/fw.bin")
@@ -1224,7 +1300,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     script_body = build_sysupgrade_launcher(opts)
     with tempfile.TemporaryDirectory() as tmp:
         launcher = os.path.join(tmp, "run-sysupgrade.sh")
-        with open(launcher, "w") as output:
+        with open(launcher, "w", encoding="utf-8", newline="\n") as output:
             output.write(script_body)
         ram_scp(host, launcher, "/tmp/run-sysupgrade.sh")
     rc, active_upgrade = ram_ssh(
@@ -1261,9 +1337,9 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
                     "uncertain; do not launch sysupgrade again. Use the "
                     "verification-only continuation after the router settles: "
                     f"{verification_command(manifest_path, verify_interface)}")
-    log("[3] do not touch the power")
-    log("[3] it reformats both UBIs, writes kernel+rootfs, sets the boot flags "
-        "and reboots")
+    log(t("[3] do not touch the power"))
+    log(t("[3] it reformats both UBIs, writes kernel+rootfs, sets the boot flags "
+          "and reboots"))
 
     time.sleep(60)
     try:
@@ -1272,8 +1348,8 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
             host=host if not verify_interface else None,
             router_mac=router_mac)
     except Abort as exc:
-        log("[!] sysupgrade was launched; do not run the flash stage again")
-        log("[!] verification-only continuation:")
+        log(t("[!] sysupgrade was launched; do not run the flash stage again"))
+        log(t("[!] verification-only continuation:"))
         log("    " + verification_command(manifest_path, verify_interface))
         raise
     update_resume_phase(manifest_path, "flash-complete")
@@ -1319,6 +1395,11 @@ def parse_args(argv=None):
                     help="download and verify the selected release; do not contact the router")
     ap.add_argument("--yes", action="store_true",
                     help="skip write and reboot confirmation prompts")
+    ap.add_argument("--list-interfaces", action="store_true",
+                    help="list Windows adapter names, indices and IPv4 addresses, "
+                         "then exit")
+    ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
+                    help="language for prompts and instructions (default: system)")
 
     # Recovery and development controls. They remain accepted for interrupted
     # runs, but the normal installation path does not need to expose them.
@@ -1380,9 +1461,14 @@ def parse_args(argv=None):
 
 
 def detect_transport(interface, sysfs_root="/sys/class/net"):
-    """Classify a Linux network interface without sending network traffic."""
+    """Classify a network interface without sending network traffic."""
     if not interface:
         raise Abort("cannot detect transport without a network interface")
+    if hostnet.is_windows():
+        try:
+            return "wifi" if hostnet.adapter(interface)["wireless"] else "wired"
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
     device = os.path.join(sysfs_root, interface)
     if not os.path.isdir(device):
         raise Abort(f"network interface {interface!r} does not exist")
@@ -1392,6 +1478,12 @@ def detect_transport(interface, sysfs_root="/sys/class/net"):
 
 def interface_ipv4_networks(interface):
     """Return IPv4 interface objects assigned to one operator-side link."""
+    if hostnet.is_windows():
+        try:
+            return [ipaddress.ip_interface(address)
+                    for address in hostnet.adapter(interface)["ipv4"]]
+        except (hostnet.NetworkError, ValueError) as exc:
+            raise Abort(str(exc)) from exc
     try:
         result = subprocess.run(
             ["ip", "-o", "-4", "addr", "show", "dev", interface],
@@ -1412,6 +1504,29 @@ def interface_ipv4_networks(interface):
     return networks
 
 
+def canonical_interface(interface):
+    """The name routes and neighbours report for an operator-chosen interface.
+
+    Windows accepts an alias or a numeric index, but every later comparison
+    (route, gateway, callback) is against the alias.
+    """
+    if not (interface and hostnet.is_windows()):
+        return interface
+    try:
+        return hostnet.adapter(interface)["name"]
+    except hostnet.NetworkError as exc:
+        raise Abort(str(exc)) from exc
+
+
+def require_host_tools():
+    """Fail before touching the router if this host cannot talk to it."""
+    if hostnet.is_windows():
+        try:
+            winssh.dependencies()
+        except winssh.SSHError as exc:
+            raise Abort(str(exc)) from exc
+
+
 def callback_address(host, interface, override=None):
     """Choose a callback only when the selected link owns the stock route.
 
@@ -1424,10 +1539,11 @@ def callback_address(host, interface, override=None):
         raise Abort(f"cannot determine the route to {host}; configure the "
                     "router-facing link before running the exploit")
     if interface and routed_interface != interface:
-        raise Abort(
-            f"--interface {interface} does not match the kernel route to "
-            f"{host} via {routed_interface}. Disconnect the competing link or "
-            "correct the route before consuming the one-shot trigger.")
+        raise Abort(t(
+            "--interface {interface} does not match the kernel route to {host} "
+            "via {routed}. Disconnect the competing link or correct the route "
+            "before consuming the one-shot trigger.",
+            interface=interface, host=host, routed=routed_interface))
     selected_interface = interface or routed_interface
     raw_address = override or chain.local_ip(host)
     if not raw_address:
@@ -1460,18 +1576,18 @@ def prompt_firstboot(args):
     """Collect optional installed-system settings without a long command line."""
     if not sys.stdin.isatty():
         raise Abort("--configure needs an interactive terminal")
-    print("\nInstalled-system configuration (root password and SSID may be blank)")
+    print(t("\nInstalled-system configuration (root password and SSID may be blank)"))
     if args.root_password is None:
-        args.root_password = getpass.getpass("OpenWrt root password: ") or None
+        args.root_password = getpass.getpass(t("OpenWrt root password: ")) or None
     if args.wifi_ssid is None:
-        args.wifi_ssid = input("OpenWrt Wi-Fi SSID: ").strip() or None
+        args.wifi_ssid = input(t("OpenWrt Wi-Fi SSID: ")).strip() or None
     if args.wifi_ssid:
         if args.wifi_key is None:
-            args.wifi_key = getpass.getpass("OpenWrt Wi-Fi password: ")
+            args.wifi_key = getpass.getpass(t("OpenWrt Wi-Fi password: "))
         if args.wifi_country is None:
-            args.wifi_country = input(
+            args.wifi_country = input(t(
                 "Wi-Fi country code (required when SSID is set, for example BR): "
-            ).strip().upper()
+            )).strip().upper()
     return args
 
 
@@ -1513,9 +1629,9 @@ def require_wifi_firstboot(args, profile, cfg_tar=None):
                 raise Abort(
                     "Wi-Fi installation needs the permanent SSID for reconnect "
                     "and verification; pass --wifi-ssid with --config-tar")
-            args.wifi_ssid = input(
+            args.wifi_ssid = input(t(
                 "Permanent OpenWrt SSID contained in the config archive: "
-            ).strip() or None
+            )).strip() or None
         if not args.wifi_ssid:
             raise Abort("a permanent OpenWrt SSID is required for Wi-Fi installation")
         validate_wifi_ssid(args.wifi_ssid)
@@ -1529,13 +1645,13 @@ def require_wifi_firstboot(args, profile, cfg_tar=None):
             "the exploit runs; use --configure, or pass --wifi-ssid, --wifi-key "
             "and --wifi-country")
     if not args.wifi_ssid:
-        print("\nWi-Fi installation requires permanent OpenWrt Wi-Fi for final verification.")
-        args.wifi_ssid = input("OpenWrt Wi-Fi SSID: ").strip() or None
+        print(t("\nWi-Fi installation requires permanent OpenWrt Wi-Fi for final verification."))
+        args.wifi_ssid = input(t("OpenWrt Wi-Fi SSID: ")).strip() or None
     if args.wifi_ssid and args.wifi_key is None:
-        args.wifi_key = getpass.getpass("OpenWrt Wi-Fi password: ")
+        args.wifi_key = getpass.getpass(t("OpenWrt Wi-Fi password: "))
     if args.wifi_ssid and not args.wifi_country:
-        args.wifi_country = input(
-            "Wi-Fi country code (for example BR): ").strip().upper()
+        args.wifi_country = input(t(
+            "Wi-Fi country code (for example BR): ")).strip().upper()
     validate_firstboot_config(args.wifi_ssid, args.wifi_key, args.wifi_country)
 
 
@@ -1543,7 +1659,7 @@ def validate_wifi_ssid(ssid):
     if any(ord(ch) < 32 or ord(ch) == 127 for ch in ssid):
         raise Abort("Wi-Fi SSID must not contain control characters")
     if not 1 <= len(ssid.encode("utf-8")) <= 32:
-        raise Abort("Wi-Fi SSID must be 1-32 UTF-8 bytes")
+        raise Abort(t("Wi-Fi SSID must be 1-32 UTF-8 bytes"))
 
 
 def validate_firstboot_config(ssid, key, country):
@@ -1556,11 +1672,11 @@ def validate_firstboot_config(ssid, key, country):
     try:
         key_bytes = (key or "").encode("ascii")
     except UnicodeEncodeError:
-        raise Abort("WPA2 passphrase must contain printable ASCII characters")
+        raise Abort(t("WPA2 passphrase must contain printable ASCII characters"))
     if not 8 <= len(key_bytes) <= 63 or any(b < 32 or b > 126 for b in key_bytes):
-        raise Abort("WPA2 passphrase must be 8-63 printable ASCII characters")
+        raise Abort(t("WPA2 passphrase must be 8-63 printable ASCII characters"))
     if not country or not re.fullmatch(r"[A-Z]{2}", country):
-        raise Abort("Wi-Fi country must be a two-letter uppercase code")
+        raise Abort(t("Wi-Fi country must be a two-letter uppercase code"))
 
 
 def load_resume_manifest(path):
@@ -1606,12 +1722,17 @@ def _write_resume_data(path, data):
     tmp = path + ".tmp"
     descriptor = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(descriptor, "w") as output:
-        os.fchmod(output.fileno(), 0o600)
+        if not hostnet.is_windows():
+            os.fchmod(output.fileno(), 0o600)
         json.dump(data, output, indent=2, sort_keys=True)
         output.write("\n")
         output.flush()
         os.fsync(output.fileno())
     os.replace(tmp, path)
+    # Windows has neither fchmod nor directory descriptors: the file is flushed
+    # above and replaced atomically, and folder privacy comes from NTFS ACLs.
+    if hostnet.is_windows():
+        return
     directory = os.path.dirname(os.path.abspath(path))
     directory_fd = os.open(directory, os.O_RDONLY)
     try:
@@ -1657,6 +1778,20 @@ def verify_resume_selection(resume, args, profile, rel, images):
 def main(argv=None):
     os.umask(0o077)
     args = parse_args(argv)
+    i18n.set_language(args.lang)
+    i18n.tolerate_console_encoding()
+    if args.list_interfaces:
+        if not hostnet.is_windows():
+            raise Abort("--list-interfaces is for Windows; "
+                        "use `ip -br addr` on Linux")
+        try:
+            for adapter in hostnet.adapters():
+                log(f"{adapter['index']:>4}  {adapter['name']}  "
+                    f"{'wifi' if adapter['wireless'] else 'wired'}  "
+                    f"{', '.join(adapter['ipv4']) or 'no IPv4'}")
+        except hostnet.NetworkError as exc:
+            raise Abort(str(exc)) from exc
+        return 0
     requested_attacker = args.attacker
     # Captured before the profile default fills it in, so flash_stage_host can
     # tell an address the operator typed from the fallback.
@@ -1697,8 +1832,14 @@ def main(argv=None):
         or f"install-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "a" if resume else "w"))
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "a" if resume else "w",
+                            encoding="utf-8"))
     log(f"[*] output -> {outdir}/")
+
+    args.discover = canonical_interface(args.discover)
+    args.verify_interface = canonical_interface(args.verify_interface)
+    if not args.dry_run:
+        require_host_tools()
 
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
         args.discover = chain.local_interface(args.host)
@@ -1714,8 +1855,8 @@ def main(argv=None):
             raise Abort("cannot determine the router-facing interface; pass "
                         "--interface IFACE or --transport wired|wifi")
     if args.stage == "all" and not args.dry_run and not args.discover:
-        raise Abort("cannot determine the router-facing interface; pass "
-                    "--interface IFACE")
+        raise Abort(t("cannot determine the router-facing interface; pass "
+                      "--interface IFACE"))
     args.verify_interface = args.verify_interface or args.discover
     via = f" via {args.discover}" if args.discover else ""
     log(f"[*] transport: {args.transport}{via}")
@@ -1726,8 +1867,8 @@ def main(argv=None):
         if not sys.stdin.isatty():
             raise Abort("post-install verification needs the configured root "
                         "password; rerun in a terminal")
-        args.root_password = getpass.getpass(
-            "OpenWrt root password used by the original run: ")
+        args.root_password = getpass.getpass(t(
+            "OpenWrt root password used by the original run: "))
     if args.root_password:
         SSH_PASSWORDS.append(args.root_password)
 
@@ -1744,9 +1885,9 @@ def main(argv=None):
         verify_transport = (detect_transport(args.verify_interface)
                             if args.verify_interface else None)
         if verify_transport == "wifi" and args.wifi_ssid:
-            log(f"[*] join permanent SSID {args.wifi_ssid!r} on "
-                f"{args.verify_interface}; verification will wait without "
-                "printing its password")
+            log(t("[*] join permanent SSID {ssid!r} on {iface}; verification "
+                  "will wait without printing its password",
+                  ssid=args.wifi_ssid, iface=args.verify_interface))
         if phase == "pivot-complete":
             log("[!] this older/incomplete manifest does not prove sysupgrade "
                 "was launched; verification-only will inspect the router and "
@@ -1761,10 +1902,11 @@ def main(argv=None):
         return 0
 
     if resume and resume.get("phase") == "flash-started":
-        raise Abort(
+        raise Abort(t(
             "sysupgrade was already launched; do not run the flash stage again. "
-            "Use the read-only continuation: "
-            f"{verification_command(args.resume_manifest, args.verify_interface)}")
+            "Use the read-only continuation: {command}",
+            command=verification_command(args.resume_manifest,
+                                         args.verify_interface)))
     if resume and resume.get("phase") == "flash-complete":
         raise Abort(
             "this install is already recorded as complete. To verify it again, "
@@ -1866,18 +2008,18 @@ def main(argv=None):
     if args.dry_run:
         blob, want_md5 = expected_volume(
             images["initramfs_ubi"]["path"], images["initramfs_itb"]["path"])
-        log("[+] selected release downloaded and verified")
+        log(t("[+] selected release downloaded and verified"))
         for kind in kinds:
             log(f"    {kind}: {images[kind]['name']}")
         log(f"    initramfs kernel volume: {len(blob)} B, md5 {want_md5}")
-        log("[dry-run] router was not contacted")
+        log(t("[dry-run] router was not contacted"))
         return 0
 
     if args.stage == "all" and wifi:
-        log("[*] after the RAM pivot, a Wi-Fi-only laptop must join "
-            f"{profile.installer_wifi_ssid} (key: {profile.installer_wifi_key}); "
-            "this process waits "
-            "for the router on the selected interface")
+        log(t("[*] after the RAM pivot, a Wi-Fi-only laptop must join {ssid} "
+              "(key: {key}); this process waits for the router on the selected "
+              "interface",
+              ssid=profile.installer_wifi_ssid, key=profile.installer_wifi_key))
 
     if args.stage == "flash":
         args.openwrt_host = flash_stage_host(args, profile,
@@ -1929,7 +2071,13 @@ def main(argv=None):
         http.callback.wait(timeout=45)
 
     if not ch.wait(timeout=300):
-        raise Abort("no root shell; the AP may not have come back")
+        raise Abort(t(
+            "no root shell; the AP may not have come back. If it did, Windows "
+            "Firewall may be blocking the router's connection back to this "
+            "computer: allow python.exe inbound on TCP 8000, 4444 and 4445 from "
+            "the router, or see the Windows section of the README."
+        ) if hostnet.is_windows() else t(
+            "no root shell; the AP may not have come back"))
     rc, out = ch.run("id", quiet=True)
     if "uid=0" not in out:
         raise Abort(f"channel is not root: {out!r}")
@@ -1945,11 +2093,9 @@ def main(argv=None):
     resume = update_resume_phase(manifest_path, "preflight-complete")
 
     if args.stage == "preflight":
-        log("\n[+] pre-flight passed. Nothing was written.")
-        command = ["python3", os.path.realpath(__file__), args.image,
-                   "--stage", "pivot",
-                   "--skip-exploit", "--resume-manifest", manifest_path]
-        log("    " + shlex.join(command))
+        log(t("\n[+] pre-flight passed. Nothing was written."))
+        log("    " + rerun_command(args.image, "--stage", "pivot", "--skip-exploit",
+                                   "--resume-manifest", manifest_path))
         return 0
 
     expected_files = {
@@ -1981,11 +2127,9 @@ def main(argv=None):
               router_iface=(args.discover if args.transport == "wired"
                             else None))
     else:
-        log("\n[+] pivot done. When the RAM system is reachable, run:")
-        command = ["python3", os.path.realpath(__file__), args.image,
-                   "--stage", "flash",
-                   "--resume-manifest", manifest_path]
-        log("    " + shlex.join(command))
+        log(t("\n[+] pivot done. When the RAM system is reachable, run:"))
+        log("    " + rerun_command(args.image, "--stage", "flash",
+                                   "--resume-manifest", manifest_path))
     return 0
 
 
