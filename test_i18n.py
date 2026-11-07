@@ -8,7 +8,7 @@ from unittest import mock
 import i18n
 
 # Files whose t("...") calls the catalogue serves.
-SOURCES = ("install.py", "revert.py")
+SOURCES = ("install.py", "revert.py", "updater.py")
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -22,9 +22,13 @@ def templates_in_source():
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "t"):
                 first = node.args[0]
-                if not (isinstance(first, ast.Constant) and isinstance(first.value, str)):
-                    raise AssertionError(f"{name}:{node.lineno}: t() needs a literal")
-                found[first.value] = {kw.arg for kw in node.keywords}
+                # A conditional picks between two literal messages.
+                choices = ([first.body, first.orelse] if isinstance(first, ast.IfExp)
+                           else [first])
+                for choice in choices:
+                    if not (isinstance(choice, ast.Constant) and isinstance(choice.value, str)):
+                        raise AssertionError(f"{name}:{node.lineno}: t() needs a literal")
+                    found[choice.value] = {kw.arg for kw in node.keywords}
     return found
 
 

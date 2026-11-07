@@ -129,6 +129,55 @@ def _ack(channel):
                    (message.decode("utf-8", "replace") or "connection closed"))
 
 
+def download(host, remote, local, passwords, timeout=300):
+    """Fetch a file with legacy SCP, the counterpart of upload."""
+    if not remote.startswith("/") or any(c in remote for c in "\r\n\x00"):
+        raise SSHError("SCP source must be an absolute remote path")
+    transport = _authenticated(host, passwords, timeout)
+    channel = None
+    partial = local + ".part"
+    try:
+        channel = transport.open_session(timeout=min(15, timeout))
+        channel.settimeout(min(30, timeout))
+        channel.exec_command("scp -f " + shlex.quote(remote))
+        channel.sendall(b"\x00")
+        header = bytearray()
+        while not header.endswith(b"\n"):
+            byte = channel.recv(1)
+            if not byte or len(header) >= 4096:
+                raise SSHError("SCP sender closed before naming the file")
+            header.extend(byte)
+        if header[:1] in (b"\x01", b"\x02"):
+            raise SSHError("SCP sender refused: " +
+                           header[1:].decode("utf-8", "replace").strip())
+        fields = header.decode("utf-8", "replace").split(" ", 2)
+        if len(fields) != 3 or not fields[0].startswith("C") or not fields[1].isdigit():
+            raise SSHError(f"unexpected SCP header: {header[:80]!r}")
+        remaining = int(fields[1])
+        channel.sendall(b"\x00")
+        end = time.monotonic() + timeout
+        with open(partial, "wb") as output:
+            while remaining:
+                if time.monotonic() >= end:
+                    raise SSHError(f"SCP transfer timed out after {timeout}s")
+                chunk = channel.recv(min(65536, remaining))
+                if not chunk:
+                    raise SSHError("SCP sender closed mid-file")
+                output.write(chunk)
+                remaining -= len(chunk)
+        _ack(channel)
+        channel.sendall(b"\x00")
+        os.replace(partial, local)
+    except SSHError:
+        raise
+    except Exception as exc:
+        raise SSHError(f"SCP transfer failed: {exc}") from exc
+    finally:
+        if os.path.exists(partial):
+            os.remove(partial)
+        _close_session(transport, channel)
+
+
 def upload(host, local, remote, passwords, timeout=900):
     """Send legacy SCP; OpenWrt initramfs need not ship an SFTP subsystem."""
     if not remote.startswith("/") or any(c in remote for c in "\r\n\x00"):

@@ -113,7 +113,7 @@ function renderCheck() {
   if (!r) return;
   const note = $("#platform-note");
   note.textContent = t(`prereq.platform.${r.platform}`);
-  note.className = "note " + (r.platform === "linux" ? "ok" : "bad");
+  note.className = "note " + (r.platform_ok && r.platform !== "wsl" ? "ok" : "bad");
   const list = $("#checklist");
   list.replaceChildren(...r.checks.map((c) => {
     const li = el("li", c.ok ? "ok" : "bad");

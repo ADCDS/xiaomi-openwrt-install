@@ -37,11 +37,15 @@ import time
 
 import chain
 import devices
+import hostnet
+import i18n
 import install
 import release
 import restore
 import revert
+import winssh
 from chain import ChainError, log
+from i18n import t
 from install import Abort
 
 REMOTE_BACKUP = "/tmp/config-backup.tar.gz"
@@ -58,6 +62,11 @@ ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
 def scp_from(host, remote, local):
     """Copy remote:path off the box. install.py only ever sends."""
+    if hostnet.is_windows():
+        try:
+            return winssh.download(host, remote, local, install.SSH_PASSWORDS)
+        except winssh.SSHError as exc:
+            raise Abort(str(exc)) from exc
     src = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for password in install.SSH_PASSWORDS:
@@ -127,16 +136,17 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     Returns the rootfs type: 'overlay' for the installed system, or 'tmpfs' when
     an earlier run already reached the RAM installer.
     """
-    log("\n=== stage 1: pre-flight (nothing is written) ===")
+    log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
     # Refuses this host's own gateway; see install.gateway_conflict.
     install.check_is_openwrt_ram(host, router_iface=router_iface)
     rc, out = install.ssh(host, "echo up", timeout=30, check=False)
     if rc != 0:
         if "Permission denied" in out:
-            raise Abort(
-                f"{host} refused the root password offered. Pass the current one "
+            raise Abort(t(
+                "{host} refused the root password offered. Pass the current one "
                 "with --root-password. A router set to SSH keys only "
-                "(PasswordAuth off) is not supported: nothing was written.")
+                "(PasswordAuth off) is not supported: nothing was written.",
+                host=host))
         raise Abort(f"cannot log in to {host}: {out}")
 
     board, rootfs = revert.state_of(host, profile)   # refuses any other board
@@ -165,9 +175,10 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     needed = size // 1024 + MEMORY_MARGIN_KB
     log(f"[1] {available} KiB available, the upload needs {needed} KiB")
     if available < needed:
-        raise Abort(f"only {available} KiB of memory is available and the RAM "
-                    f"image needs {needed} KiB. Free some first, for example by "
-                    "stopping services you can spare, then run this again.")
+        raise Abort(t("only {available} KiB of memory is available and the RAM "
+                      "image needs {needed} KiB. Free some first, for example by "
+                      "stopping services you can spare, then run this again.",
+                      available=available, needed=needed))
     return rootfs
 
 
@@ -180,23 +191,23 @@ def permanent_ssid(host, args, verify_transport):
     if verify_transport != "wifi":
         return args.wifi_ssid
     if not args.keep_settings:
-        raise Abort("a clean install leaves Wi-Fi disabled, so it cannot be "
-                    "verified over Wi-Fi. Connect a cable and pass "
-                    "--verify-interface, or keep the settings.")
+        raise Abort(t("a clean install leaves Wi-Fi disabled, so it cannot be "
+                      "verified over Wi-Fi. Connect a cable and pass "
+                      "--verify-interface, or keep the settings."))
     if args.wifi_ssid:
         return args.wifi_ssid
     rc, out = install.ssh(host, "uci -q get wireless.@wifi-iface[0].ssid",
                           check=False)
     ssid = out.strip()
     if rc != 0 or not ssid:
-        raise Abort("cannot tell which SSID to rejoin after the update; pass it "
-                    "with --wifi-ssid, or verify over a cable with "
-                    "--verify-interface.")
+        raise Abort(t("cannot tell which SSID to rejoin after the update; pass it "
+                      "with --wifi-ssid, or verify over a cable with "
+                      "--verify-interface."))
     return ssid
 
 
 def backup_config(host, outdir):
-    log("\n=== backup ===")
+    log(t("\n=== backup ==="))
     install.ssh(host, f"sysupgrade -b {REMOTE_BACKUP}", timeout=120)
     local = os.path.join(outdir, "config-backup.tar.gz")
     scp_from(host, REMOTE_BACKUP, local)
@@ -249,13 +260,15 @@ def wait_for_ram_system(host, interface, fallback, deadline_s=None):
 def resume_hint(config_tar):
     keep = (f"--config-backup {config_tar}" if config_tar
             else "--no-keep-settings")
-    return ("The installed kernel has been replaced by the RAM installer, so the "
-            "router boots into that now. Reach it, then run this again with "
-            f"{keep} to continue; do not skip this step.")
+    return t("The installed kernel has been replaced by the RAM installer, so the "
+             "router boots into that now. Reach it, then run this again with "
+             "{keep} to continue; do not skip this step.", keep=keep)
 
 
 def run(args):
     os.umask(0o077)
+    i18n.set_language(args.lang)
+    i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.image = {"default": "standard", "nss": "nss"}[args.flavour]
 
@@ -267,8 +280,9 @@ def run(args):
 
     # Which RAM installer to write depends on the link: the wired one has no
     # radios and would strand a Wi-Fi laptop. So neither may be guessed.
-    args.discover = (args.discover
+    args.discover = (install.canonical_interface(args.discover)
                      or chain.local_interface(args.host or profile.openwrt_host))
+    args.verify_interface = install.canonical_interface(args.verify_interface)
     if args.transport == "auto":
         if args.discover:
             args.transport = install.detect_transport(args.discover)
@@ -276,8 +290,8 @@ def run(args):
             args.transport = "wired"
             log("[*] no route to the router during dry-run; verifying wired images")
     if not args.dry_run and not (args.discover and args.transport != "auto"):
-        raise Abort("cannot determine the router-facing interface; pass "
-                    "--interface IFACE")
+        raise Abort(t("cannot determine the router-facing interface; pass "
+                      "--interface IFACE"))
     args.verify_interface = args.verify_interface or args.discover
     wifi = args.transport == "wifi"
     log(f"[*] transport: {args.transport}"
@@ -287,7 +301,7 @@ def run(args):
         args.outdir or f"update-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
     log(f"[*] output -> {outdir}/")
 
     rel = release.resolve(args.tag, profile, args.images, offline=args.offline,
@@ -307,9 +321,10 @@ def run(args):
         f"({'with' if wifi else 'without'} radios)")
 
     if args.dry_run:
-        log("[dry-run] router was not contacted")
+        log(t("[dry-run] router was not contacted"))
         return 0
 
+    install.require_host_tools()
     if args.root_password:
         install.SSH_PASSWORDS.append(args.root_password)
         restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
@@ -333,10 +348,10 @@ def run(args):
         # and restoring it would silently wipe the owner's settings.
         log("[*] already in the RAM installer -- continuing an interrupted update")
         if args.keep_settings and not args.config_backup:
-            raise Abort(
+            raise Abort(t(
                 "this is the RAM installer, so its config is not yours. Pass "
                 "--config-backup with the config-backup.tar.gz the earlier run "
-                "saved, or --no-keep-settings to install clean.")
+                "saved, or --no-keep-settings to install clean."))
         config_tar = args.config_backup if args.keep_settings else None
     else:
         if args.config_backup:
@@ -351,27 +366,28 @@ def run(args):
                 f"of the current ones is in {outdir}")
 
     if config_tar and turns_off_password_login(config_tar):
-        log("[!] this config turns off password login, and the final check logs in "
-            "by password. It will report that it could not verify the router even "
-            "when the update worked: when it starts waiting, check with your SSH "
-            "key instead.")
+        log(t("[!] this config turns off password login, and the final check logs "
+              "in by password. It will report that it could not verify the router "
+              "even when the update worked: when it starts waiting, check with your "
+              "SSH key instead."))
 
     manifest = os.path.join(outdir, "resume.json")
     install.write_resume_manifest(manifest, args, profile, rel, images,
                                   secrets.token_hex(16), config_tar)
 
     if rootfs != "tmpfs":
-        log("\n=== stage 2: pivot into the RAM installer ===")
-        log("[2] there is no A/B fallback on an installed system: this overwrites "
-            "the installed kernel. Leave the power alone from here.")
+        log(t("\n=== stage 2: pivot into the RAM installer ==="))
+        log(t("[2] there is no A/B fallback on an installed system: this overwrites "
+              "the installed kernel. Leave the power alone from here."))
         if wifi:
-            log(f"[2] when this network disappears, join "
-                f"{profile.installer_wifi_ssid!r} with key "
-                f"{profile.installer_wifi_key!r}; the RAM system has a passwordless "
-                "root account, so keep the link isolated")
-        install.confirm(
-            f"overwrite ubi_kernel with {os.path.basename(ubi)} and reboot? From "
-            "here the only way out is finishing the update, or UART.", args.yes)
+            log(t("[2] when this network disappears, join {ssid!r} with key {key!r}; "
+                  "the RAM system has a passwordless root account, so keep the link "
+                  "isolated",
+                  ssid=profile.installer_wifi_ssid, key=profile.installer_wifi_key))
+        install.confirm(t(
+            "overwrite ubi_kernel with {image} and reboot? From here the only way "
+            "out is finishing the update, or UART.",
+            image=os.path.basename(ubi)), args.yes)
         try:
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
@@ -387,9 +403,8 @@ def run(args):
         profile.openwrt_host if verify_transport == "wired" else None,
         verify_transport,
         router_iface=args.discover if args.transport == "wired" else None)
-    log("[+] update complete: "
-        + ("your settings were restored."
-           if config_tar else "the new release is running with default settings."))
+    log(t("[+] update complete: your settings were restored." if config_tar
+          else "[+] update complete: the new release is running with default settings."))
     return 0
 
 
@@ -435,6 +450,8 @@ def parse_args(argv=None):
                     help="device profile")
     ap.add_argument("--images", default="images", help="image cache directory")
     ap.add_argument("--outdir", default=None, help="run output directory")
+    ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
+                    help="language for prompts and instructions (default: system)")
     args = ap.parse_args(argv)
     args.tag = args.tag or devices.get_profile(args.device).default_release
     return args

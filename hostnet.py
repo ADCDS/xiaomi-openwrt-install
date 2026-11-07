@@ -58,6 +58,8 @@ $records = @(Get-NetAdapter -IncludeHidden | ForEach-Object {
         name = [string]$a.Name
         mac = [string]$a.MacAddress
         wireless = [bool]$wireless
+        hidden = [bool]$a.Hidden
+        status = [string]$a.Status
         ipv4 = @($own | Where-Object { [int]$_.AddressFamily -eq 2 } |
             ForEach-Object { '{0}/{1}' -f $_.IPAddress, $_.PrefixLength })
         ipv6 = @($own | Where-Object { [int]$_.AddressFamily -eq 23 } |

@@ -2,12 +2,13 @@
 """Environment checks for the GUI's first screen.
 
 The wizard refuses to drive a flash until the host can actually run the
-installer. The engine drives `ip`, /sys/class/net, sshpass and ARP/neighbour
-tables, so it needs Linux. The browser turns the ids here into text in the
-operator's language (`prereq.<id>` and `prereq.platform.<platform>` in
-static/strings.json).
+installer. On Linux the engine drives `ip`, sshpass and OpenSSH; on Windows,
+PowerShell and the Python packages in requirements-windows.txt. The browser turns
+the ids here into text in the operator's language (`prereq.<id>` and
+`prereq.platform.<platform>` in static/strings.json).
 """
 
+import importlib.util
 import os
 import platform
 import shutil
@@ -16,6 +17,10 @@ import sys
 
 def _which(name):
     return shutil.which(name) is not None
+
+
+def _importable(name):
+    return importlib.util.find_spec(name) is not None
 
 
 def _is_wsl():
@@ -33,10 +38,11 @@ def collect():
     system = platform.system()          # Linux / Windows / Darwin
     wsl = _is_wsl()
 
+    python = {"id": "python", "label": "Python 3.9+",
+              "ok": sys.version_info >= (3, 9),
+              "version": platform.python_version(), "required": True}
     checks = [
-        {"id": "python", "label": "Python 3.9+",
-         "ok": sys.version_info >= (3, 9),
-         "version": platform.python_version(), "required": True},
+        python,
         {"id": "sshpass", "label": "sshpass",
          "ok": _which("sshpass"), "required": True},
         {"id": "openssl", "label": "openssl",
@@ -48,10 +54,20 @@ def collect():
         {"id": "nmcli", "label": "nmcli (NetworkManager)",
          "ok": _which("nmcli"), "required": False},
     ]
+    if system == "Windows":
+        checks = [
+            python,
+            {"id": "paramiko", "label": "paramiko",
+             "ok": _importable("paramiko"), "required": True},
+            {"id": "passlib", "label": "passlib",
+             "ok": _importable("passlib"), "required": True},
+            {"id": "powershell", "label": "PowerShell",
+             "ok": _which("powershell"), "required": True},
+        ]
 
     host = {"Linux": "wsl" if wsl else "linux", "Windows": "windows",
             "Darwin": "macos"}.get(system, "other")
-    platform_ok = system == "Linux"
+    platform_ok = system in ("Linux", "Windows")
 
     return {
         "system": system,
@@ -60,8 +76,10 @@ def collect():
         "platform_ok": platform_ok,
         "checks": checks,
         "ready": platform_ok and all(c["ok"] for c in checks if c["required"]),
-        "hint_install": ("sudo apt install sshpass openssl"
-                         if system == "Linux" else ""),
+        "hint_install": {
+            "Linux": "sudo apt install sshpass openssl",
+            "Windows": "py -3 -m pip install -r requirements-windows.txt",
+        }.get(system, ""),
     }
 
 

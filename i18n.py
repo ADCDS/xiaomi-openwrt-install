@@ -119,6 +119,34 @@ RU = {
     "sysupgrade was already launched; do not run the flash stage again. Use the read-only continuation: {command}":
         "sysupgrade уже был запущен; не запускайте этап прошивки повторно. Продолжите только проверкой: {command}",
 
+    # ---- updater.py ---------------------------------------------------------
+    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
+        "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Роутеры с входом только по ключам (PasswordAuth off) не поддерживаются: ничего не записано.",
+    "only {available} KiB of memory is available and the RAM image needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
+        "доступно только {available} КиБ памяти, а образу RAM нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
+    "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
+        "после чистой установки Wi-Fi выключен, поэтому проверить её по Wi-Fi нельзя. Подключите кабель и укажите --verify-interface либо сохраните настройки.",
+    "cannot tell which SSID to rejoin after the update; pass it with --wifi-ssid, or verify over a cable with --verify-interface.":
+        "неизвестно, к какой сети подключаться после обновления; укажите её через --wifi-ssid или проверяйте по кабелю с --verify-interface.",
+    "The installed kernel has been replaced by the RAM installer, so the router boots into that now. Reach it, then run this again with {keep} to continue; do not skip this step.":
+        "Ядро установленной системы заменено RAM-установщиком, и теперь роутер загружается в него. Подключитесь к нему и запустите снова с {keep}, чтобы продолжить; не пропускайте этот шаг.",
+    "this is the RAM installer, so its config is not yours. Pass --config-backup with the config-backup.tar.gz the earlier run saved, or --no-keep-settings to install clean.":
+        "это RAM-установщик, и его настройки не ваши. Укажите --config-backup с файлом config-backup.tar.gz из предыдущего запуска или --no-keep-settings для чистой установки.",
+    "[!] this config turns off password login, and the final check logs in by password. It will report that it could not verify the router even when the update worked: when it starts waiting, check with your SSH key instead.":
+        "[!] в этих настройках вход по паролю отключён, а финальная проверка входит по паролю. Она сообщит, что не смогла проверить роутер, даже если обновление прошло успешно: когда она начнёт ждать, проверьте роутер своим SSH-ключом.",
+    "\n=== stage 2: pivot into the RAM installer ===":
+        "\n=== этап 2: переход в RAM-установщик ===",
+    "[2] there is no A/B fallback on an installed system: this overwrites the installed kernel. Leave the power alone from here.":
+        "[2] на установленной системе нет A/B-резерва: ядро установленной системы будет перезаписано. С этого момента не отключайте питание.",
+    "[2] when this network disappears, join {ssid!r} with key {key!r}; the RAM system has a passwordless root account, so keep the link isolated":
+        "[2] когда эта сеть пропадёт, подключитесь к {ssid!r}, пароль {key!r}; у RAM-системы root без пароля, поэтому не допускайте к сети посторонних",
+    "overwrite ubi_kernel with {image} and reboot? From here the only way out is finishing the update, or UART.":
+        "Перезаписать ubi_kernel образом {image} и перезагрузить? После этого останется только завершить обновление либо UART.",
+    "[+] update complete: your settings were restored.":
+        "[+] обновление завершено: настройки восстановлены.",
+    "[+] update complete: the new release is running with default settings.":
+        "[+] обновление завершено: новый релиз работает с настройками по умолчанию.",
+
     # ---- revert.py ----------------------------------------------------------
     "\n=== step 1: pivot into the RAM initramfs ===":
         "\n=== шаг 1: переход во временную RAM-систему ===",

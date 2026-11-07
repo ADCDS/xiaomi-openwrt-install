@@ -31,6 +31,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import devices          # noqa: E402
+import hostnet          # noqa: E402
 import install          # noqa: E402
 import runner           # noqa: E402
 import prereqs          # noqa: E402
@@ -60,6 +61,16 @@ _SECURITY_HEADERS = {
 # ---- data endpoints ---------------------------------------------------------
 
 def list_interfaces():
+    if hostnet.is_windows():
+        try:
+            records = hostnet.adapters()
+        except hostnet.NetworkError:
+            return []
+        return [{"name": row["name"],
+                 "transport": "wifi" if row["wireless"] else "wired",
+                 "ipv4": row["ipv4"],
+                 "state": str(row.get("status") or "?").lower()}
+                for row in records if not row.get("hidden")]
     out = []
     base = "/sys/class/net"
     try:

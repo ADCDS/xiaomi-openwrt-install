@@ -22,6 +22,9 @@ import time
 import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+
+import hostnet          # noqa: E402
 
 # Banner keyword -> canonical stage id for the tracker. Every tool prints
 # `=== ... ===` banners; match on words, because their numbering differs.
@@ -74,7 +77,12 @@ def build_argv(mode, opts):
 
     def iface(key="interface"):
         v = (opts.get(key) or "").strip()
-        if v and not re.fullmatch(r"[A-Za-z0-9_.@:-]+", v):
+        # Windows names adapters in the system's language, with spaces. It is one
+        # argv item either way; what must not happen is it reading as a flag.
+        bad = (v.startswith("-") or any(ord(c) < 32 for c in v)
+               if hostnet.is_windows()
+               else not re.fullmatch(r"[A-Za-z0-9_.@:-]+", v))
+        if v and bad:
             raise ValueError(f"bad interface name: {v!r}")
         return v
 

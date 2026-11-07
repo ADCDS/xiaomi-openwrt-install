@@ -2416,6 +2416,7 @@ def test_gui_strings():
     used |= set(re.findall(r'"([a-z_0-9]+(?:\.[a-z_0-9]+)+)"', script)) - {"strings.json"}
     used |= {f"stage.{s}" for s in runner.STAGES}
     used |= {f"prereq.{c['id']}" for c in prereqs.collect()["checks"]}
+    used |= {"prereq.paramiko", "prereq.passlib", "prereq.powershell"}
     used |= {f"prereq.platform.{p}" for p in ("linux", "wsl", "windows", "macos", "other")}
     for mode in ("install", "update", "revert"):
         used |= {f"config.lede.{mode}", f"review.action.{mode}", f"mode.{mode}.h"}

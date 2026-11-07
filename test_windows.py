@@ -4,6 +4,7 @@ import ipaddress
 import json
 import os
 import socket
+import sys
 import tempfile
 import threading
 import unittest
@@ -168,6 +169,61 @@ class InstallerWindowsTests(unittest.TestCase):
         with mock.patch.object(hostnet, "adapter", side_effect=hostnet.NetworkError("not found")):
             with self.assertRaisesRegex(install.Abort, "not found"):
                 install.canonical_interface("99")
+
+    def test_updater_copies_files_through_winssh(self):
+        import updater
+        with mock.patch.object(winssh, "download") as download:
+            updater.scp_from("router.test", "/tmp/a", "local")
+            self.assertEqual(download.call_args.args[:3], ("router.test", "/tmp/a", "local"))
+        with mock.patch.object(winssh, "download", side_effect=winssh.SSHError("gone")):
+            with self.assertRaisesRegex(install.Abort, "gone"):
+                updater.scp_from("router.test", "/tmp/a", "local")
+
+    def test_list_interfaces_hides_pseudo_adapters(self):
+        rows = [{"index": 2, "name": "6to4 Adapter", "wireless": False, "ipv4": [], "hidden": True},
+                {"index": 12, "name": "Wi-Fi", "wireless": True, "ipv4": ["192.168.31.2/24"], "hidden": False}]
+        shown = []
+        with mock.patch.object(hostnet, "adapters", return_value=rows), \
+             mock.patch.object(install, "log", side_effect=shown.append):
+            self.assertEqual(install.main(["--list-interfaces"]), 0)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("Wi-Fi", shown[0])
+
+    def test_wizard_lists_real_adapters_and_accepts_their_names(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        sys.path.insert(0, os.path.join(here, "gui"))
+        self.addCleanup(sys.path.remove, os.path.join(here, "gui"))
+        import app
+        import prereqs
+        import runner
+        rows = [{"index": 2, "name": "6to4 Adapter", "wireless": False, "ipv4": [],
+                 "hidden": True, "status": "Up"},
+                {"index": 12, "name": "Беспроводная сеть", "wireless": True,
+                 "ipv4": ["192.168.31.2/24"], "hidden": False, "status": "Up"}]
+        with mock.patch.object(hostnet, "adapters", return_value=rows):
+            listed = app.list_interfaces()
+        self.assertEqual([i["name"] for i in listed], ["Беспроводная сеть"])
+        self.assertEqual(listed[0]["transport"], "wifi")
+        argv = runner.build_argv("install", {"interface": "Беспроводная сеть", "dry_run": True})
+        self.assertEqual(argv[argv.index("--interface") + 1], "Беспроводная сеть")
+        for bad in ("-x", "--yes", "a\nb"):
+            with self.assertRaises(ValueError):
+                runner.build_argv("install", {"interface": bad})
+        with mock.patch.object(prereqs.platform, "system", return_value="Windows"), \
+             mock.patch.object(prereqs, "_importable", return_value=True), \
+             mock.patch.object(prereqs, "_which", return_value=True):
+            state = prereqs.collect()
+        self.assertTrue(state["ready"])
+        self.assertEqual(state["platform"], "windows")
+        ids = {check["id"] for check in state["checks"]}
+        self.assertIn("paramiko", ids)
+        self.assertNotIn("sshpass", ids)
+        with mock.patch.object(prereqs.platform, "system", return_value="Windows"), \
+             mock.patch.object(prereqs, "_importable", return_value=False), \
+             mock.patch.object(prereqs, "_which", return_value=True):
+            state = prereqs.collect()
+        self.assertFalse(state["ready"])
+        self.assertIn("requirements-windows.txt", state["hint_install"])
 
     def test_next_step_commands_are_for_this_shell(self):
         command = install.rerun_command("--verify-only", r"C:\Users\me\My Files\resume.json")
@@ -519,6 +575,59 @@ class SSHTransportTests(unittest.TestCase):
                 winssh.upload("router.test", local, "/tmp/image with spaces.bin", ["secret"])
         self.finish(thread, errors)
         self.assertEqual(hashlib.sha256(received[0]).digest(), hashlib.sha256(payload).digest())
+
+    def test_legacy_scp_download(self):
+        payload = os.urandom(150001)
+
+        def exact(channel, count):
+            data = bytearray()
+            while len(data) < count:
+                chunk = channel.recv(count - len(data))
+                if not chunk:
+                    raise AssertionError("unexpected EOF")
+                data.extend(chunk)
+            return bytes(data)
+
+        def handler(channel, command):
+            self.assertEqual(command, "scp -f '/tmp/config backup.tar.gz'")
+            self.assertEqual(exact(channel, 1), b"\x00")
+            channel.sendall(f"C0600 {len(payload)} config backup.tar.gz\n".encode())
+            self.assertEqual(exact(channel, 1), b"\x00")
+            channel.sendall(payload)
+            channel.sendall(b"\x00")
+            self.assertEqual(exact(channel, 1), b"\x00")
+            channel.send_exit_status(0)
+
+        thread, errors, connection = self.server(handler)
+        with tempfile.TemporaryDirectory() as directory:
+            local = os.path.join(directory, "backup.tar.gz")
+            with connection:
+                winssh.download("router.test", "/tmp/config backup.tar.gz", local, ["secret"])
+            with open(local, "rb") as source:
+                self.assertEqual(source.read(), payload)
+            self.assertFalse(os.path.exists(local + ".part"))
+        self.finish(thread, errors)
+
+    def test_download_leaves_nothing_when_refused(self):
+        def handler(channel, command):
+            self.assertEqual(channel.recv(1), b"\x00")
+            channel.sendall(b"\x01scp: no such file\n")
+
+        thread, errors, connection = self.server(handler)
+        with tempfile.TemporaryDirectory() as directory:
+            local = os.path.join(directory, "backup.tar.gz")
+            with connection:
+                with self.assertRaisesRegex(winssh.SSHError, "no such file"):
+                    winssh.download("router.test", "/tmp/missing", local, ["secret"])
+            self.assertEqual(os.listdir(directory), [])
+        self.finish(thread, errors)
+
+    def test_download_refuses_bad_source_before_connecting(self):
+        with mock.patch.object(winssh, "_authenticated") as connect:
+            for remote in ("relative", "/tmp/evil\nname"):
+                with self.assertRaises(winssh.SSHError):
+                    winssh.download("router.test", remote, "unused", [""])
+            connect.assert_not_called()
 
     def test_receiver_error(self):
         channel = mock.Mock()

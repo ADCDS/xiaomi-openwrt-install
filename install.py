@@ -1815,6 +1815,8 @@ def main(argv=None):
                         "use `ip -br addr` on Linux")
         try:
             for adapter in hostnet.adapters():
+                if adapter.get("hidden"):    # Teredo, 6to4 and the like
+                    continue
                 log(f"{adapter['index']:>4}  {adapter['name']}  "
                     f"{'wifi' if adapter['wireless'] else 'wired'}  "
                     f"{', '.join(adapter['ipv4']) or 'no IPv4'}")
