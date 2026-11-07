@@ -2805,6 +2805,14 @@ def test_pivot_stage_tagging():
           getattr(error, "pivot_stage", None) == "write-unconfirmed",
           getattr(error, "pivot_stage", "missing"))
 
+    # The pivot script's EXIT trap removes the lock on a normal failed exit, so
+    # this -- not the lock=1 variant above -- is the state real hardware leaves
+    # behind. It also isolates the "any status means a write was issued" term.
+    error = run(job_state="status=fail:1 pid=1234 active=0 lock=0")
+    check("a failed pivot that cleaned its lock up is still an unconfirmed write",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          getattr(error, "pivot_stage", "missing"))
+
     error = run()
     check("a write that dies mid-flight is tagged write-unconfirmed",
           getattr(error, "pivot_stage", None) == "write-unconfirmed",
