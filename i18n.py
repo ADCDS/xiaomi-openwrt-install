@@ -10,8 +10,10 @@ test suites) always gets English. What must be typed stays literal in every
 language: a confirmation is still YES or RESTORE, in Latin letters.
 
 Only the languages that have a catalogue appear in LANGUAGES beyond "auto" and
-"en"; "cn" and "pt" are accepted on the command line as aliases of "zh-CN" and
-"pt-BR". test_i18n.py keeps each catalogue honest: every key must still occur
+"en". set_language() also accepts the aliases "cn" and "pt", so a locale or
+XIAOMI_INSTALL_LANG may say either; the command-line parsers list only the
+canonical codes, because argparse matches --lang choices exactly.
+test_i18n.py keeps each catalogue honest: every key must still occur
 in the source, with the same placeholders, leading newline and trailing space
 as the English template it replaces.
 """
@@ -219,11 +221,11 @@ ZH_CN = {
     "\n=== stage 3: flash (sysupgrade from the RAM system) ===":
         "\n=== 阶段 3：刷机（从 RAM 系统执行 sysupgrade）===",
     "[2] Wi-Fi-only: when the stock network disappears, join {ssid!r} with key {key!r}":
-        "[2] 仅 Wi-Fi：当原厂网络消失后，请连接到 {ssid}（密码 {key}）",
+        "[2] 仅 Wi-Fi：当原厂网络消失后，请连接到 {ssid!r}（密码 {key!r}）",
     "[2] rebooting -- stock is still intact in {slot}; if the pivot does not come up, the bootloader falls back to it":
         "[2] 重启中 —— 原厂固件仍完好保存在 {slot}；如果切换后无法启动，引导程序会回退到它",
     "[3] after the RAM installer network disappears, join permanent SSID {ssid!r}; final verification will wait on {iface} (the password is not printed)":
-        "[3] RAM 安装系统的网络消失后，请连接常驻 SSID {ssid}；最终验证会在 {iface} 上等待（不会打印密码）",
+        "[3] RAM 安装系统的网络消失后，请连接常驻 SSID {ssid!r}；最终验证会在 {iface} 上等待（不会打印密码）",
     "[3] after the RAM installer network disappears, connect the router to {iface}; final verification requires that wired interface":
         "[3] RAM 安装系统的网络消失后，请把路由器接到 {iface}；最终验证需要该有线接口",
     "[3] do not touch the power":
@@ -241,7 +243,7 @@ ZH_CN = {
     "[*] after the RAM pivot, a Wi-Fi-only laptop must join {ssid} (key: {key}); this process waits for the router on the selected interface":
         "[*] 切换到 RAM 后，只有 Wi-Fi 的笔记本必须连接到 {ssid}（密码：{key}）；本进程会在所选接口上等待路由器",
     "[*] join permanent SSID {ssid!r} on {iface}; verification will wait without printing its password":
-        "[*] 在 {iface} 上连接常驻 SSID {ssid}；验证会继续等待，且不会打印密码",
+        "[*] 在 {iface} 上连接常驻 SSID {ssid!r}；验证会继续等待，且不会打印密码",
     "[+] selected release downloaded and verified":
         "[+] 已下载并校验所选版本",
     "[dry-run] router was not contacted":
@@ -297,7 +299,7 @@ ZH_CN = {
     "[2] there is no A/B fallback on an installed system: this overwrites the installed kernel. Leave the power alone from here.":
         "[2] 已安装的系统没有 A/B 回退：这会覆盖已安装的内核。此后请勿断开电源。",
     "[2] when this network disappears, join {ssid!r} with key {key!r}; the RAM system has a passwordless root account, so keep the link isolated":
-        "[2] 当此网络消失后，请连接到 {ssid}（密码 {key}）；RAM 系统的 root 账户没有密码，因此请保持该链路隔离",
+        "[2] 当此网络消失后，请连接到 {ssid!r}（密码 {key!r}）；RAM 系统的 root 账户没有密码，因此请保持该链路隔离",
     "overwrite ubi_kernel with {image} and reboot? From here the only way out is finishing the update, or UART.":
         "用 {image} 覆盖 ubi_kernel 并重启？此后唯一的出路是完成更新，或使用 UART。",
     "[+] update complete: your settings were restored.":
@@ -309,7 +311,7 @@ ZH_CN = {
     "\n=== step 1: pivot into the RAM initramfs ===":
         "\n=== 步骤 1：切换到 RAM 临时系统 ===",
     "[1] when the installed network disappears, join {ssid!r} with key {key!r}; this temporary RAM system has a passwordless root account, so keep the link isolated":
-        "[1] 当已安装系统的网络消失后，请连接到 {ssid}（密码 {key}）；该临时 RAM 系统的 root 账户没有密码，因此请保持该链路隔离",
+        "[1] 当已安装系统的网络消失后，请连接到 {ssid!r}（密码 {key!r}）；该临时 RAM 系统的 root 账户没有密码，因此请保持该链路隔离",
     "[?] write {image} to ubi_kernel and reboot? [type YES] ":
         "[?] 将 {image} 写入 ubi_kernel 并重启？[请输入 YES（拉丁字母）] ",
     "[1] rebooting into the RAM initramfs":
@@ -369,11 +371,11 @@ PT_BR = {
     "\n=== stage 3: flash (sysupgrade from the RAM system) ===":
         "\n=== etapa 3: gravação (sysupgrade a partir do sistema em RAM) ===",
     "[2] Wi-Fi-only: when the stock network disappears, join {ssid!r} with key {key!r}":
-        "[2] Somente Wi-Fi: quando a rede de fábrica desaparecer, conecte-se a {ssid} com a chave {key}",
+        "[2] Somente Wi-Fi: quando a rede de fábrica desaparecer, conecte-se a {ssid!r} com a chave {key!r}",
     "[2] rebooting -- stock is still intact in {slot}; if the pivot does not come up, the bootloader falls back to it":
         "[2] reiniciando -- o firmware de fábrica continua intacto em {slot}; se a transição não subir, o bootloader volta para ele",
     "[3] after the RAM installer network disappears, join permanent SSID {ssid!r}; final verification will wait on {iface} (the password is not printed)":
-        "[3] depois que a rede do instalador em RAM desaparecer, conecte-se ao SSID permanente {ssid}; a verificação final aguardará em {iface} (a senha não é exibida)",
+        "[3] depois que a rede do instalador em RAM desaparecer, conecte-se ao SSID permanente {ssid!r}; a verificação final aguardará em {iface} (a senha não é exibida)",
     "[3] after the RAM installer network disappears, connect the router to {iface}; final verification requires that wired interface":
         "[3] depois que a rede do instalador em RAM desaparecer, conecte o roteador a {iface}; a verificação final exige essa interface com fio",
     "[3] do not touch the power":
@@ -391,7 +393,7 @@ PT_BR = {
     "[*] after the RAM pivot, a Wi-Fi-only laptop must join {ssid} (key: {key}); this process waits for the router on the selected interface":
         "[*] após a transição para a RAM, um notebook somente Wi-Fi precisa se conectar a {ssid} (chave: {key}); este processo aguarda o roteador na interface selecionada",
     "[*] join permanent SSID {ssid!r} on {iface}; verification will wait without printing its password":
-        "[*] conecte-se ao SSID permanente {ssid} em {iface}; a verificação aguardará sem exibir a senha",
+        "[*] conecte-se ao SSID permanente {ssid!r} em {iface}; a verificação aguardará sem exibir a senha",
     "[+] selected release downloaded and verified":
         "[+] versão selecionada baixada e verificada",
     "[dry-run] router was not contacted":
@@ -447,7 +449,7 @@ PT_BR = {
     "[2] there is no A/B fallback on an installed system: this overwrites the installed kernel. Leave the power alone from here.":
         "[2] não existe fallback A/B em um sistema instalado: isto sobrescreve o kernel instalado. Não mexa na alimentação a partir daqui.",
     "[2] when this network disappears, join {ssid!r} with key {key!r}; the RAM system has a passwordless root account, so keep the link isolated":
-        "[2] quando esta rede desaparecer, conecte-se a {ssid} com a chave {key}; o sistema em RAM tem root sem senha, então mantenha o link isolado",
+        "[2] quando esta rede desaparecer, conecte-se a {ssid!r} com a chave {key!r}; o sistema em RAM tem root sem senha, então mantenha o link isolado",
     "overwrite ubi_kernel with {image} and reboot? From here the only way out is finishing the update, or UART.":
         "sobrescrever ubi_kernel com {image} e reiniciar? A partir daqui, a única saída é terminar a atualização ou usar UART.",
     "[+] update complete: your settings were restored.":
@@ -459,7 +461,7 @@ PT_BR = {
     "\n=== step 1: pivot into the RAM initramfs ===":
         "\n=== passo 1: transição para o initramfs em RAM ===",
     "[1] when the installed network disappears, join {ssid!r} with key {key!r}; this temporary RAM system has a passwordless root account, so keep the link isolated":
-        "[1] quando a rede do sistema instalado desaparecer, conecte-se a {ssid} com a chave {key}; este sistema temporário em RAM tem root sem senha, então mantenha o link isolado",
+        "[1] quando a rede do sistema instalado desaparecer, conecte-se a {ssid!r} com a chave {key!r}; este sistema temporário em RAM tem root sem senha, então mantenha o link isolado",
     "[?] write {image} to ubi_kernel and reboot? [type YES] ":
         "[?] gravar {image} em ubi_kernel e reiniciar? [digite YES] ",
     "[1] rebooting into the RAM initramfs":

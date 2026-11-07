@@ -633,6 +633,21 @@ def test_stager():
         "mixed / unknown": [
             {"ifname": "wl0", "ssid": "A", "encryption": "", "password": ""},
         ],
+        # The captured values come back from the stock router over plain HTTP.
+        # A legal WPA2 key may contain an apostrophe, and anything crafted must
+        # not be able to close the quote and run a command as root.
+        "wpa2 with an apostrophe": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2",
+             "password": "pa'ss", "channel": "6"},
+        ],
+        "wpa2 with spaces at the edges": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2",
+             "password": " spaced key ", "channel": "6"},
+        ],
+        "hostile encryption mode": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2'; id #",
+             "password": "x", "channel": "6"},
+        ],
     }
     for label, restore in cases.items():
         blob = channel.build_stager(
@@ -651,6 +666,15 @@ def test_stager():
     wpa = channel.build_stager(
         "10.0.0.1", 8000, 4444, cases["wpa2 with a known key"], "testtoken")
     check("wpa2 case restores the captured cipher", b"encryption='psk2'" in wpa)
+
+    quoted = channel.build_stager("192.0.2.2", 8000, 4444, [
+        {"ifname": "wl0", "encryption": "psk2", "password": "pa'ss"}], "t")
+    check("a key with an apostrophe is quoted, not left unterminated",
+          b"'pa'\"'\"'ss'" in quoted, quoted.decode(errors="replace")[-400:])
+    spaced = channel.build_stager("192.0.2.2", 8000, 4444, [
+        {"ifname": "wl0", "encryption": "psk2", "password": " spaced key "}], "t")
+    check("a key with meaningful spaces is not silently trimmed",
+          b"' spaced key '" in spaced, spaced.decode(errors="replace")[-400:])
     check("wpa2 case restores the captured key", b"key='hunter22'" in wpa)
     open_ = channel.build_stager(
         "10.0.0.1", 8000, 4444, [], "testtoken")
@@ -2007,7 +2031,7 @@ class _UpdateBox:
 
 
 def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(True, "ok"),
-                backup=None, deadline=None, pivot_error=None):
+                backup=None, deadline=None, pivot_error=None, pivot_stage=None):
     """updater.main() against `box`; returns what it did and how it ended."""
     import contextlib
     import types
@@ -2046,6 +2070,9 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
                        recover_stale_lock=False):
             outcome.pivots += 1
             if pivot_error:
+                # The real pivot tags how far the write got, and updater picks
+                # its advice from that, so the stand-in has to tag it too.
+                pivot_error.pivot_stage = pivot_stage or "write-unconfirmed"
                 raise pivot_error
             box.pivot()
             return "fe80::1%eth0"
@@ -2230,19 +2257,31 @@ def test_updater():
     check("that failure says how to continue", "--config-backup" in (r.error or ""))
 
     box = _UpdateBox()
-    r = _run_update(box, wired, pivot_error=install.Abort("nothing appeared on eth0"))
+    r = _run_update(box, wired, pivot_error=install.Abort("nothing appeared on eth0"),
+                    pivot_stage="rebooted")
     check("losing the box after the pivot says how to continue",
           "nothing appeared" in (r.error or "") and "--config-backup" in r.error
           and "replaced" in r.error)
 
     box = _UpdateBox()
     r = _run_update(box, wired, pivot_error=restore.RestoreError(
-        "pivot write did not finish ('fail:1'):\nubiformat: error!"))
+        "pivot write did not finish ('fail:1'):\nubiformat: error!"),
+        pivot_stage="write-unconfirmed")
     check("a failed pivot write is not dropped as a bare error",
           "ubiformat" in (r.error or "") and "--config-backup" in (r.error or ""),
           r.error or "")
     check("a failed pivot write warns against rebooting",
           "do NOT reboot" in (r.error or ""), r.error or "")
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=restore.RestoreError(
+        "img.ubi is 4096 B, ubi_kernel holds 1024 B -- refusing to erase the "
+        "installed kernel for an image that cannot fit it"),
+        pivot_stage="not-written")
+    check("a refusal before the write makes no claim about the kernel",
+          "cannot fit" in (r.error or "")
+          and "do NOT reboot" not in (r.error or "")
+          and "replaced" not in (r.error or ""), r.error or "")
     import updater as _updater
     hint = _updater.retry_hint("/tmp/my runs/config-backup.tar.gz")
     check("the retry hint quotes a path the shell would split",
@@ -2575,8 +2614,8 @@ def test_revert_pivot_guards():
                 try:
                     revert.pivot_to_ram("router.test", image.name, "unused.itb", None)
                 except revert.restore.RestoreError as exc:
-                    return str(exc)
-        return ""
+                    return exc
+        return None
 
     layout = {"ubi_kernel": {"index": 9, "size": 1024},
               "rootfs": {"index": 10, "size": 8192}}
@@ -2584,18 +2623,117 @@ def test_revert_pivot_guards():
     # ubiformat erases PEBs as it writes, so this has to fail before the write,
     # not after it has already taken the installed kernel with it.
     check("an image too large for ubi_kernel is refused before ubiformat",
-          "cannot fit" in error, error or "no error")
+          "cannot fit" in str(error), str(error) or "no error")
 
     roomy = {"ubi_kernel": {"index": 9, "size": 8192},
              "rootfs": {"index": 10, "size": 8192}}
     error = pivot(roomy)
     check("the pivot fails closed when it cannot see the attached UBIs",
-          "could not read" in error, error or "no error")
+          "could not read" in str(error), str(error) or "no error")
 
-    attached = (0, "ubi0 9\n")
-    error = pivot(roomy, attached)
-    check("the pivot refuses ubi_kernel when a UBI sits on it",
-          "has a UBI attached" in error, error or "no error")
+    # ubi0 on mtd9 means a real UBI -- the running one -- sits on ubi_kernel.
+    error = pivot(roomy, (0, "ubi0 9\n"))
+    check("the pivot refuses ubi_kernel when a live UBI sits on it",
+          "attached at runtime" in str(error), str(error) or "no error")
+
+    # A dry run must not change kernel state at all: the interlock only reads,
+    # and the detach happens after this gate.
+    def dry(attached_reply):
+        commands = []
+
+        def ssh(host, command, **kwargs):
+            commands.append(command)
+            return attached_reply
+
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            with mock.patch.object(revert.restore, "mtd_map", return_value=roomy), \
+                    mock.patch.object(revert.install, "ssh", side_effect=ssh), \
+                    mock.patch.object(revert.install, "expected_volume",
+                                      return_value=(b"x" * 10, "md5")):
+                result = revert.pivot_to_ram("router.test", image.name, "unused.itb",
+                                             None, dry_run=True)
+        return result, commands
+
+    result, commands = dry((0, "ubi0 10\n"))
+    check("a dry run stops before the write",
+          result is None and not [c for c in commands if c.startswith("ubidetach")],
+          str(commands))
+
+    result, commands = dry((0, "ubi0 10\nubi9 9\n"))
+    check("a dry run does not detach even a stale read-back device",
+          result is None and not [c for c in commands if c.startswith("ubidetach")],
+          str(commands))
+
+    # Every one of those refusals happened before anything was erased, and
+    # updater picks its advice from this tag: a wrong tag would tell the
+    # operator that nothing bootable is left when the box is perfectly intact.
+    check("a refusal before the write is tagged not-written",
+          all(getattr(e, "pivot_stage", None) == "not-written"
+              for e in (pivot(layout), pivot(roomy), pivot(roomy, (0, "ubi0 9\n")))),
+          "missing or wrong pivot_stage")
+
+
+def test_kernel_volume_id():
+    """The read-back must find the kernel volume by name, not by position."""
+    print("\n[revert: reading the kernel volume back]")
+    import revert
+
+    multi = ("Volume ID:   0 (on ubi9)\n"
+             "Type:          dynamic\n"
+             "Name:          rootfs\n"
+             "Volume ID:   1 (on ubi9)\n"
+             "Type:          dynamic\n"
+             "Name:          kernel\n"
+             "Volume ID:   2 (on ubi9)\n"
+             "Name:          rootfs_data\n")
+    check("the kernel volume is found by name, not by position",
+          revert.kernel_volume_id(multi) == "1", revert.kernel_volume_id(multi))
+    check("a volume named rootfs is not taken for the kernel",
+          revert.kernel_volume_id("Volume ID:   0 (on ubi9)\nName: rootfs\n") is None)
+
+
+def test_read_back_kernel():
+    """The read-back attaches, reads the named volume, and always detaches."""
+    print("\n[revert: the read-back]")
+    import revert
+    volumes = ("Volume ID:   0 (on ubi9)\nName:          rootfs\n"
+               "Volume ID:   1 (on ubi9)\nName:          kernel\n")
+
+    def fake(md5_line):
+        calls = []
+
+        def ssh(host, command, **kwargs):
+            calls.append(command)
+            if command.startswith("ubiattach"):
+                return 0, ""
+            if command.startswith("ubinfo"):
+                return 0, volumes
+            if command.startswith("md5sum /dev/ubi9_"):
+                return 0, md5_line + "\n4096"
+            return 0, ""
+        return ssh, calls
+
+    ssh, calls = fake("abc123  4096")
+    with mock.patch.object(revert.install, "ssh", side_effect=ssh):
+        dev = revert.read_back_kernel("router.test", 9, "abc123")
+    check("the read-back reads the kernel volume, not volume 0",
+          dev == "/dev/ubi9_1", dev)
+    check("the read-back detaches device 9 again on the way out",
+          sum(1 for c in calls if c.startswith("ubidetach")) == 2, str(calls))
+
+    ssh, calls = fake("deadbeef  4096")
+    with mock.patch.object(revert.install, "ssh", side_effect=ssh):
+        try:
+            revert.read_back_kernel("router.test", 9, "abc123")
+            error = "no error"
+        except revert.restore.RestoreError as exc:
+            error = str(exc)
+    check("a mismatched read-back refuses loudly without rebooting",
+          "Do NOT reboot" in error, error)
+    check("a mismatched read-back still detaches device 9",
+          sum(1 for c in calls if c.startswith("ubidetach")) == 2, str(calls))
 
 
 def main():
@@ -2631,6 +2769,8 @@ def main():
     test_install_failure_hint()
     test_updater()
     test_revert_pivot_guards()
+    test_kernel_volume_id()
+    test_read_back_kernel()
     test_gui_runner()
     test_gui_strings()
     test_gui_server()

@@ -189,7 +189,7 @@ manualmente às novas redes.
 
    ```text
    SSID:   OpenWrt-RD03v2-Installer
-   Пароль: rd03v2install
+   Password: rd03v2install
    ```
 
 3. **OpenWrt permanente.** Depois da gravação a rede temporária desaparece.
@@ -201,8 +201,8 @@ No final deve aparecer `[+] O OpenWrt está instalado na NAND.`
 
 Se a execução for interrompida, o instalador imprime o comando para continuar.
 Não comece de novo: o gatilho da vulnerabilidade só funciona uma vez por reset de
-fábrica. Depois de perder o link, o roteador pode voltar a se conectar apenas após
-30 minutos.
+fábrica. Depois de perder o link, o roteador pode levar até 30 minutos para se
+conectar de novo.
 
 Depois das mensagens `flash-started` ou “não desligue a alimentação”, **não desligue a alimentação, não resete o roteador e não execute a etapa de gravação novamente**.
 
@@ -273,7 +273,7 @@ houve falha. Conecte-se à rede permanente, ou à porta LAN por cabo, e execute
 caminho é impresso pelo instalador):
 
 ```powershell
-py -3 install.py --verify-only ".\install-ДАТА-ВРЕМЯ\resume.json" --verify-interface 12
+py -3 install.py --verify-only ".\install-DATE-TIME\resume.json" --verify-interface 12
 ```
 
 Não use o manifesto de outro roteador ou de outra instalação.
@@ -299,11 +299,11 @@ defina uma nova senha e depois **Save & Apply**. Não é preciso reset de fábri
 ## Atualização de um sistema instalado
 
 ```sh
-python3 updater.py --root-password 'ВАШ_ПАРОЛЬ'
+python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 ```
 
 Atualiza um OpenWrt instalado para o último release do port, mantendo as
-configurações, como o `sysupgrade`. `--release ТЕГ` escolhe um release específico,
+configurações, como o `sysupgrade`. `--release TAG` escolhe um release específico,
 `--no-keep-settings` faz uma instalação limpa, e `--dry-run` apenas baixa e
 verifica as imagens. Um `sysupgrade` comum transforma esta placa em tijolo, por
 isso a atualização passa pelo instalador em RAM. Antes da gravação, uma cópia de
@@ -337,11 +337,11 @@ dispositivo ([lista](docs/technical.md#getting-the-images)). Depois, a partir do
 OpenWrt instalado:
 
 ```sh
-python3 revert.py --device rd03v2 /путь/к/заводскому-образу.bin --interface ИНТЕРФЕЙС
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface IFACE
 ```
 
 No Windows: `py -3 revert.py ...`; esse caminho ainda não foi testado em roteador
-real. Parâmetros adicionais: `--transport wired`, `--root-password ПАРОЛЬ`,
+real. Parâmetros adicionais: `--transport wired`, `--root-password 'YOUR_OPENWRT_PASSWORD'`,
 `--dry-run`. A confirmação do apagamento deve ser digitada com a palavra `RESTORE`,
 em letras latinas.
 
@@ -357,7 +357,7 @@ gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (vej
 |---|---|
 | `python3 release.py --device rd03v2` | Mostrar o último release e os arquivos necessários. |
 | `python3 release.py --device rd03v2 --download --wifi --dest images` | Baixar e verificar as imagens. |
-| `python3 attach.py --bind АДРЕС --peer АДРЕС_РОУТЕРА --session-token ТОКЕН 'id'` | Reconectar ao canal de retorno de uma execução interrompida. |
+| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reconectar ao canal de retorno de uma execução interrompida. |
 | `python3 selftest.py` | Verificações sem roteador (Linux). No Windows: `py -3 -m unittest test_hostnet test_windows test_i18n`. |
 
 O `probe.py` não foi testado no Windows; a reconexão automática ao Wi-Fi dele só

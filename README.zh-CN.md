@@ -132,14 +132,14 @@ python3 install.py --transport wifi --interface WIFI_INTERFACE \
 
    ```text
    SSID:   OpenWrt-RD03v2-Installer
-   Пароль: rd03v2install
+   Password: rd03v2install
    ```
 
 3. **永久 OpenWrt。** 写入完成后临时网络会消失。请连接到安装时指定的网络。安装器最多等待路由器 600 秒，并校验主板、永久 overlay 和分区大小。
 
 最后应出现 `[+] OpenWrt 已安装到 NAND。`
 
-如果运行被中断，安装器会输出用于继续的命令。不要从头开始：漏洞触发器在每次恢复出厂设置之后只会生效一次。断开连接后，路由器可能要等 30 分钟才能再次连上。
+如果运行被中断，安装器会输出用于继续的命令。不要从头开始：漏洞触发器在每次恢复出厂设置之后只会生效一次。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
 
 看到 `flash-started` 或「不要断开电源」之类的提示之后，**不要断开电源，不要复位路由器，也不要重新执行固件写入阶段**。
 
@@ -187,7 +187,7 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 出现 `sysupgrade 已启动` 的提示，意味着不能重复写入。没有找到路由器本身并不能证明失败。请连接到永久网络，或用网线连接到 LAN 口，并**只执行校验**，同时指定本次运行自己的 `resume.json`（路径由安装器输出）：
 
 ```powershell
-py -3 install.py --verify-only ".\install-ДАТА-ВРЕМЯ\resume.json" --verify-interface 12
+py -3 install.py --verify-only ".\install-DATE-TIME\resume.json" --verify-interface 12
 ```
 
 不要使用其他路由器或其他安装过程的清单文件。
@@ -206,10 +206,10 @@ py -3 install.py --verify-only ".\install-ДАТА-ВРЕМЯ\resume.json" --ver
 ## 更新已安装的系统
 
 ```sh
-python3 updater.py --root-password 'ВАШ_ПАРОЛЬ'
+python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 ```
 
-把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release ТЕГ` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在这块板子上，常规的 `sysupgrade` 会导致变砖，因此更新通过 RAM 安装器进行。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
+把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release TAG` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在这块板子上，常规的 `sysupgrade` 会导致变砖，因此更新通过 RAM 安装器进行。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
 
 这里没有 A/B 冗余：出现故障时的保障是 UART。如果运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上同样可用。哪些场景尚未在真实路由器上验证，见上表。
 
@@ -228,10 +228,10 @@ python3 gui/app.py
 下载官方原厂镜像，其 SHA-256 必须已在设备配置文件中获得批准（[列表](docs/technical.md#getting-the-images)）。然后在已安装的 OpenWrt 中执行：
 
 ```sh
-python3 revert.py --device rd03v2 /путь/к/заводскому-образу.bin --interface ИНТЕРФЕЙС
+python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface IFACE
 ```
 
-在 Windows 中：`py -3 revert.py ...`，这条路径尚未在真实路由器上验证。其他参数：`--transport wired`、`--root-password ПАРОЛЬ`、`--dry-run`。确认擦除时必须用拉丁字母输入 `RESTORE`。
+在 Windows 中：`py -3 revert.py ...`，这条路径尚未在真实路由器上验证。其他参数：`--transport wired`、`--root-password 'YOUR_OPENWRT_PASSWORD'`、`--dry-run`。确认擦除时必须用拉丁字母输入 `RESTORE`。
 
 `revert.py` 会校验原厂镜像，下载 RAM 系统镜像，把路由器切换到 RAM，恢复原厂固件，并确认设置向导重新出现。恢复请使用它，而不要重新执行固件写入：执行 `sysupgrade` 之后，原厂的 A/B 备份已经被擦除（见 [NOTICE](NOTICE)）。
 
@@ -241,7 +241,7 @@ python3 revert.py --device rd03v2 /путь/к/заводскому-образу
 |---|---|
 | `python3 release.py --device rd03v2` | 显示最新发布版以及所需的文件。 |
 | `python3 release.py --device rd03v2 --download --wifi --dest images` | 下载并校验镜像。 |
-| `python3 attach.py --bind АДРЕС --peer АДРЕС_РОУТЕРА --session-token ТОКЕН 'id'` | 重新连接到被中断运行的回调通道。 |
+| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | 重新连接到被中断运行的回调通道。 |
 | `python3 selftest.py` | 无需路由器的检查（Linux）。在 Windows 中：`py -3 -m unittest test_hostnet test_windows test_i18n`。 |
 
 `probe.py` 未在 Windows 上验证；它的自动 Wi-Fi 重连只在 Linux 上有效。被中断的运行、各个阶段以及恢复流程在[技术文档](docs/technical.md)中有说明（英文）。

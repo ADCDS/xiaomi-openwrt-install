@@ -423,7 +423,11 @@ $("#run-cancel").addEventListener("click", async () => {
 // ---- start ----
 
 (async function init() {
-  STRINGS = await fetch("strings.json").then((r) => r.json());
+  // A catalogue that cannot be fetched must not leave the page blank: t()
+  // falls back to English and then to the key, but only if this resolves.
+  STRINGS = await fetch("strings.json")
+    .then((r) => r.json())
+    .catch(() => ({ en: {} }));
   LANG = preferredLanguage();
   applyLanguage();
   show("mode");

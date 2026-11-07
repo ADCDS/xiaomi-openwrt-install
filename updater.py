@@ -409,17 +409,23 @@ def run(args):
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
-        except restore.RestoreError as exc:
-            # pivot_to_ram reports every write-stage failure as a RestoreError,
-            # not an Abort. Nothing is listed against it, so it used to escape
-            # with a bare message on a box whose only kernel had just been
-            # overwritten. The router is still running, so the write can be
-            # retried from here; rebooting is the one thing that ends that.
-            raise Abort(f"{exc}\n{retry_hint(config_tar)}") from exc
-        except Abort as exc:
-            # Raised after the pivot succeeded, while waiting for the RAM
-            # installer: from there it is reached over the network instead.
-            raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
+        except (Abort, restore.RestoreError) as exc:
+            # What to say depends on how far the write got, and the exception
+            # class cannot express that: pivot_to_ram tags the stage instead.
+            stage = getattr(exc, "pivot_stage", "not-written")
+            if stage == "write-unconfirmed":
+                # ubiformat was issued and its result is not known: the
+                # partition that held the installed kernel is not trustworthy,
+                # so the router must not be rebooted and the write retried now.
+                raise Abort(f"{exc}\n{retry_hint(config_tar)}") from exc
+            if stage == "rebooted":
+                # The write verified and the box rebooted; it is reached over
+                # the network from the RAM installer instead.
+                raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
+            # Nothing was written. The router is still the installed system and
+            # still bootable, so neither hint applies and saying either would
+            # be a false claim about the state of ubi_kernel.
+            raise Abort(str(exc)) from exc
         try:
             host = wait_for_ram_system(host, args.discover, fallback)
         except Abort as exc:

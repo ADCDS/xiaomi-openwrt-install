@@ -79,6 +79,53 @@ def remote_job_state(host, status_path, lock_dir):
     return state
 
 
+def kernel_volume_id(ubinfo_text):
+    """The volume id of the volume named `kernel`, or None.
+
+    `ubinfo -a` emits one block per volume, so each block's own id must be read.
+    A lazy span from the FIRST "Volume ID:" to a given Name matches volume 0 for
+    every name -- the mistake restore.do_restore records, which silently md5s
+    the wrong device and calls a good write bad.
+    """
+    for chunk in re.split(r"(?=Volume ID:)", ubinfo_text):
+        vid = re.search(r"Volume ID:\s+(\d+)", chunk)
+        name = re.search(r"Name:\s+(\S+)", chunk)
+        if vid and name and name.group(1) == "kernel":
+            return vid.group(1)
+    return None
+
+
+def read_back_kernel(host, k, want_md5):
+    """Attach the freshly written UBI, md5 its kernel volume, detach.
+
+    Returns the device that was read. Raises RestoreError if the UBI will not
+    attach, carries no volume named `kernel`, or reads back a different md5.
+    """
+    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
+    rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
+    if rc != 0:
+        raise restore.RestoreError(f"the written UBI will not attach: {out!r}")
+    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
+    vid = kernel_volume_id(vols)
+    if vid is None:
+        install.ssh(host, "ubidetach -d 9", check=False)
+        raise restore.RestoreError(f"no 'kernel' volume in the written UBI:\n{vols}")
+    dev = f"/dev/ubi9_{vid}"
+    _rc, got = install.ssh(host, f"md5sum {dev}; wc -c < {dev}", timeout=300)
+    install.ssh(host, "ubidetach -d 9", check=False)
+    got_md5 = got.split()[0] if got else ""
+    log(f"[1] read-back {dev}: {got.splitlines()[-1] if got else '?'} B, "
+        f"md5 {got_md5}")
+    if got_md5 != want_md5:
+        raise restore.RestoreError(
+            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "
+            "ubi_kernel held the installed kernel and now holds a bad write, so "
+            "nothing bootable is left there. The running system is fine until it "
+            "reboots. Re-run now to retry the write.")
+    log("[1] read-back matches the image byte for byte")
+    return dev
+
+
 def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
                  recover_stale_lock=False):
     """Put the RAM image in `ubi_kernel` and boot it. Returns the new host.
@@ -87,7 +134,26 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     of it at boot and nothing holds it since -- so overwriting it under the
     running system is safe. What is not safe is rebooting onto a bad write,
     hence the read-back before the reboot.
+
+    A failure is tagged with `pivot_stage` -- `not-written`,
+    `write-unconfirmed` or `rebooted` -- because the exception class cannot say
+    how far it got: the same RestoreError and Abort are raised before the write,
+    after it was issued, and once the box is already in the RAM installer, and
+    what the operator should do differs completely between those.
     """
+    phase = {"written": False, "pivoted": False}
+    try:
+        return _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
+                             recover_stale_lock, phase)
+    except Exception as exc:
+        exc.pivot_stage = ("rebooted" if phase["pivoted"]
+                           else "write-unconfirmed" if phase["written"]
+                           else "not-written")
+        raise
+
+
+def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
+                  recover_stale_lock, phase):
     mtd = restore.mtd_map(host)
     if "ubi_kernel" not in mtd:
         raise restore.RestoreError("no ubi_kernel partition -- not the OpenWrt layout")
@@ -106,28 +172,37 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     log(f"[1] image {size} B fits ubi_kernel ({mtd['ubi_kernel']['size']} B)")
 
     # The same hard interlock the A/B path uses, for the same reason: mtd{k} is
-    # the partition holding the only bootable kernel, so it must not be live. A
-    # stale device 9 is this tool's own read-back from an earlier attempt and
-    # holds no live filesystem; drop it so a retry is not refused by leftovers.
-    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
+    # the partition holding the only bootable kernel, so it must not be live.
+    # This is a read only -- a dry run must not change kernel state, so a stale
+    # device 9 left by an earlier read-back is only recorded here and dropped
+    # after the dry-run gate below. Detaching first would also hide a live ubi9
+    # from the very check it is meant to satisfy.
     _rc, attached = install.ssh(
         host,
         "for u in /sys/class/ubi/ubi[0-9]; do "
         "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
         check=False)
-    live = {line.split()[1] for line in attached.splitlines()
-            if len(line.split()) == 2 and line.split()[1].isdigit()}
-    if not live:
+    by_mtd = {}
+    for line in attached.splitlines():
+        fields = line.split()
+        if len(fields) == 2 and fields[1].isdigit():
+            by_mtd.setdefault(fields[1], set()).add(fields[0])
+    if not by_mtd:
         # Fail closed: reading no attached UBI would make any target look idle.
         raise restore.RestoreError(
             "could not read which MTDs the running UBIs sit on "
             "(/sys/class/ubi/*/mtd_num) -- refusing to pick a target")
-    if str(k) in live:
+    on_target = by_mtd.get(str(k), set())
+    # Device 9 is this tool's own scratch device, used only for the read-back;
+    # it can outlive a run that died there. Anything else on ubi_kernel is live.
+    if on_target - {"ubi9"}:
         raise restore.RestoreError(
-            f"ubi_kernel (mtd{k}) has a UBI attached at runtime; refusing to "
-            "overwrite a partition that may be live")
-    log(f"[1] UBI attached on mtd{sorted(int(item) for item in live)}; "
-        f"ubi_kernel is mtd{k} and is idle")
+            f"ubi_kernel (mtd{k}) has {', '.join(sorted(on_target))} attached at "
+            "runtime; refusing to overwrite a partition that may be live")
+    stale_scratch = "ubi9" in on_target
+    log(f"[1] UBI attached on mtd{sorted(int(item) for item in by_mtd)}; "
+        f"ubi_kernel is mtd{k}"
+        + (", holding only our stale device 9" if stale_scratch else " and is idle"))
 
     blob, want_md5 = install.expected_volume(ubi_path, itb_path)
     local_md5 = hashlib.md5(open(ubi_path, "rb").read()).hexdigest()
@@ -137,8 +212,14 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         log("[1] [dry-run] stopping before the write")
         return None
 
+    if stale_scratch:
+        # Only now, so that a dry run really is read-only.
+        install.ssh(host, "ubidetach -d 9", check=False)
+        log("[1] dropped the stale read-back device 9 that sat on ubi_kernel")
+
     state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
     reuse_done = "status=done" in state
+    phase["written"] = reuse_done       # an earlier run already erased it
     if "active=1" in state:
         raise restore.RestoreError(f"pivot ubiformat is still running ({state})")
     if not reuse_done and ("lock=1" in state or "status=fail" in state
@@ -168,6 +249,7 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
             install.scp_to(host, sh, "/tmp/pv.sh")
         install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status",
                     check=True)
+        phase["written"] = True         # ubiformat is about to erase PEBs
         rc, out = install.ssh(
             host, "start-stop-daemon -S -b -x /tmp/pv.sh; echo rc=$?",
             check=False)
@@ -189,31 +271,9 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
                 f"pivot write did not finish ({status!r}):\n{tail}")
         log("[1] ubiformat done")
 
-    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
-    rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
-    if rc != 0:
-        raise restore.RestoreError(f"the written UBI will not attach: {out!r}")
-    # Read the volume named "kernel", not a fixed volume id: the installer's own
-    # read-back does the same because a lazy span anchored on the first Volume ID
-    # matches volume 0 whatever the name is.
-    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
-    named = re.search(r"Volume ID:\s+(\d+).*?Name:\s+kernel", vols, re.S)
-    if not named:
-        install.ssh(host, "ubidetach -d 9", check=False)
-        raise restore.RestoreError(f"no 'kernel' volume in the written UBI:\n{vols}")
-    dev = f"/dev/ubi9_{named.group(1)}"
-    _rc, got = install.ssh(host, f"md5sum {dev}; wc -c < {dev}", timeout=300)
-    install.ssh(host, "ubidetach -d 9", check=False)
-    got_md5 = got.split()[0] if got else ""
-    log(f"[1] read-back {dev}: {got.splitlines()[-1] if got else '?'} B, "
-        f"md5 {got_md5}")
-    if got_md5 != want_md5:
-        raise restore.RestoreError(
-            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "
-            "ubi_kernel held the installed kernel and now holds a bad write, so "
-            "nothing bootable is left there. The running system is fine until it "
-            "reboots. Re-run now to retry the write.")
-    log("[1] read-back matches the image byte for byte")
+    read_back_kernel(host, k, want_md5)
+    phase["written"] = False            # the write is confirmed good
+    phase["pivoted"] = True             # from here the box boots the RAM image
 
     install.ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
     log(t("[1] rebooting into the RAM initramfs"))

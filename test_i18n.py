@@ -174,7 +174,9 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(self.detect(LANG="en_US", XIAOMI_INSTALL_LANG="pt-br"), "recusado")
 
     def test_region_and_alias_spellings_pick_the_same_catalogue(self):
-        # What an operator types on the command line, or what a locale exports.
+        # What a locale, or XIAOMI_INSTALL_LANG, may say. argparse's --lang
+        # choices are the canonical codes only, so these go through
+        # set_language() rather than a parser.
         for spelling, expected in (("zh-CN", "zh-CN"), ("zh_CN", "zh-CN"), ("zh-Hans", "zh-CN"),
                                    ("cn", "zh-CN"), ("pt-BR", "pt-BR"), ("pt_br", "pt-BR"),
                                    ("pt", "pt-BR"), ("ru", "ru"), ("en", "en")):
