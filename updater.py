@@ -1,523 +1,435 @@
 #!/usr/bin/env python3
-"""Update an already-installed OpenWrt build to a new release, without UART.
+"""Update an installed OpenWrt to another release of the port, without UART.
 
-This is the scripted form of docs/no-uart-reflash.md.  Unlike install.py it
-does *not* use the cab_meshd exploit: the box is already OpenWrt and already
-answers SSH as root.  The route is the sanctioned one:
+An in-place `sysupgrade` is what bricks this board: the kernel lives in its own
+UBI, and only the RAM installer may reformat it. So an update takes the route
+revert.py and install.py already take on real hardware, and reuses their code:
 
-    1. preflight  -- confirm SSH root, locate the idle `ubi_kernel` MTD, and
-                     measure free memory.
-    2. backup     -- `sysupgrade -b` the running config and copy it off-box
-                     (optionally dump the current kernel volume as rollback).
-    3. write-ram  -- ubiformat the release's initramfs-factory(.ubi) into the
-                     unattached `ubi_kernel` MTD, verify it by read-back
-                     (prefix md5 + erase-padding tail), set the boot flags the
-                     sanctioned path sets, and reboot into the RAM installer.
-    4. flash      -- from the RAM system (rootfs is tmpfs now), check memory,
-                     upload the sysupgrade image, `sysupgrade -T`, then
-                     `sysupgrade -f backup new.bin`.
-    5. verify     -- rediscover and prove the permanent system on NAND.
+    1. pre-flight  prove this is the board on its permanent system, that the
+                   target release can drive this unit's NAND, and that the
+                   image fits. Nothing is written.
+    2. backup      `sysupgrade -b`, copied off the box and checked.
+    3. pivot       revert.pivot_to_ram: write the RAM installer over `ubi_kernel`,
+                   read it back, reboot. Then wait until tmpfs is what answers.
+    4. flash       install.flash: re-checks board, tmpfs and NAND, verifies the
+                   upload, proves the detached sysupgrade started, records a
+                   resume manifest, and verifies the permanent system.
 
-Only the two writes (the ubiformat in 3, the sysupgrade in 4) are risk
-windows; both leave the box recoverable over UART.  Everything that must
-outlive an SSH session is detached with `setsid` (see the gotchas in the doc).
+The manual form is docs/no-uart-reflash.md in the firmware repository,
+https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2.
 
-install.py already carries battle-tested helpers for every network step --
-ssh(), scp_to(), wait_and_discover(), wait_for_openwrt(),
-verify_permanent_system(), parse_mtd(), detect_transport() -- so this module
-imports and reuses them rather than reimplementing them.  Importing install is
-side-effect free (everything runs under its __main__ guard).
+Unlike installing from stock there is no A/B fallback. `ubi_kernel` *is* the
+installed kernel, so from step 3 on the way out is forward: run this again, and
+it continues from the RAM system. The recovery net for a torn write is UART.
+
+It logs in by password, like the rest of this tool. A router configured for
+SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
 """
 
 import argparse
 import os
-import shlex
+import secrets
+import shutil
+import subprocess
 import sys
+import tarfile
 import time
 
 import chain
 import devices
 import install
 import release
-from chain import ChainError
-from install import Abort, log
+import restore
+import revert
+from chain import ChainError, log
+from install import Abort
+
+REMOTE_BACKUP = "/tmp/config-backup.tar.gz"
+
+# The RAM image is uploaded to tmpfs on a router that is still running every
+# service. Refuse below this much headroom rather than risk the OOM killer.
+MEMORY_MARGIN_KB = 8 * 1024
+
+# How long the box gets to come up in the RAM installer after the pivot.
+RAM_DEADLINE_S = 420
+
+ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
 
-# The RAM installer brings up this network on a Wi-Fi update; its address and
-# key are fixed and public and the network exists only while it runs.
-RAM_HOST = "192.168.1.1"
-
-
-# ---- detached helpers -------------------------------------------------------
-
-# A plain `cmd &` over dropbear can die with the session, and this BusyBox has
-# no nohup; setsid is the documented replacement.  We always write the command
-# into a uniquely named script and confirm its effect rather than trusting the
-# exit status (see the start-stop-daemon pitfall in the doc).
-def _detach(ch_host, script_body, name):
-    """Write /tmp/<name>.sh on the box and launch it detached with setsid."""
-    path = f"/tmp/{name}.sh"
-    heredoc = f"cat > {path} <<'RD03V2_EOF'\n{script_body}\nRD03V2_EOF\n" \
-              f"chmod +x {path}"
-    install.ssh(ch_host, heredoc)
-    install.ssh(ch_host,
-                f"setsid {path} </dev/null >/dev/null 2>&1 &",
-                check=False)
-
-
-def scp_from(host, remote, local, passwords=None):
-    """Copy remote:path off the box.  install.py only ships scp_to."""
-    import shutil
-    import subprocess
+def scp_from(host, remote, local):
+    """Copy remote:path off the box. install.py only ever sends."""
     src = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
-    for pw in (install.SSH_PASSWORDS if passwords is None else passwords):
-        cmd = (["sshpass", "-p", pw] if shutil.which("sshpass") else []) + [
-            "scp", "-O", "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-            "-o", "NumberOfPasswordPrompts=1", src, local]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-        if r.returncode == 0:
+    for password in install.SSH_PASSWORDS:
+        result = subprocess.run(
+            (["sshpass", "-p", password] if shutil.which("sshpass") else []) +
+            ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+             "-o", "NumberOfPasswordPrompts=1", src, local],
+            capture_output=True, text=True, timeout=300)
+        if result.returncode == 0:
             return
-        last = r.stderr.strip()
+        last = result.stderr.strip()
     raise Abort(f"scp from {remote} failed: {last}")
 
 
-def _free_memory_kb(host):
-    rc, out = install.ssh(
-        host, "grep MemAvailable /proc/meminfo", check=False)
-    if rc != 0:
-        return None
-    for tok in out.split():
-        if tok.isdigit():
-            return int(tok)
-    return None
+def check_config_backup(path):
+    """Refuse an archive `sysupgrade -f` could not restore your config from."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            names = archive.getnames()
+    except (OSError, tarfile.TarError) as exc:
+        raise Abort(f"{path} is not a readable config backup: {exc}")
+    if not any(name.lstrip("./").startswith("etc/config/") for name in names):
+        raise Abort(f"{path} holds no etc/config/: it is not a config backup")
 
 
-def _find_ubi_kernel_mtd(host):
-    """Return the mtd index of the unattached kernel partition, or raise.
+def available_memory_kb(host):
+    rc, out = install.ssh(host, "grep MemAvailable /proc/meminfo", check=False)
+    values = [token for token in out.split() if token.isdigit()]
+    if rc != 0 or not values:
+        raise Abort(f"cannot read the free memory on {host}: {out!r}")
+    return int(values[0])
 
-    docs/no-uart-reflash.md: `ubi_kernel` is a separate MTD the running system
-    never attaches.  Different builds have labelled it `ubi_kernel` or
-    `kernel`; accept either, preferring the exact profile name.
+
+def require_idle_kernel_partition(host, mtd):
+    """The hard interlock: never write a partition a UBI is attached to."""
+    _rc, attached = install.ssh(
+        host,
+        "for u in /sys/class/ubi/ubi[0-9]; do cat $u/mtd_num 2>/dev/null; done",
+        check=False)
+    live = {int(item) for item in attached.split() if item.isdigit()}
+    if not live:
+        # Fail closed: reading nothing would make any target look idle.
+        raise Abort("could not read which MTDs the running UBIs sit on "
+                    "(/sys/class/ubi/*/mtd_num); refusing to pick a target")
+    if mtd["ubi_kernel"]["index"] in live:
+        raise Abort(f"ubi_kernel (mtd{mtd['ubi_kernel']['index']}) has a UBI "
+                    "attached; reboot the router before updating")
+
+
+def preflight(host, profile, rel, images, images_dir, router_iface=None):
+    """Everything that must hold before a byte is written.
+
+    Returns the rootfs type: 'overlay' for the installed system, or 'tmpfs' when
+    an earlier run already reached the RAM installer.
     """
-    rc, text = install.ssh(host, "cat /proc/mtd", check=False)
-    if rc != 0:
-        raise Abort(f"cannot read /proc/mtd on {host}: {text}")
-    mtd = install.parse_mtd(text)
-    for name in ("ubi_kernel", "kernel"):
-        if name in mtd:
-            return mtd[name]["index"], name, mtd
-    raise Abort(
-        "no 'ubi_kernel'/'kernel' MTD on the box; /proc/mtd was:\n" + text)
-
-
-# ---- stages -----------------------------------------------------------------
-
-def preflight(host, profile):
     log("\n=== stage 1: pre-flight (nothing is written) ===")
-    rc, board = install.ssh(
-        host, ". /lib/functions.sh 2>/dev/null; board_name", check=False)
-    if rc == 0 and board.strip():
-        log(f"[1] board_name = {board.strip()!r}")
-        if board.strip() != profile.openwrt_board:
+    # Refuses this host's own gateway; see install.gateway_conflict.
+    install.check_is_openwrt_ram(host, router_iface=router_iface)
+    rc, out = install.ssh(host, "echo up", timeout=30, check=False)
+    if rc != 0:
+        if "Permission denied" in out:
             raise Abort(
-                f"board {board.strip()!r} is not {profile.openwrt_board!r}; "
-                "this updater only drives the reviewed profile")
-    rc, rel = install.ssh(host, "cat /etc/openwrt_release 2>/dev/null | "
-                                "grep DISTRIB_DESCRIPTION", check=False)
-    if rc == 0 and rel.strip():
-        log(f"[1] running: {rel.strip()}")
-    idx, label, _mtd = _find_ubi_kernel_mtd(host)
-    log(f"[1] idle kernel partition: mtd{idx} ({label}) -- never attached at "
-        "runtime, safe to reformat")
-    avail = _free_memory_kb(host)
-    if avail is not None:
-        log(f"[1] MemAvailable = {avail} KiB")
-    log("[1] pre-flight passed")
-    return idx
+                f"{host} refused the root password offered. Pass the current one "
+                "with --root-password. A router set to SSH keys only "
+                "(PasswordAuth off) is not supported: nothing was written.")
+        raise Abort(f"cannot log in to {host}: {out}")
+
+    board, rootfs = revert.state_of(host, profile)   # refuses any other board
+    log(f"[1] {host}: {board}, rootfs_type={rootfs}")
+    why = revert.require_nand_support(host, rel, profile, images_dir)
+    log(f"[1] NAND gate: PASS -- {why}")
+    if rootfs == "tmpfs":
+        return rootfs
+    if rootfs != "overlay":
+        raise Abort(f"rootfs_type is {rootfs!r}: neither the installed system "
+                    "nor the RAM installer, so nothing here applies")
+
+    _rc, mtd_text = install.ssh(host, "cat /proc/mtd")
+    if not install.permanent_system_matches(profile, board, rootfs, mtd_text):
+        raise Abort("the partition map is not this profile's OpenWrt layout: "
+                    f"expected {sorted(profile.openwrt_partitions)}\n{mtd_text}")
+    mtd = install.parse_mtd(mtd_text)
+    require_idle_kernel_partition(host, mtd)
+
+    ubi = images["initramfs_ubi"]
+    size = os.path.getsize(ubi["path"])
+    if size > mtd["ubi_kernel"]["size"]:
+        raise Abort(f"{ubi['name']} is {size} B, ubi_kernel holds "
+                    f"{mtd['ubi_kernel']['size']} B")
+    available = available_memory_kb(host)
+    needed = size // 1024 + MEMORY_MARGIN_KB
+    log(f"[1] {available} KiB available, the upload needs {needed} KiB")
+    if available < needed:
+        raise Abort(f"only {available} KiB of memory is available and the RAM "
+                    f"image needs {needed} KiB. Free some first, for example by "
+                    "stopping services you can spare, then run this again.")
+    return rootfs
 
 
-def backup(host, outdir, dump_kernel_mtd=None):
-    log("\n=== stage 2: backup ===")
-    install.ssh(host, "sysupgrade -b /tmp/config-backup.tar.gz")
-    local_cfg = os.path.join(outdir, "config-backup.tar.gz")
-    # Copy it off-box; /tmp does not survive the reboot.
-    scp_from(host, "/tmp/config-backup.tar.gz", local_cfg)
-    log(f"[b] config backup -> {local_cfg}")
-    if dump_kernel_mtd is not None:
-        # Optional rollback artifact: read the kernel volume back.  Best effort.
-        remote = "/tmp/old-kernel.bin"
-        rc, _ = install.ssh(
-            host,
-            f"ubidetach -d 9 >/dev/null 2>&1; "
-            f"ubiattach -m {dump_kernel_mtd} -d 9 >/dev/null 2>&1; "
-            f"dd if=/dev/ubi9_0 of={remote} bs=128k 2>/dev/null; "
-            f"ubidetach -d 9 >/dev/null 2>&1; echo done",
-            check=False)
-        if rc == 0:
-            try:
-                scp_from(host, remote,
-                                 os.path.join(outdir, "old-kernel.bin"))
-                log(f"[b] rollback kernel dump -> {outdir}/old-kernel.bin")
-            except Abort:
-                log("[b] (kernel rollback dump skipped: copy failed)")
-    return local_cfg
+def permanent_ssid(host, args, verify_transport):
+    """The network final verification waits on, known before anything is written.
 
-
-BOOT_FLAGS = (
-    ("boot_wait", "on"), ("uart_en", "1"), ("flag_boot_rootfs", "0"),
-    ("flag_last_success", "1"), ("flag_boot_success", "1"),
-    ("flag_try_sys1_failed", "8"), ("flag_try_sys2_failed", "8"),
-)
-
-
-def write_ram_installer(host, mtd_idx, ubi_path, itb_path, assume_yes):
-    log("\n=== stage 3: write RAM installer (first risk window) ===")
-    remote_ubi = "/tmp/initramfs-factory.ubi"
-    log(f"[3] uploading {os.path.basename(ubi_path)} -> {remote_ubi}")
-    install.scp_to(host, ubi_path, remote_ubi)
-
-    install.confirm(
-        f"ubiformat mtd{mtd_idx} with the RAM installer now? (recoverable over "
-        "UART if it tears)", assume_yes)
-
-    # Detach the write so it cannot die with the SSH session.
-    script = (
-        "#!/bin/sh\n"
-        "exec >/tmp/rd03v2-ubiformat.log 2>&1\n"
-        "echo running > /tmp/rd03v2-ubiformat.status\n"
-        f"ubiformat /dev/mtd{mtd_idx} -f {remote_ubi} -y\n"
-        "rc=$?\n"
-        "sync\n"
-        "if [ $rc = 0 ]; then echo done > /tmp/rd03v2-ubiformat.status\n"
-        "else echo fail:$rc > /tmp/rd03v2-ubiformat.status; fi\n"
-    )
-    _detach(host, script, "rd03v2-ubiformat")
-    log("[3] ubiformat launched detached; waiting for it to finish")
-
-    deadline = time.time() + 300
-    status = ""
-    while time.time() < deadline:
-        time.sleep(3)
-        rc, status = install.ssh(
-            host, "cat /tmp/rd03v2-ubiformat.status 2>/dev/null", check=False)
-        status = status.strip()
-        if status == "done":
-            break
-        if status.startswith("fail:"):
-            raise Abort(f"ubiformat failed on the box ({status}); the box is "
-                        "still bootable from its current kernel")
-    if status != "done":
-        raise Abort("ubiformat did not report completion within 300s; inspect "
-                    "/tmp/rd03v2-ubiformat.log over SSH before retrying")
-    log("[3] ubiformat reported done")
-
-    _verify_readback(host, mtd_idx, itb_path)
-    _set_boot_flags(host)
-
-    install.confirm("reboot into the RAM installer now?", assume_yes)
-    reboot = "#!/bin/sh\nsleep 2\nreboot\n"
-    _detach(host, reboot, "rd03v2-reboot")
-    log("[3] reboot launched detached; the box is coming up in the RAM "
-        "installer (default config: static 192.168.1.1, DHCP, NSS off)")
-
-
-def _verify_readback(host, mtd_idx, itb_path):
-    """Read the kernel volume back and prove the .itb is a byte-exact prefix.
-
-    The artifact's single volume is dynamic: it reads back the FIT image
-    followed by 0xff erase padding, so a whole-volume md5 can never match the
-    .itb.  Check the prefix md5 and that the tail is nothing but 0xff.
+    install.flash refuses without one, but only after the pivot, when the
+    installed kernel is already gone.
     """
-    itb_size = os.path.getsize(itb_path)
-    want_md5 = _md5_local(itb_path)
-    log(f"[3] verifying read-back (.itb is {itb_size} B, must be an exact "
-        "prefix of the kernel volume)")
-    # Attach the kernel MTD on a fixed, high device number: the rootfs UBI is
-    # already attached as ubi0 while we are still on the installed system, so
-    # we must not pick that one up.
-    dev = "/dev/ubi9_0"
-    cmd = (
-        f"ubidetach -d 9 >/dev/null 2>&1; "
-        f"ubiattach -m {mtd_idx} -d 9 >/dev/null 2>&1; "
-        f"head -c {itb_size} {dev} | md5sum | cut -d' ' -f1; "
-        f"tail -c +{itb_size + 1} {dev} | tr -d '\\377' | wc -c; "
-        f"ubidetach -d 9 >/dev/null 2>&1; true"
-    )
-    rc, out = install.ssh(host, cmd, check=False)
-    lines = [l.strip() for l in out.splitlines() if l.strip()]
-    if rc != 0 or len(lines) < 2:
-        raise Abort(f"could not read the kernel volume back for verification: "
-                    f"{out}")
-    got_md5, tail_nonff = lines[0], lines[-1]
-    if got_md5 != want_md5:
-        raise Abort(
-            "kernel read-back mismatch: the RAM installer was NOT written "
-            f"correctly.\n  got md5  {got_md5}\n  want md5 {want_md5}\n"
-            "Do not reboot; the box is still bootable from its current kernel.")
-    if tail_nonff != "0":
-        raise Abort(
-            f"kernel read-back has {tail_nonff} non-0xff bytes past the image; "
-            "the write is suspect, do not reboot")
-    log("[3] read-back verified: prefix md5 matches and the tail is pure erase "
-        "padding")
-
-
-def _md5_local(path):
-    import hashlib
-    h = hashlib.md5()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
-
-
-def _set_boot_flags(host):
-    # On an installed OpenWrt the U-Boot environment is written with
-    # `fw_setenv` (uboot-envtools), not the stock `nvram` tool.  This is the
-    # exact set the community no-UART guide and the sanctioned path use.  If
-    # the tool is missing we stop *before* the reboot, while the box is still
-    # bootable from its current kernel.
-    rc, _ = install.ssh(host, "command -v fw_setenv", check=False)
-    if rc != 0:
-        raise Abort(
-            "fw_setenv is not available on the router (install uboot-envtools: "
-            "`opkg update && opkg install uboot-envtools`). Not rebooting; the "
-            "box is still bootable from its current kernel.")
-    cmd = " && ".join(f"fw_setenv {k} {v}" for k, v in BOOT_FLAGS)
-    rc, out = install.ssh(host, cmd, check=False)
-    if rc != 0:
-        raise Abort(f"could not set the boot flags with fw_setenv ({out}); not "
-                    "rebooting")
-    log("[3] boot flags set via fw_setenv (boot_wait, flag_last_success, "
-        "try-counters, ...)")
-
-
-def flash(host, sysupgrade_path, config_tar, assume_yes):
-    log("\n=== stage 4: flash from the RAM installer (second risk window) ===")
-    avail = _free_memory_kb(host)
-    if avail is not None and avail < 30000:
-        log(f"[4] only {avail} KiB free; stopping non-essential services to "
-            "make room for the sysupgrade image")
-        install.ssh(
-            host,
-            "for s in rd03v2-watchdog odhcpd sysntpd uhttpd; do "
-            "/etc/init.d/$s stop 2>/dev/null; done; "
-            "sync; echo 3 > /proc/sys/vm/drop_caches", check=False)
-
-    remote_img = "/tmp/new.bin"
-    log(f"[4] uploading {os.path.basename(sysupgrade_path)} -> {remote_img}")
-    install.scp_to(host, sysupgrade_path, remote_img)
-    # Confirm the upload byte-for-byte before the write.
-    want = _sha256_local(sysupgrade_path)
-    rc, got = install.ssh(host, f"sha256sum {remote_img} | cut -d' ' -f1",
+    if verify_transport != "wifi":
+        return args.wifi_ssid
+    if not args.keep_settings:
+        raise Abort("a clean install leaves Wi-Fi disabled, so it cannot be "
+                    "verified over Wi-Fi. Connect a cable and pass "
+                    "--verify-interface, or keep the settings.")
+    if args.wifi_ssid:
+        return args.wifi_ssid
+    rc, out = install.ssh(host, "uci -q get wireless.@wifi-iface[0].ssid",
                           check=False)
-    if rc != 0 or got.strip() != want:
-        raise Abort("uploaded sysupgrade image failed its checksum on the box; "
-                    "nothing was flashed")
-    log("[4] upload sha256 verified on the box")
-
-    # Keep settings exactly like a normal sysupgrade: restore the config
-    # backup made in stage 2 (`sysupgrade -f backup`).  When the operator asked
-    # for a clean install, reset to defaults instead (`sysupgrade -n`).
-    if config_tar is not None:
-        remote_cfg = "/tmp/config-backup.tar.gz"
-        install.scp_to(host, config_tar, remote_cfg)
-        sysupgrade = f"sysupgrade -f {remote_cfg} {remote_img}"
-        log("[4] settings will be kept (restoring the stage-2 config backup)")
-    else:
-        sysupgrade = f"sysupgrade -n {remote_img}"
-        log("[4] clean install requested: settings will be reset to defaults "
-            "(a config backup was still saved to your computer in stage 2)")
-
-    rc, out = install.ssh(host, f"sysupgrade -T {remote_img}", check=False)
-    log(f"[4] sysupgrade -T: {out.strip() or 'ok'}")
-    if rc != 0:
-        raise Abort("sysupgrade refused the image (platform_check_image); "
-                    "nothing was flashed")
-
-    install.confirm(
-        "run sysupgrade now? THIS OVERWRITES THE SYSTEM (irreversible from "
-        "here; recoverable only over UART)", assume_yes)
-
-    # Detach sysupgrade: it reboots the box, which would kill our session.
-    script = (
-        "#!/bin/sh\n"
-        "sleep 2\n"
-        f"{sysupgrade}\n"
-    )
-    _detach(host, script, "rd03v2-sysupgrade")
-    log("[4] sysupgrade launched detached; the box will reformat both UBIs, "
-        "write the new kernel and rootfs, restore the config, and reboot")
+    ssid = out.strip()
+    if rc != 0 or not ssid:
+        raise Abort("cannot tell which SSID to rejoin after the update; pass it "
+                    "with --wifi-ssid, or verify over a cable with "
+                    "--verify-interface.")
+    return ssid
 
 
-# ---- driver -----------------------------------------------------------------
+def backup_config(host, outdir):
+    log("\n=== backup ===")
+    install.ssh(host, f"sysupgrade -b {REMOTE_BACKUP}", timeout=120)
+    local = os.path.join(outdir, "config-backup.tar.gz")
+    scp_from(host, REMOTE_BACKUP, local)
+    _rc, remote_sum = install.ssh(host, f"sha256sum {REMOTE_BACKUP}", timeout=60)
+    if release.sha256(local) not in remote_sum:
+        raise Abort("the config backup did not survive the copy off the box; "
+                    "nothing was written")
+    check_config_backup(local)
+    log(f"[b] config backup -> {local}")
+    return local
 
-def _sha256_local(path):
-    import hashlib
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            h.update(block)
-    return h.hexdigest()
 
+def wait_for_ram_system(host, interface, fallback, deadline_s=None):
+    """The RAM system's address, once that is provably what answers.
 
-def resolve_host(args, profile):
-    """Pick the address to talk to the running OpenWrt box on."""
-    if args.host:
-        return args.host
-    if args.transport == "wired" or (
-            args.discover and install.detect_transport(args.discover) == "wired"):
-        return profile.openwrt_host
-    if args.discover:
-        # Over Wi-Fi the box is on the user's own network; discover its
-        # link-local as a last resort.
+    The installed system keeps answering for a while after `reboot`, and it may
+    also have an empty root password, so answering proves nothing. Only tmpfs
+    does. The check offers nothing but the RAM system's empty password: a
+    refusal just means it is not up yet, and a wrong device learns nothing.
+    """
+    deadline_s = RAM_DEADLINE_S if deadline_s is None else deadline_s
+    log(f"[2] waiting up to {deadline_s}s for the RAM installer")
+    end = time.time() + deadline_s
+    last = note = None
+    while time.time() < end:
         try:
-            return install.discover_linklocal(args.discover, timeout=15)
-        except Abort:
-            pass
-    return profile.openwrt_host
+            rc, out = install.ssh(host, ROOTFS_TYPE, timeout=30, check=False,
+                                  passwords=install.RAM_PASSWORDS)
+        except subprocess.TimeoutExpired:
+            rc, out = 1, "ssh timed out"
+        if rc == 0 and out.strip() == "tmpfs":
+            log(f"[2] the RAM installer is up at {host}")
+            return host
+        note = f"{host}: {out.strip() or f'no answer (rc={rc})'}"
+        if note != last:
+            log(f"[2] not the RAM installer yet -- {note}")
+            last = note
+        time.sleep(5)
+        if interface:
+            try:
+                host = install.wait_and_discover(
+                    interface, deadline_s=min(30, max(1, int(end - time.time()))),
+                    fallback=fallback, router_gateway_ok=True)
+            except Abort as exc:
+                note = str(exc)
+    raise Abort(f"the RAM installer was not seen within {deadline_s}s, so nothing "
+                f"more was written. Last: {note}")
+
+
+def resume_hint(config_tar):
+    keep = (f"--config-backup {config_tar}" if config_tar
+            else "--no-keep-settings")
+    return ("The installed kernel has been replaced by the RAM installer, so the "
+            "router boots into that now. Reach it, then run this again with "
+            f"{keep} to continue; do not skip this step.")
 
 
 def run(args):
+    os.umask(0o077)
     profile = devices.get_profile(args.device)
-    wifi = (args.transport == "wifi"
-            or (args.discover and not args.no_wifi_initramfs
-                and args.transport == "auto"
-                and install.detect_transport(args.discover) == "wifi"))
+    args.image = {"default": "standard", "nss": "nss"}[args.flavour]
+
+    if args.config_backup:
+        args.config_backup = os.path.abspath(args.config_backup)
+        check_config_backup(args.config_backup)
+    if args.config_backup and not args.keep_settings:
+        raise Abort("--config-backup conflicts with --no-keep-settings")
+
+    # Which RAM installer to write depends on the link: the wired one has no
+    # radios and would strand a Wi-Fi laptop. So neither may be guessed.
+    args.discover = (args.discover
+                     or chain.local_interface(args.host or profile.openwrt_host))
+    if args.transport == "auto":
+        if args.discover:
+            args.transport = install.detect_transport(args.discover)
+        elif args.dry_run:
+            args.transport = "wired"
+            log("[*] no route to the router during dry-run; verifying wired images")
+    if not args.dry_run and not (args.discover and args.transport != "auto"):
+        raise Abort("cannot determine the router-facing interface; pass "
+                    "--interface IFACE")
+    args.verify_interface = args.verify_interface or args.discover
+    wifi = args.transport == "wifi"
+    log(f"[*] transport: {args.transport}"
+        + (f" via {args.discover}" if args.discover else ""))
 
     outdir = os.path.abspath(
         args.outdir or f"update-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
+    os.chmod(outdir, 0o700)
     chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
     log(f"[*] output -> {outdir}/")
 
-    # Resolve and verify the target release's image set (no router contact).
-    log(f"[*] resolving release {args.tag!r} for {profile.slug}")
-    rel = release.resolve(args.tag, profile, args.images, offline=args.offline)
-    log(f"[*] release {rel.tag} (published {rel.published})")
-    kinds = ("initramfs_ubi", "initramfs_itb", "sysupgrade")
-    images = release.get_images(rel, args.images, args.flavour, kinds, wifi=wifi)
-    ubi = images["initramfs_ubi"]["path"]
-    itb = images["initramfs_itb"]["path"]
-    sysimg = images["sysupgrade"]["path"]
-    log(f"[*] images verified: RAM={os.path.basename(ubi)} "
-        f"sys={os.path.basename(sysimg)} ({'Wi-Fi' if wifi else 'wired'} RAM "
-        "installer)")
+    rel = release.resolve(args.tag, profile, args.images, offline=args.offline,
+                          log=log)
+    log(f"[*] target release {rel.tag} ({rel.published})")
+    if wifi and "-wifi" not in " ".join(rel.assets):
+        raise Abort(f"{rel.tag} ships no Wi-Fi RAM installer; use a release with "
+                    "one, or connect a cable")
+    images = release.get_images(
+        rel, args.images, args.flavour,
+        ("initramfs_ubi", "initramfs_itb", "sysupgrade"), wifi=wifi)
+    if not all(item.get("verified") for item in images.values()):
+        raise Abort("the image set lacks trusted SHA-256 values")
+    ubi, itb = images["initramfs_ubi"]["path"], images["initramfs_itb"]["path"]
+    blob, _md5 = install.expected_volume(ubi, itb)
+    log(f"[*] images verified; RAM installer {len(blob)} B "
+        f"({'with' if wifi else 'without'} radios)")
 
     if args.dry_run:
-        log("[+] dry-run: release resolved, images downloaded and verified; "
-            "the router was not contacted")
+        log("[dry-run] router was not contacted")
         return 0
 
     if args.root_password:
         install.SSH_PASSWORDS.append(args.root_password)
+        restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
 
-    host = resolve_host(args, profile)
-    log(f"[*] talking to the running OpenWrt box at {host}")
-    rc, _ = install.ssh(host, "echo up", check=False)
-    if rc != 0:
-        raise Abort(f"cannot SSH into the running OpenWrt box at {host}; pass "
-                    "--host or --root-password, or check the cable/network")
+    # On a cable the router's own DHCP makes it this host's gateway. That is
+    # accepted only while all we would offer it is the empty password, the same
+    # rule as restore.locate; a configured one goes only to a link-local peer.
+    fallback = profile.openwrt_host if args.transport == "wired" else None
+    gateway_ok = args.transport == "wired" and not any(install.SSH_PASSWORDS)
+    host = args.host or install.wait_and_discover(
+        args.discover, deadline_s=120, fallback=fallback,
+        router_gateway_ok=gateway_ok)
 
-    mtd_idx = preflight(host, profile)
-    config_tar = backup(host, outdir,
-                        dump_kernel_mtd=mtd_idx if args.dump_kernel else None)
-    write_ram_installer(host, mtd_idx, ubi, itb, args.yes)
+    rootfs = preflight(host, profile, rel, images, args.images,
+                       router_iface=args.discover if gateway_ok else None)
+    verify_transport = install.detect_transport(args.verify_interface)
+    args.wifi_ssid = permanent_ssid(host, args, verify_transport)
 
-    # Wait for the RAM installer to come up.  Over Wi-Fi the user joins
-    # the installer network now; wired keeps the cable.
-    if wifi:
-        log(f"[*] join the RAM installer network {profile.installer_wifi_ssid!r} "
-            f"(key {profile.installer_wifi_key!r}); it appears only while the "
-            "RAM installer runs")
-    ram_host = RAM_HOST
-    if args.discover and not wifi:
-        ram_host = install.wait_and_discover(
-            args.discover, fallback=RAM_HOST, router_gateway_ok=True) or RAM_HOST
-    if not install.wait_for_openwrt(ram_host, router_iface=args.discover,
-                                    passwords=install.RAM_PASSWORDS):
-        raise Abort("the RAM installer did not come up; the box falls back to "
-                    "its current kernel on repeated boot failure")
-    log("[*] RAM installer is up (rootfs is tmpfs; sysupgrade is now allowed)")
+    if rootfs == "tmpfs":
+        # The config of a RAM system is the installer's defaults. Backing that up
+        # and restoring it would silently wipe the owner's settings.
+        log("[*] already in the RAM installer -- continuing an interrupted update")
+        if args.keep_settings and not args.config_backup:
+            raise Abort(
+                "this is the RAM installer, so its config is not yours. Pass "
+                "--config-backup with the config-backup.tar.gz the earlier run "
+                "saved, or --no-keep-settings to install clean.")
+        config_tar = args.config_backup if args.keep_settings else None
+    else:
+        if args.config_backup:
+            config_tar = args.config_backup
+            log(f"[*] restoring the given config backup: {config_tar}")
+            backup_config(host, outdir)      # still take one of what is there now
+        else:
+            config_tar = backup_config(host, outdir)
+        if not args.keep_settings:
+            config_tar = None
+            log("[*] clean install: settings will be reset to defaults; a backup "
+                f"of the current ones is in {outdir}")
 
-    # The RAM system has no password; flash() talks to it with RAM_PASSWORDS.
-    saved = install.SSH_PASSWORDS[:]
-    install.SSH_PASSWORDS[:] = list(install.RAM_PASSWORDS)
-    try:
-        flash(ram_host, sysimg,
-              config_tar if args.keep_settings else None, args.yes)
-    finally:
-        install.SSH_PASSWORDS[:] = saved
+    manifest = os.path.join(outdir, "resume.json")
+    install.write_resume_manifest(manifest, args, profile, rel, images,
+                                  secrets.token_hex(16), config_tar)
 
-    verify_iface = args.verify_interface or args.discover
-    fallback = profile.openwrt_host if not wifi else None
-    install.verify_permanent_system(
-        profile, interface=verify_iface,
-        fallback=fallback,
-        host=None if verify_iface else profile.openwrt_host)
-    log("[+] update complete: the new OpenWrt release is on NAND and your "
-        "configuration was migrated.")
+    if rootfs != "tmpfs":
+        log("\n=== stage 2: pivot into the RAM installer ===")
+        log("[2] there is no A/B fallback on an installed system: this overwrites "
+            "the installed kernel. Leave the power alone from here.")
+        if wifi:
+            log(f"[2] when this network disappears, join "
+                f"{profile.installer_wifi_ssid!r} with key "
+                f"{profile.installer_wifi_key!r}; the RAM system has a passwordless "
+                "root account, so keep the link isolated")
+        install.confirm(
+            f"overwrite ubi_kernel with {os.path.basename(ubi)} and reboot? From "
+            "here the only way out is finishing the update, or UART.", args.yes)
+        try:
+            host = revert.pivot_to_ram(
+                host, ubi, itb, args.discover, fallback=fallback,
+                recover_stale_lock=args.recover_stale_lock) or host
+            host = wait_for_ram_system(host, args.discover, fallback)
+        except Abort as exc:
+            raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
+    install.update_resume_phase(manifest, "pivot-complete")
+
+    install.flash(
+        host, rel, images, args.yes, profile, args.images, config_tar, manifest,
+        args.transport, args.verify_interface, args.wifi_ssid,
+        profile.openwrt_host if verify_transport == "wired" else None,
+        verify_transport,
+        router_iface=args.discover if args.transport == "wired" else None)
+    log("[+] update complete: "
+        + ("your settings were restored."
+           if config_tar else "the new release is running with default settings."))
     return 0
 
 
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="Update an installed OpenWrt build to a new release over "
-                    "SSH, without UART (scripted docs/no-uart-reflash.md).")
+        description="Update an installed OpenWrt to another release over SSH, "
+                    "without UART.")
     ap.add_argument("--release", "--tag", dest="tag", default=None,
                     help="target release tag or 'latest' (default: latest)")
     ap.add_argument("--interface", "--discover", dest="discover", metavar="IFACE",
-                    help="router-facing interface (for rediscovery after reboot)")
+                    help="router-facing interface (normally detected)")
     ap.add_argument("--transport", choices=("auto", "wired", "wifi"),
-                    default="auto", help="update transport (default: detect)")
+                    default="auto", help="connection type (default: detect)")
     ap.add_argument("--host", default=None,
-                    help="running OpenWrt address (default: profile LAN address)")
+                    help="the router, preferably fe80::...%%iface (default: "
+                         "find it on the interface)")
     ap.add_argument("--root-password", default=None,
-                    help="current root password of the running OpenWrt box")
-    ap.add_argument("--flavour", choices=("default", "nss"), default="default",
-                    help="image flavour for v1.x releases (v2 ships one image)")
+                    help="current root password, if one is set")
     ap.add_argument("--verify-interface", metavar="IFACE",
-                    help="interface for permanent-system verification")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="resolve and verify the image set; do not contact the "
-                         "router")
-    ap.add_argument("--yes", action="store_true",
-                    help="skip the write/reboot confirmation prompts")
+                    help="interface for the final check (default: --interface)")
+    ap.add_argument("--wifi-ssid", default=None,
+                    help="network to rejoin after the update, when the final "
+                         "check is over Wi-Fi (default: read from the router)")
     ap.add_argument("--no-keep-settings", dest="keep_settings",
                     action="store_false", default=True,
-                    help="do a clean install (sysupgrade -n) instead of "
-                         "restoring the config backup; a backup is still saved "
-                         "to your computer")
-    ap.add_argument("--dump-kernel", action="store_true",
-                    help="also dump the current kernel volume as a rollback "
-                         "artifact during backup")
+                    help="install clean instead of restoring the config; a "
+                         "backup of it is still saved here")
+    ap.add_argument("--config-backup", metavar="TAR_GZ", default=None,
+                    help="restore this sysupgrade -b archive; needed to continue "
+                         "from the RAM installer")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="download and verify the images; do not contact the "
+                         "router")
+    ap.add_argument("--yes", action="store_true",
+                    help="skip the confirmation prompts")
     ap.add_argument("--offline", action="store_true",
-                    help="use the verified image cache; do not contact GitHub")
-    ap.add_argument("--no-wifi-initramfs", action="store_true",
-                    help="use the radio-silent RAM installer (wired only)")
-    ap.add_argument("--device", default="rd03v2",
-                    choices=tuple(devices.PROFILES),
+                    help="use the verified image cache; needs an explicit tag")
+    ap.add_argument("--flavour", choices=("default", "nss"), default="default",
+                    help="image flavour for v1.x releases (v2 ships one image)")
+    ap.add_argument("--recover-stale-lock", action="store_true",
+                    help="clear an inactive stale writer lock after inspection")
+    ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),
                     help="device profile")
     ap.add_argument("--images", default="images", help="image cache directory")
     ap.add_argument("--outdir", default=None, help="run output directory")
     args = ap.parse_args(argv)
     args.tag = args.tag or devices.get_profile(args.device).default_release
-    if args.no_wifi_initramfs and args.transport == "wifi":
-        ap.error("--transport wifi conflicts with --no-wifi-initramfs")
     return args
 
 
 def main(argv=None):
-    os.umask(0o077)
     return run(parse_args(argv))
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (Abort, ChainError, release.ReleaseError) as e:
+    except (Abort, ChainError, release.ReleaseError, restore.RestoreError,
+            subprocess.TimeoutExpired) as e:
         log(f"[-] {e}")
         sys.exit(1)
     except KeyboardInterrupt:

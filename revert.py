@@ -160,9 +160,10 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     log(f"[1] read-back md5 {got_md5}")
     if got_md5 != want_md5:
         raise restore.RestoreError(
-            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: the "
-            "boot flags still point at the installed system, so it is still "
-            "bootable. Re-run to retry the write.")
+            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "
+            "ubi_kernel held the installed kernel and now holds a bad write, so "
+            "nothing bootable is left there. The running system is fine until it "
+            "reboots. Re-run now to retry the write.")
     log("[1] read-back matches the image byte for byte")
 
     install.ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
@@ -180,6 +181,19 @@ def state_of(host, profile):
             f"this is not {profile.display_name} running its supported port")
     _rc, rtype = restore.ssh(host, ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type")
     return board.strip(), rtype.strip()
+
+
+def require_nand_support(host, rel, profile, images_dir):
+    """Refuse a release whose kernel cannot probe this unit's flash."""
+    rc, raw_ft = install.ssh(
+        host, "fw_printenv -n flash_type 2>/dev/null", check=False)
+    if rc != 0 or not raw_ft.strip():
+        rc, raw_ft = install.ssh(
+            host, "fw_printenv flash_type 2>/dev/null", check=False)
+        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
+    _ft, _part, why = install.require_permanent_nand_support(
+        raw_ft, rel, profile, images_dir)
+    return why
 
 
 def main():
@@ -242,14 +256,7 @@ def main():
     board, rtype = state_of(host, profile)
     log(f"[*] {host}: {board}, rootfs_type={rtype}")
 
-    rc, raw_ft = install.ssh(
-        host, "fw_printenv -n flash_type 2>/dev/null", check=False)
-    if rc != 0 or not raw_ft.strip():
-        rc, raw_ft = install.ssh(
-            host, "fw_printenv flash_type 2>/dev/null", check=False)
-        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
-    _ft, _part, why = install.require_permanent_nand_support(
-        raw_ft, rel, profile, args.images)
+    why = require_nand_support(host, rel, profile, args.images)
     log(f"[*] RAM-image NAND gate: PASS -- {why}")
 
     if rtype != "tmpfs":

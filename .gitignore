@@ -5,6 +5,7 @@
 # first-boot tarball. None of it belongs in a repo.
 probe-*/
 install-*/
+update-*/
 *.log
 
 # Release images: tens of MB, published upstream, and fetched on demand by
