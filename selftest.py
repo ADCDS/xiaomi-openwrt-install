@@ -35,7 +35,9 @@ import chain
 import channel
 import devices
 import release
+import install
 import probe
+import restore
 import ubiparse
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -1935,6 +1937,563 @@ def test_expected_volume():
           and md5 != hashlib.md5(open(itb[0], "rb").read()).hexdigest())
 
 
+# ---- updater.py -------------------------------------------------------------
+
+
+class _UpdateBox:
+    """An installed RD03v2 as updater.py sees it over SSH.
+
+    After the pivot the old system keeps answering for `lingers` more calls,
+    which is what a real `reboot` does, before landing in `lands_in`.
+    """
+    MTD = ('dev:    size   erasesize  name\n'
+           'mtd18: 02400000 00020000 "ubi_kernel"\n'
+           'mtd19: 05180000 00020000 "rootfs"\n')
+
+    def __init__(self, password="", rootfs="overlay", board=None, board_rc=0,
+                 mtd=MTD, attached="19", lingers=0, lands_in="tmpfs",
+                 memory=90000, ssid="Home", bad_copy=False):
+        self.password, self.rootfs = password, rootfs
+        self.board = devices.RD03V2.openwrt_board if board is None else board
+        self.board_rc, self.mtd, self.attached = board_rc, mtd, attached
+        self.lingers, self.lands_in, self.pivoted = lingers, lands_in, False
+        self.memory, self.ssid, self.bad_copy = memory, ssid, bad_copy
+        self.commands, self.offered, self.backup = [], [], None
+
+    def pivot(self):
+        self.pivoted = True
+
+    def ssh(self, host, cmd, timeout=120, check=True, passwords=None):
+        offered = list(install.SSH_PASSWORDS if passwords is None else passwords)
+        self.offered.append(offered)
+        if self.pivoted:
+            if self.lingers:
+                self.lingers -= 1
+            else:
+                self.rootfs = self.lands_in
+                if self.rootfs == "tmpfs":
+                    self.password = ""
+        if self.password not in offered:
+            rc, out = 255, "root@box: Permission denied (publickey,password)."
+        else:
+            self.commands.append(cmd)
+            rc, out = self.answer(cmd)
+        if check and rc:
+            raise install.Abort(f"ssh {cmd!r} failed: {out}")
+        return rc, out
+
+    def answer(self, cmd):
+        if "board_name" in cmd:
+            return (self.board_rc, self.board if self.board_rc == 0 else "")
+        if "rootfs_type" in cmd:
+            return 0, self.rootfs
+        if "/proc/mtd" in cmd:
+            return 0, self.mtd
+        if "mtd_num" in cmd:
+            return 0, self.attached
+        if "MemAvailable" in cmd:
+            return 0, f"MemAvailable:   {self.memory} kB"
+        if "flash_type" in cmd:
+            return 0, "11"
+        if "uci -q get wireless" in cmd:
+            return (0, self.ssid) if self.ssid else (1, "")
+        if "sha256sum" in cmd:
+            return 0, "0" * 64 if self.bad_copy else release.sha256(self.backup)
+        return 0, "up" if "echo up" in cmd else ""
+
+
+def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(True, "ok"),
+                backup=None, deadline=None, pivot_error=None):
+    """updater.main() against `box`; returns what it did and how it ended."""
+    import contextlib
+    import types
+    import updater
+    outcome = types.SimpleNamespace(flash=None, pivots=0, error=None, wifi=[],
+                                    rootfs_at_flash=None, output="", manifest=None)
+    with tempfile.TemporaryDirectory() as tmp:
+        images = {}
+        for kind in ("initramfs_ubi", "initramfs_itb", "sysupgrade"):
+            path = os.path.join(tmp, kind)
+            with open(path, "wb") as fh:
+                fh.write(kind.encode())
+            images[kind] = {"name": kind, "path": path, "sha256": "x", "verified": True}
+        good = os.path.join(tmp, "good.tar.gz")
+        with tarfile.open(good, "w:gz") as tf:
+            body = b"config system\n"
+            info = tarfile.TarInfo("etc/config/system")
+            info.size = len(body)
+            tf.addfile(info, io.BytesIO(body))
+
+        def fake_scp_from(host, remote, local):
+            if backup == "garbage":
+                with open(local, "wb") as fh:
+                    fh.write(b"not a tar")
+            else:
+                shutil.copy(good, local)
+            box.backup = local
+
+        def fake_pivot(host, ubi, itb, iface, dry_run=False, fallback=None,
+                       recover_stale_lock=False):
+            outcome.pivots += 1
+            if pivot_error:
+                raise pivot_error
+            box.pivot()
+            return "fe80::1%eth0"
+
+        def fake_flash(*args, **kwargs):
+            outcome.flash = {"host": args[0], "cfg": args[6], "manifest": args[7],
+                             "transport": args[8], "verify": args[9], "ssid": args[10],
+                             "router_iface": kwargs.get("router_iface")}
+            outcome.rootfs_at_flash = box.rootfs
+            with open(args[7]) as fh:
+                outcome.manifest = json.load(fh)
+
+        def fake_get_images(rel, destdir, flavour, kinds, wifi=False):
+            outcome.wifi.append(wifi)
+            return images
+
+        saved_passwords = install.SSH_PASSWORDS[:], restore.SSH_PASSWORDS[:]
+        umask = os.umask(0o022)
+        stdout = io.StringIO()
+        rel = types.SimpleNamespace(tag="v2.1.1", published="today",
+                                    assets=["x-wifi.ubi"], profile=devices.RD03V2)
+        transports = transports or {}
+        patches = [
+            mock.patch.object(install, "ssh", box.ssh),
+            mock.patch.object(restore, "ssh",
+                              lambda h, c, timeout=180, check=True: box.ssh(h, c, timeout, check)),
+            mock.patch.object(install, "ssh_banner", return_value=("SSH-2.0-dropbear", None)),
+            mock.patch.object(install, "default_routes", return_value=list(routes)),
+            mock.patch.object(install.chain, "local_interface", return_value=route),
+            mock.patch.object(install, "detect_transport",
+                              lambda i, **k: transports.get(i, "wired")),
+            mock.patch.object(install, "wait_and_discover", return_value="fe80::1%eth0"),
+            mock.patch.object(release, "resolve", return_value=rel),
+            mock.patch.object(release, "get_images", fake_get_images),
+            mock.patch.object(release, "check_nand", return_value=nand),
+            mock.patch.object(install, "expected_volume", return_value=(b"x", "md5")),
+            mock.patch.object(updater.revert, "pivot_to_ram", fake_pivot),
+            mock.patch.object(install, "flash", fake_flash),
+            mock.patch.object(updater, "scp_from", fake_scp_from),
+            mock.patch.object(updater.time, "sleep"),
+        ]
+        if deadline is not None:
+            patches.append(mock.patch.object(updater, "RAM_DEADLINE_S", deadline))
+        for patch in patches:
+            patch.start()
+        try:
+            with contextlib.redirect_stdout(stdout):
+                arguments = list(argv) + ["--outdir", os.path.join(tmp, "out"), "--yes"]
+                arguments = [good if item == "GOOD_BACKUP" else item for item in arguments]
+                updater.main(arguments)
+        except (install.Abort, restore.RestoreError) as exc:
+            outcome.error = str(exc)
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+            chain.set_log_sink(None)
+            install.SSH_PASSWORDS[:], restore.SSH_PASSWORDS[:] = saved_passwords
+            os.umask(umask)
+        outcome.output = stdout.getvalue()
+        outcome.good_backup = good
+    return outcome
+
+
+def _wrote_nothing(box, outcome):
+    return outcome.pivots == 0 and outcome.flash is None and not any(
+        "sysupgrade -b" in cmd for cmd in box.commands)
+
+
+def test_updater():
+    print("\n[updater: nothing is written unless every gate passes]")
+    wired = ["--interface", "eth0"]
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, nand=(False, "this release cannot drive this flash"))
+    check("the NAND gate runs before any write", _wrote_nothing(box, r)
+          and "cannot drive" in (r.error or ""), r.error or "")
+
+    box = _UpdateBox(board="some,other-router")
+    r = _run_update(box, wired)
+    check("another board is refused", _wrote_nothing(box, r) and "board_name" in (r.error or ""))
+
+    box = _UpdateBox(board_rc=1)
+    r = _run_update(box, wired)
+    check("a failing board_name fails closed", _wrote_nothing(box, r) and r.error is not None)
+
+    box = _UpdateBox(mtd='mtd3: 02400000 00020000 "kernel"\n')
+    r = _run_update(box, wired)
+    check("an MTD merely named 'kernel' is not ubi_kernel",
+          _wrote_nothing(box, r) and "partition map" in (r.error or ""))
+
+    box = _UpdateBox(attached="18")
+    r = _run_update(box, wired)
+    check("a ubi_kernel with a UBI attached is refused",
+          _wrote_nothing(box, r) and "attached" in (r.error or ""))
+
+    box = _UpdateBox(attached="")
+    r = _run_update(box, wired)
+    check("unreadable UBI attachments fail closed",
+          _wrote_nothing(box, r) and "mtd_num" in (r.error or ""))
+
+    box = _UpdateBox(memory=1000)
+    r = _run_update(box, wired)
+    check("too little memory for the upload is refused",
+          _wrote_nothing(box, r) and "memory" in (r.error or ""))
+
+    box = _UpdateBox(password="set-by-owner")
+    r = _run_update(box, wired)
+    check("a refused password stops at pre-flight and says what to do",
+          _wrote_nothing(box, r) and "--root-password" in (r.error or "")
+          and "keys only" in r.error)
+
+    box = _UpdateBox()
+    r = _run_update(box, ["--host", "192.168.1.1", "--root-password", "secret"] + wired,
+                    routes=[("192.168.1.1", "eth0")])
+    check("this host's own gateway never gets offered the password",
+          _wrote_nothing(box, r) and not box.offered and "gateway" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, backup="garbage")
+    check("an unreadable config backup stops before the pivot",
+          r.pivots == 0 and r.flash is None and "config backup" in (r.error or ""))
+
+    box = _UpdateBox(bad_copy=True)
+    r = _run_update(box, wired)
+    check("a config backup damaged in the copy stops before the pivot",
+          r.pivots == 0 and "did not survive" in (r.error or ""))
+
+    box = _UpdateBox()
+    r = _run_update(box, ["--dry-run"] + wired)
+    check("a dry run never contacts the router",
+          r.error is None and not box.offered and r.pivots == 0)
+
+    print("\n[updater: the reboot is not mistaken for the RAM installer]")
+    box = _UpdateBox(password="secret", lingers=4)
+    r = _run_update(box, wired + ["--root-password", "secret"])
+    check("a password-protected old system refusing the RAM password is only 'not yet'",
+          r.error is None and r.flash is not None, r.error or "")
+    check("the flash runs only once tmpfs answers", r.rootfs_at_flash == "tmpfs")
+    check("the kept config reaches sysupgrade",
+          r.flash and (r.flash["cfg"] or "").endswith("config-backup.tar.gz"))
+    check("the RAM polls offered nothing but the empty password",
+          [""] in box.offered and box.offered[-1] == [""])
+    check("the manifest allows install.py --verify-only to continue",
+          r.manifest and r.manifest["phase"] == "pivot-complete"
+          and r.manifest["root_password_set"] is True)
+    check("a wired flash may accept the router as its cable's gateway",
+          r.flash and r.flash["router_iface"] == "eth0")
+
+    box = _UpdateBox(lingers=4)
+    r = _run_update(box, wired)
+    check("an old system with no password does not pass for the RAM installer",
+          r.error is None and r.rootfs_at_flash == "tmpfs", r.error or "")
+
+    box = _UpdateBox(lands_in="overlay")
+    r = _run_update(box, wired, deadline=0.05)
+    check("a box that came back on NAND is never flashed",
+          r.flash is None and "not seen" in (r.error or ""))
+    check("that failure says how to continue", "--config-backup" in (r.error or ""))
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=install.Abort("nothing appeared on eth0"))
+    check("losing the box after the pivot says how to continue",
+          "nothing appeared" in (r.error or "") and "--config-backup" in r.error
+          and "replaced" in r.error)
+
+    print("\n[updater: continuing from the RAM installer]")
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired)
+    check("the RAM system's defaults are never taken for the owner's config",
+          r.flash is None and r.pivots == 0 and "--config-backup" in (r.error or "")
+          and not any("sysupgrade -b" in c for c in box.commands))
+
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--config-backup", "GOOD_BACKUP"])
+    check("a saved backup continues without a second pivot",
+          r.error is None and r.pivots == 0 and r.flash
+          and r.flash["cfg"] == r.good_backup, r.error or "")
+
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--no-keep-settings"])
+    check("a clean install continues without a backup",
+          r.error is None and r.pivots == 0 and r.flash and r.flash["cfg"] is None,
+          r.error or "")
+
+    print("\n[updater: the RAM installer matches the link]")
+    box = _UpdateBox()
+    r = _run_update(box, [], route="wlan0", transports={"wlan0": "wifi"})
+    check("a Wi-Fi laptop gets the installer with radios, unasked",
+          r.wifi == [True] and r.flash and r.flash["transport"] == "wifi", r.error or "")
+    check("the SSID to rejoin is learned before the write",
+          r.flash and r.flash["ssid"] == "Home")
+    check("no cable means no gateway exception",
+          r.flash and r.flash["router_iface"] is None)
+
+    box = _UpdateBox()
+    r = _run_update(box, [], route=None)
+    check("no route and no --interface stops before contacting anything",
+          r.pivots == 0 and not box.offered and "--interface" in (r.error or ""))
+
+    box = _UpdateBox()
+    r = _run_update(box, ["--no-keep-settings"], route="wlan0",
+                    transports={"wlan0": "wifi"})
+    check("a clean install cannot be verified over the Wi-Fi it turns off",
+          _wrote_nothing(box, r) and "clean install" in (r.error or ""))
+
+    box = _UpdateBox(ssid="")
+    r = _run_update(box, [], route="wlan0", transports={"wlan0": "wifi"})
+    check("an unknown SSID stops before the kernel is overwritten",
+          _wrote_nothing(box, r) and "--wifi-ssid" in (r.error or ""))
+
+    box = _UpdateBox()
+    r = _run_update(box, ["--verify-interface", "eth1"], route="wlan0",
+                    transports={"wlan0": "wifi", "eth1": "wired"})
+    check("Wi-Fi out, cable back: a clean-config check on the cable is allowed",
+          r.flash and r.flash["verify"] == "eth1" and r.flash["ssid"] is None,
+          r.error or "")
+
+
+# ---- gui/ -------------------------------------------------------------------
+
+
+def _gui_modules():
+    gui = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui")
+    if gui not in sys.path:
+        sys.path.insert(0, gui)
+    import app as gui_app
+    import prereqs as gui_prereqs
+    import runner as gui_runner
+    return gui, gui_app, gui_prereqs, gui_runner
+
+
+def test_gui_runner():
+    print("\n[gui: runner]")
+    _gui, _app, _prereqs, runner = _gui_modules()
+
+    argv = runner.build_argv("update", {"release": "latest", "wifi_ssid": "Home",
+                                        "root_password": "pw", "dry_run": False})
+    check("an update carries the current password and no Wi-Fi settings",
+          "--root-password" in argv and not any("wifi" in a for a in argv))
+    check("the tools run under this interpreter", argv[0] == sys.executable)
+    check("a real run answers the confirmations up front", "--yes" in argv)
+    check("a dry run does not",
+          "--yes" not in runner.build_argv("install", {"dry_run": True}))
+
+    for mode, opts, why in (
+            ("revert", {"interface": "eth0"}, "image"),
+            ("revert", {"stock_image": __file__}, "interface"),
+            ("install", {"interface": "eth0; reboot"}, "interface"),
+            ("install", {"release": "v1 && x"}, "tag"),
+            ("nonsense", {}, "mode")):
+        try:
+            runner.build_argv(mode, opts)
+            check(f"{mode} {sorted(opts)} is refused", False)
+        except ValueError as exc:
+            check(f"{mode} {sorted(opts)} is refused", why in str(exc), str(exc))
+
+    run = runner.Run("install", {"root_password": "hunter2", "wifi_key": "hunter3",
+                                 "wifi_ssid": "Home", "wifi_country": "RU"})
+    check("secrets never leave in the shown command",
+          "hunter" not in run.shown_argv and "Home" in run.shown_argv, run.shown_argv)
+    check("...but the tool itself still gets them", "hunter2" in run.argv)
+
+    print("\n[gui: stages follow the tools' real banners]")
+    banners = {
+        "=== stage 1: pre-flight (nothing is written) ===": "preflight",
+        "=== backup ===": "backup",
+        "=== stage 2: pivot (writes the idle slot and the boot flags) ===": "pivot",
+        "=== stage 2: pivot into the RAM installer ===": "pivot",
+        "=== stage 3: flash (sysupgrade from the RAM system) ===": "flash",
+        "=== step 1: pivot into the RAM initramfs ===": "pivot",
+        "=== step 2: restore stock ===": "flash",
+        "=== step 3: wait for stock ===": "verify",
+    }
+    root = os.path.dirname(os.path.abspath(__file__))
+    source = "".join(open(os.path.join(root, name)).read()
+                     for name in ("install.py", "revert.py", "updater.py"))
+    for banner, stage in banners.items():
+        run = runner.Run("install", {})
+        run._interpret(banner)
+        check(f"{stage}: {banner[4:-4]}",
+              run.stage == stage and banner in source.replace('\\n', ''))
+
+    # Asked directly: under a test runner with no terminal, isatty() is false
+    # whether or not stdin was handled.
+    run = runner.Run("install", {})
+    with mock.patch.object(runner.subprocess, "Popen") as popen, \
+            mock.patch.object(runner.threading, "Thread"):
+        run.start()
+    kwargs = popen.call_args.kwargs
+    check("a tool can never wait on a prompt: its stdin is /dev/null",
+          kwargs.get("stdin") == subprocess.DEVNULL)
+    check("the tools run in English, whatever this system's language",
+          kwargs["env"].get("XIAOMI_INSTALL_LANG") == "en")
+
+    run = runner.Run("install", {})
+    run._interpret("=== stage 1: pre-flight (nothing is written) ===")
+    check("cancel stays possible before anything is written", run.cancellable)
+    run._interpret("=== stage 2: pivot into the RAM installer ===")
+    check("cancel is refused from the pivot on", not run.cancellable
+          and run.cancel() == (False, "unsafe"))
+
+    run = runner.Run("install", {})
+    run._interpret("[2] Wi-Fi-only: when the stock network disappears, join 'A' with key 'b'")
+    check("the Wi-Fi join banner is recognised",
+          any(e["type"] == "wifi" and e["ssid"] == "A" and e["key"] == "b" for e in run.events))
+    run = runner.Run("install", {})
+    run._interpret("[*] output -> /home/me/my runs/install-1/")
+    check("an output path with spaces survives",
+          any(e.get("path") == "/home/me/my runs/install-1/" for e in run.events))
+
+
+def test_gui_strings():
+    print("\n[gui: every string exists in both languages]")
+    gui, _app, prereqs, runner = _gui_modules()
+    with open(os.path.join(gui, "static", "strings.json"), encoding="utf-8") as fh:
+        strings = json.load(fh)
+    with open(os.path.join(gui, "static", "app.js"), encoding="utf-8") as fh:
+        script = fh.read()
+    with open(os.path.join(gui, "static", "index.html"), encoding="utf-8") as fh:
+        page = fh.read()
+
+    check("English and Russian define the same keys",
+          set(strings["en"]) == set(strings["ru"]),
+          str(set(strings["en"]) ^ set(strings["ru"])))
+    import re
+    placeholders = lambda text: set(re.findall(r"\{(\w+)\}", text))
+    different = [k for k in strings["en"]
+                 if placeholders(strings["en"][k]) != placeholders(strings["ru"].get(k, ""))]
+    check("placeholders match across languages", not different, str(different))
+    untranslated = [k for k in strings["en"] if not strings["ru"].get(k, "").strip()]
+    check("nothing is left blank", not untranslated, str(untranslated))
+
+    used = set(re.findall(r'data-i18n(?:-placeholder)?="([^"]+)"', page))
+    # Any dotted literal in the script: keys also travel through variables.
+    used |= set(re.findall(r'"([a-z_0-9]+(?:\.[a-z_0-9]+)+)"', script)) - {"strings.json"}
+    used |= {f"stage.{s}" for s in runner.STAGES}
+    used |= {f"prereq.{c['id']}" for c in prereqs.collect()["checks"]}
+    used |= {f"prereq.platform.{p}" for p in ("linux", "wsl", "windows", "macos", "other")}
+    for mode in ("install", "update", "revert"):
+        used |= {f"config.lede.{mode}", f"review.action.{mode}", f"mode.{mode}.h"}
+    used |= {"cancel.unsafe", "cancel.not_running"}     # `cancel.${code}` from the server
+    missing = sorted(key for key in used if key not in strings["en"])
+    check("every key the page uses exists", not missing, str(missing))
+    unused = sorted(set(strings["en"]) - used)
+    check("no key is left unused", not unused, str(unused))
+
+    check("nothing is ever assigned as HTML", not re.search(
+        r"\.(?:inner|outer)HTML\s*\+?=|insertAdjacentHTML|document\.write", script))
+    check("the page has no inline script or style for the CSP to refuse",
+          "<script>" not in page and "style=" not in page and "onclick=" not in page)
+    check("secrets are password fields",
+          all(f'id="{name}" type="password"' in page
+              for name in ("wifi-key", "root-password", "current-password")))
+    check("the false A/B claim on the revert card is gone",
+          "A/B" not in strings["en"]["mode.revert.tag"]
+          and "A/B" not in strings["ru"]["mode.revert.tag"])
+    check("the typed confirmation differs from a stray keystroke in both languages",
+          len(strings["en"]["confirm.word"]) > 3 and len(strings["ru"]["confirm.word"]) > 3)
+
+
+def test_gui_server():
+    print("\n[gui: server]")
+    import http.client
+    _gui, app, _prereqs, runner = _gui_modules()
+    server = app.Server(("127.0.0.1", 0), app.Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def call(method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=20)
+        conn.putrequest(method, path, skip_accept_encoding=True)
+        for name, value in (headers or {}).items():
+            conn.putheader(name, value)
+        data = json.dumps(body).encode() if body is not None else b""
+        conn.putheader("Content-Length", str(len(data)))
+        conn.endheaders(data)
+        response = conn.getresponse()
+        payload = response.read()
+        conn.close()
+        return response, payload
+
+    def api(path):
+        return f"{path}{'&' if '?' in path else '?'}t={app.TOKEN}"
+
+    def wait_all_finished():
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if all(r.finished for r in runner._RUNS.values()):
+                return
+            time.sleep(0.05)
+
+    try:
+        response, body = call("GET", "/?t=x")
+        check("the page is served without a token", response.status == 200 and b"<html" in body)
+        check("the page carries a CSP and no referrer",
+              "default-src 'self'" in (response.getheader("Content-Security-Policy") or "")
+              and response.getheader("Referrer-Policy") == "no-referrer")
+        response, _ = call("GET", "/strings.json")
+        check("translations are served as JSON", response.status == 200
+              and "json" in response.getheader("Content-Type"))
+        # Files that really exist out there, or the 404 would prove nothing.
+        for path in ("/../app.py", "/%2e%2e/app.py", "/..%2fapp.py", "/..%5capp.py",
+                     "/static/../../app.py", "/../../updater.py"):
+            response, body = call("GET", path)
+            check(f"no escape from the static directory: {path}",
+                  response.status == 404 and b"import" not in body)
+
+        response, _ = call("GET", "/api/prereqs")
+        check("the API refuses a missing token", response.status == 403)
+        response, _ = call("GET", "/api/prereqs?t=%D0%B9")
+        check("a non-ASCII token is a refusal, not a crash", response.status == 403)
+        response, body = call("GET", api("/api/prereqs"))
+        check("the API answers with the token", response.status == 200
+              and "platform" in json.loads(body))
+        response, _ = call("POST", api("/api/run"), {"mode": "nonsense"})
+        check("a bad request is a 400", response.status == 400)
+
+        script = ("import sys, time\n"
+                  "print('stdin is a tty:', sys.stdin.isatty(), flush=True)\n"
+                  "print('=== stage 1: pre-flight ===', flush=True)\n"
+                  "time.sleep(0.6)\n")
+        with mock.patch.object(runner, "build_argv",
+                               return_value=[sys.executable, "-c", script]):
+            response, body = call("POST", api("/api/run"), {"mode": "install", "options": {}})
+            run_id = json.loads(body).get("run_id")
+            check("a run starts", response.status == 200 and bool(run_id))
+            response, body = call("POST", api("/api/run"), {"mode": "install", "options": {}})
+            check("a second run while one is active is refused",
+                  response.status == 409 and json.loads(body).get("code") == "busy")
+            wait_all_finished()
+            response, body = call("GET", api(f"/api/stream/{run_id}"))
+            events = [json.loads(line[6:]) for line in body.decode().splitlines()
+                      if line.startswith("data: ")]
+            ids = [line[4:] for line in body.decode().splitlines() if line.startswith("id: ")]
+            logs = [e["line"] for e in events if e["type"] == "log"]
+            check("a tool's output reaches the stream",
+                  "stdin is a tty: False" in logs, str(logs))
+            check("the stream ends with the outcome",
+                  events and events[-1]["type"] == "done" and events[-1]["ok"] is True)
+            check("the stage tracker is fed",
+                  any(e["type"] == "stage" and e["stage"] == "preflight" for e in events))
+            response, body = call("GET", api(f"/api/stream/{run_id}"),
+                                  headers={"Last-Event-ID": ids[-2]})
+            again = [json.loads(line[6:]) for line in body.decode().splitlines()
+                     if line.startswith("data: ")]
+            check("a reconnecting browser does not replay the log",
+                  len(again) == 1 and again[0]["type"] == "done", str(len(again)))
+            response, _ = call("POST", api("/api/run"), {"mode": "install", "options": {}})
+            check("the next run may start once it finished", response.status == 200)
+            wait_all_finished()
+    finally:
+        server.shutdown()
+        server.server_close()
+        wait_all_finished()
+        runner._RUNS.clear()
+
+
 def main():
     t0 = time.time()
     test_profiles()
@@ -1965,6 +2524,10 @@ def main():
     test_tagged_revert_cache()
     test_stock_image()
     test_expected_volume()
+    test_updater()
+    test_gui_runner()
+    test_gui_strings()
+    test_gui_server()
     test_channel()
     print(f"\n{len(PASS)} passed, {len(FAIL)} failed, {len(SKIP)} skipped "
           f"in {time.time() - t0:.1f}s")

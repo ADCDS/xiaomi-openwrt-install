@@ -117,6 +117,39 @@ python3 install.py --verify-only /path/to/resume.json \
     --verify-interface INTERFACE_NAME
 ```
 
+## Update an installed system
+
+```sh
+python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
+```
+
+This updates an installed OpenWrt to the latest release of the port, keeping its
+settings like `sysupgrade` does. Use `--release TAG` for a specific one,
+`--no-keep-settings` for a clean install, and `--dry-run` to only download and
+verify the images. An in-place `sysupgrade` bricks this board, so the update goes
+through the RAM installer, as
+[the firmware's manual procedure](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)
+does. It saves a config backup in a private `update-*` folder before writing.
+
+There is no A/B fallback here: the installed kernel is overwritten on the way into
+RAM, and the recovery net for a torn write is UART. If the run is interrupted after
+that point, reach the RAM installer and run the command again with
+`--config-backup` and the backup it saved. It logs in by password, so a router set
+to SSH keys only (`PasswordAuth off`) is refused before anything is written.
+
+The update reuses the code the install and revert paths run on real hardware, but
+the update as a whole **has not yet been run on a real router**. Keep a UART adapter
+within reach, and please report how it went.
+
+## Web wizard
+
+```sh
+python3 gui/app.py
+```
+
+A local step-by-step wizard over these tools, in English and Russian, with a dry
+run, a stage tracker, and a live log. See [gui/README.md](gui/README.md).
+
 ## Return to stock
 
 Download an official stock image whose SHA-256 is approved by the selected
@@ -165,6 +198,7 @@ and refuses to run unless the router is already booted from a RAM initramfs.
 | `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE_NAME` | Run the low-level stock writer from an already-booted RAM system. |
 | `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspect a raw UBI dump offline. |
 | `python3 selftest.py` | Run checks that do not require a router. |
+| `python3 updater.py --dry-run` | Download and verify an update's images without contacting a router. |
 
 See the [technical reference](docs/technical.md) for interrupted runs, manual
 stages, stock-image hashes, flash-layout details, and recovery procedures.
