@@ -573,7 +573,8 @@ def require_own_ubi9(ch, tidx):
     if live_target:
         raise Abort(
             f"mtd{tidx} already has {', '.join(sorted(live_target))} attached; "
-            "refusing to verify a partition that is live")
+            "refusing to verify a partition that is live. If that is unexpected, "
+            "inspect it on the device and detach it before re-running.")
 
 
 def verify_written(ch, tidx, want_md5, want_len):

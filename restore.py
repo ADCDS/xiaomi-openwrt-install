@@ -432,7 +432,9 @@ def require_own_ubi9(host, k):
     if live_target:
         raise RestoreError(
             f"mtd{k} already has {', '.join(sorted(live_target))} attached; "
-            "refusing to read back a partition that is live")
+            "refusing to read back a partition that is live. If that is "
+            "unexpected on the RAM initramfs, inspect it on the device and "
+            "detach it before re-running.")
 
 
 def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
