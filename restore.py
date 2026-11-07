@@ -390,6 +390,28 @@ def remote_job_state(host, status_path, lock_dir):
     return state
 
 
+def require_own_ubi9(host, k):
+    """Device 9 is this toolchain's scratch device; never detach one we lack.
+
+    Every read-back in this toolchain attaches at device 9, so a live device 9
+    on a different MTD would be detached by the read-back below -- a state
+    change outside the reservation the hardcoded number relies on.
+    """
+    _rc, attached = ssh(
+        host,
+        "for u in /sys/class/ubi/ubi*; do "
+        "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        check=False)
+    for line in attached.splitlines():
+        fields = line.split()
+        if (len(fields) == 2 and fields[0] == "ubi9" and fields[1].isdigit()
+                and int(fields[1]) != k):
+            raise RestoreError(
+                f"device 9 is attached to mtd{fields[1]}, not to mtd{k} that is "
+                "being read back; refusing to detach a device this tool does "
+                "not own")
+
+
 def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
     import tempfile
     k, _ = p["write"]
@@ -462,6 +484,7 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
     print("[2] ubiformat + erases reported done")
 
     print("[3] reading the volumes back")
+    require_own_ubi9(host, k)
     ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
     rc, out = ssh(host, f"ubiattach -m {k} -d 9", timeout=180, check=False)
     if rc != 0:

@@ -535,8 +535,30 @@ def launch_detached(ch, tidx, recover_stale_lock=False):
         "written; the device still boots stock.")
 
 
+def require_own_ubi9(ch, tidx):
+    """Device 9 is this toolchain's scratch device; never detach one we lack.
+
+    Every read-back in this toolchain attaches at device 9, so a live device 9
+    on a different MTD would be detached by the read-back below -- a state
+    change outside the reservation the hardcoded number relies on.
+    """
+    _rc, attached = ch.run(
+        "for u in /sys/class/ubi/ubi*; do "
+        "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        quiet=True)
+    for line in attached.splitlines():
+        fields = line.split()
+        if (len(fields) == 2 and fields[0] == "ubi9" and fields[1].isdigit()
+                and int(fields[1]) != tidx):
+            raise Abort(
+                f"device 9 is attached to mtd{fields[1]}, not to mtd{tidx} that "
+                "is being verified; refusing to detach a device this tool does "
+                "not own")
+
+
 def verify_written(ch, tidx, want_md5, want_len):
     """Attach the freshly written slot, md5 the kernel volume, detach."""
+    require_own_ubi9(ch, tidx)
     ch.run("ubidetach -d 9 2>/dev/null; true", retries=0, quiet=True)
     rc, out = ch.run(f"ubiattach -m {tidx} -d 9", timeout=120, retries=0)
     if rc != 0:

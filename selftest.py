@@ -2636,6 +2636,52 @@ def test_default_routes_fail_closed():
               install.default_routes() == [], "")
 
 
+def test_ubi9_reservation():
+    """Every read-back must refuse a device 9 it does not own."""
+    print("\n[ubi: device 9 is reserved toolchain-wide]")
+
+    class FakeChannel:
+        def __init__(self, attached):
+            self.attached = attached
+            self.commands = []
+
+        def run(self, cmd, timeout=120, retries=2, quiet=False):
+            self.commands.append(cmd)
+            if cmd.startswith("for u in /sys/class/ubi"):
+                return 0, self.attached
+            return 0, ""
+
+    ch = FakeChannel("ubi0 0\nubi9 5\n")
+    try:
+        install.verify_written(ch, 9, "deadbeef", 4096)
+        error = "no error"
+    except install.Abort as exc:
+        error = str(exc)
+    check("the install read-back refuses a device 9 on another mtd",
+          "attached to mtd5" in error, error)
+    check("the install read-back detaches nothing before that check",
+          not [c for c in ch.commands if c.startswith("ubidetach")],
+          str(ch.commands))
+
+    with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\nubi9 7\n")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore read-back refuses a device 9 on another mtd",
+          "attached to mtd7" in error, error)
+
+    with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\n")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("a device 9 that is not attached at all is left alone",
+          error == "no error", error)
+
+
 def test_pivot_advice():
     """A tagged failure must become an instruction, not a bare message."""
     print("\n[revert: advice after a failed pivot]")
@@ -2938,6 +2984,7 @@ def main():
     test_install_failure_hint()
     test_updater()
     test_default_routes_fail_closed()
+    test_ubi9_reservation()
     test_pivot_advice()
     test_revert_pivot_guards()
     test_kernel_volume_id()
