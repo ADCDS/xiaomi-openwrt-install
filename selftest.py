@@ -2736,6 +2736,87 @@ def test_read_back_kernel():
           sum(1 for c in calls if c.startswith("ubidetach")) == 2, str(calls))
 
 
+def test_pivot_stage_tagging():
+    """The stage tag is what updater turns into advice; test its producer.
+
+    Since updater picks "do not reboot, retry" vs "reach the RAM installer"
+    from `pivot_stage`, a wrong tag is a wrong instruction on the one path with
+    no fallback.
+    """
+    print("\n[revert: tagging how far the pivot got]")
+    import revert
+
+    roomy = {"ubi_kernel": {"index": 9, "size": 8192},
+             "rootfs": {"index": 10, "size": 8192}}
+
+    def scripted(*, job_state="status= pid= active=0 lock=0", poll="fail:1",
+                 md5=None, discover=None):
+        def ssh(host, command, **kwargs):
+            if command.startswith("for u in /sys/class/ubi/ubi"):
+                return 0, "ubi0 10\n"
+            if command.startswith("s=$(cat /tmp/pv.status"):
+                return 0, job_state
+            if command.startswith("md5sum /tmp/ini.ubi"):
+                return 0, md5 + "  /tmp/ini.ubi"
+            if command.startswith("start-stop-daemon -S -b -x /tmp/pv.sh"):
+                return 0, "rc=0"
+            if command.startswith("cat /tmp/pv.status"):
+                return 0, poll
+            if command.startswith("tail -20 /tmp/pv.log"):
+                return 0, "ubiformat: error!"
+            if command.startswith("ubinfo"):
+                return 0, "Volume ID:   1 (on ubi9)\nName:          kernel\n"
+            if command.startswith("md5sum /dev/ubi9_"):
+                return 0, md5 + "\n4096"
+            return 0, ""
+        return ssh
+
+    def run(iface=None, **kwargs):
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            md5 = hashlib.md5(b"x" * 4096).hexdigest()
+            ssh = scripted(md5=md5, **kwargs)
+            patches = [
+                mock.patch.object(revert.restore, "mtd_map", return_value=roomy),
+                mock.patch.object(revert.install, "ssh", side_effect=ssh),
+                mock.patch.object(revert.install, "scp_to", return_value=None),
+                mock.patch.object(revert.install, "expected_volume",
+                                  return_value=(b"x" * 4096, md5)),
+                mock.patch.object(revert.time, "sleep", return_value=None),
+            ]
+            if kwargs.get("discover") is not None:
+                patches.append(mock.patch.object(
+                    revert.install, "wait_and_discover",
+                    side_effect=kwargs["discover"]))
+            for patch in patches:
+                patch.start()
+            try:
+                revert.pivot_to_ram("router.test", image.name, "unused.itb", iface)
+            except Exception as exc:                       # noqa: BLE001 - the point
+                return exc
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+        return None
+
+    error = run(job_state="status=fail:1 pid= active=0 lock=1")
+    check("a failed prior pivot is tagged as an unconfirmed write",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          getattr(error, "pivot_stage", "missing"))
+
+    error = run()
+    check("a write that dies mid-flight is tagged write-unconfirmed",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
+    error = run(iface="eth0", poll="done",
+                discover=revert.install.Abort("nothing appeared on eth0"))
+    check("a failure after the write verified is tagged rebooted",
+          getattr(error, "pivot_stage", None) == "rebooted",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
+
 def main():
     t0 = time.time()
     test_profiles()
@@ -2771,6 +2852,7 @@ def main():
     test_revert_pivot_guards()
     test_kernel_volume_id()
     test_read_back_kernel()
+    test_pivot_stage_tagging()
     test_gui_runner()
     test_gui_strings()
     test_gui_server()

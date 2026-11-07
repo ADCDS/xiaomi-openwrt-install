@@ -218,8 +218,18 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
         log("[1] dropped the stale read-back device 9 that sat on ubi_kernel")
 
     state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
-    reuse_done = "status=done" in state
-    phase["written"] = reuse_done       # an earlier run already erased it
+    reported = {}
+    for part in state.split():
+        key, _, value = part.partition("=")
+        reported[key] = value
+    reuse_done = reported.get("status") == "done"
+    # Any status at all, or a held lock, means a previous ubiformat was issued
+    # and ubi_kernel may already be partly erased -- including in the failed or
+    # interrupted state the refusal below is about to report. Tagging that
+    # "not-written" would drop the do-not-reboot warning in the one state where
+    # clearing /tmp by rebooting is the act that leaves the box unbootable.
+    phase["written"] = (reuse_done or bool(reported.get("status"))
+                        or reported.get("lock") == "1")
     if "active=1" in state:
         raise restore.RestoreError(f"pivot ubiformat is still running ({state})")
     if not reuse_done and ("lock=1" in state or "status=fail" in state
@@ -227,7 +237,10 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
         if not recover_stale_lock:
             raise restore.RestoreError(
                 f"stale/failed pivot state requires --recover-stale-lock "
-                f"after inspection ({state})")
+                f"after inspection ({state}). Do not reboot to clear it: an "
+                "interrupted ubiformat may already have erased part of "
+                f"ubi_kernel. Inspect /tmp/pv.log, then retry with "
+                "--recover-stale-lock.")
         install.ssh(host, "rm -rf /tmp/pv.lock; rm -f /tmp/pv.status")
         log(f"[1] explicitly cleared inactive stale pivot state: {state}")
 
