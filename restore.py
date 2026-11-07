@@ -399,8 +399,9 @@ def require_own_ubi9(host, k):
     """
     rc, attached = ssh(
         host,
-        "for u in /sys/class/ubi/ubi*; do "
-        "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        "for u in /sys/class/ubi/ubi*; do [ -d \"$u\" ] || continue; "
+        "n=${u##*/}; case \"$n\" in *\"_\"*) continue ;; esac; "
+        "printf '%s %s\\n' \"$n\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
         check=False)
     by_mtd = {}
     readable = rc == 0
@@ -409,6 +410,11 @@ def require_own_ubi9(host, k):
             if not line.strip():
                 continue
             fields = line.split()
+            if len(fields) == 1 and "_" in fields[0]:
+                # A UBI volume directory (ubi0_0, ubi0_127), not a device. The
+                # shell loop filters them, but a glob that misses one must not
+                # make the map look unreadable and refuse a healthy box.
+                continue
             if (len(fields) != 2 or not fields[0].startswith("ubi")
                     or not fields[1].isdigit()):
                 # A partial map can hide a device 9, so fail closed on it.

@@ -2698,6 +2698,28 @@ def test_ubi9_reservation():
     # do_restore runs from the RAM initramfs, where a successful, empty map is
     # the normal case: nothing has to be attached there. Treating it as
     # unreadable would abort every stock restore after the write.
+    # The shape a real router returns: device dirs plus volume dirs, whose
+    # mtd_num is empty. Before this was handled, every map on hardware looked
+    # unreadable and the pivot refused a healthy box.
+    real = "ubi0 19\nubi0_0 \nubi0_1 \nubi0_127 \n"
+    ch = FakeChannel((0, real))
+    try:
+        install.require_own_ubi9(ch, 18)
+        error = "no error"
+    except install.Abort as exc:
+        error = str(exc)
+    check("volume directories in the map do not look like unreadable entries",
+          error == "no error", error)
+
+    with mock.patch.object(restore, "ssh", return_value=(0, real)):
+        try:
+            restore.require_own_ubi9("router.test", 18)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore map parser ignores volume directories too",
+          error == "no error", error)
+
     with mock.patch.object(restore, "ssh", return_value=(0, "")):
         try:
             restore.require_own_ubi9("router.test", 9)
