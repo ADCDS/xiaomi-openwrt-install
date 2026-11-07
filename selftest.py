@@ -2641,17 +2641,17 @@ def test_ubi9_reservation():
     print("\n[ubi: device 9 is reserved toolchain-wide]")
 
     class FakeChannel:
-        def __init__(self, attached):
-            self.attached = attached
+        def __init__(self, map_reply):
+            self.map_reply = map_reply
             self.commands = []
 
         def run(self, cmd, timeout=120, retries=2, quiet=False):
             self.commands.append(cmd)
             if cmd.startswith("for u in /sys/class/ubi"):
-                return 0, self.attached
+                return self.map_reply
             return 0, ""
 
-    ch = FakeChannel("ubi0 0\nubi9 5\n")
+    ch = FakeChannel((0, "ubi0 0\nubi9 5\n"))
     try:
         install.verify_written(ch, 9, "deadbeef", 4096)
         error = "no error"
@@ -2671,6 +2671,29 @@ def test_ubi9_reservation():
             error = str(exc)
     check("the restore read-back refuses a device 9 on another mtd",
           "attached to mtd7" in error, error)
+
+    for label, reply, wanted in (
+            ("unreadable map", (1, "cat: /sys/class/ubi: No such file"),
+             "cannot account for"),
+            ("partial map", (0, "ubi0 0\nubi9\n"), "cannot account for"),
+            ("live target", (0, "ubi0 9\n"), "already has ubi0 attached")):
+        ch = FakeChannel(reply)
+        try:
+            install.verify_written(ch, 9, "deadbeef", 4096)
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check(f"the install read-back fails closed on an {label}",
+              wanted in error, error)
+
+        with mock.patch.object(restore, "ssh", return_value=reply):
+            try:
+                restore.require_own_ubi9("router.test", 9)
+                error = "no error"
+            except restore.RestoreError as exc:
+                error = str(exc)
+        check(f"the restore read-back fails closed on an {label}",
+              wanted in error, error)
 
     with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\n")):
         try:
@@ -2781,6 +2804,11 @@ def test_revert_pivot_guards():
           isinstance(result, revert.restore.RestoreError)
           and "no record of a pivot" in str(result)
           and "ubidetach -d 9" in str(result), str(result))
+
+    result, commands = dry("nonsense line\n")
+    check("the pivot fails closed on an unreadable attached-UBI map",
+          isinstance(result, revert.restore.RestoreError)
+          and "refusing to pick a target" in str(result), str(result))
 
     result, commands = dry("ubi0 10\nubi9 5\n")
     check("a device 9 attached to another mtd is never detached",

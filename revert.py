@@ -216,15 +216,22 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
     # device 9 left by an earlier read-back is only recorded here and dropped
     # after the dry-run gate below. Detaching first would also hide a live ubi9
     # from the very check it is meant to satisfy.
-    _rc, attached = install.ssh(
+    map_rc, attached = install.ssh(
         host,
         "for u in /sys/class/ubi/ubi*; do "
         "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
         check=False)
     by_mtd = {}
-    for line in attached.splitlines():
-        fields = line.split()
-        if len(fields) == 2 and fields[1].isdigit():
+    if map_rc == 0:
+        for line in attached.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if (len(fields) != 2 or not fields[0].startswith("ubi")
+                    or not fields[1].isdigit()):
+                # A partial map can hide a device 9, so fail closed on it.
+                by_mtd = {}
+                break
             by_mtd.setdefault(fields[1], set()).add(fields[0])
     if not by_mtd:
         # Fail closed: reading no attached UBI would make any target look idle.

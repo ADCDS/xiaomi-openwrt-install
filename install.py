@@ -542,18 +542,38 @@ def require_own_ubi9(ch, tidx):
     on a different MTD would be detached by the read-back below -- a state
     change outside the reservation the hardcoded number relies on.
     """
-    _rc, attached = ch.run(
+    rc, attached = ch.run(
         "for u in /sys/class/ubi/ubi*; do "
         "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
         quiet=True)
-    for line in attached.splitlines():
-        fields = line.split()
-        if (len(fields) == 2 and fields[0] == "ubi9" and fields[1].isdigit()
-                and int(fields[1]) != tidx):
+    by_mtd = {}
+    if rc == 0:
+        for line in attached.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if (len(fields) != 2 or not fields[0].startswith("ubi")
+                    or not fields[1].isdigit()):
+                # A partial map can hide a device 9, so fail closed on it.
+                by_mtd = {}
+                break
+            by_mtd.setdefault(fields[1], set()).add(fields[0])
+    if not by_mtd:
+        raise Abort(
+            "could not read which MTDs the running UBIs sit on "
+            f"({attached.strip() or 'no output'}) -- refusing to detach a device "
+            "this tool cannot account for")
+    for mtd, devices in by_mtd.items():
+        if "ubi9" in devices and mtd != str(tidx):
             raise Abort(
-                f"device 9 is attached to mtd{fields[1]}, not to mtd{tidx} that "
-                "is being verified; refusing to detach a device this tool does "
-                "not own")
+                f"device 9 is attached to mtd{mtd}, not to mtd{tidx} that is "
+                "being verified; refusing to detach a device this tool does not "
+                "own")
+    live_target = by_mtd.get(str(tidx), set()) - {"ubi9"}
+    if live_target:
+        raise Abort(
+            f"mtd{tidx} already has {', '.join(sorted(live_target))} attached; "
+            "refusing to verify a partition that is live")
 
 
 def verify_written(ch, tidx, want_md5, want_len):
