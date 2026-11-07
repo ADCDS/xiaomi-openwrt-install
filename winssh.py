@@ -167,6 +167,17 @@ def download(host, remote, local, passwords, timeout=300):
                 remaining -= len(chunk)
         _ack(channel)
         channel.sendall(b"\x00")
+        # Wait for the sender to exit, as upload() does. A sender that dies
+        # after emitting the last byte must not become a silent success; -1
+        # means it reported no status at all, which some servers do.
+        end = time.monotonic() + timeout
+        while not channel.exit_status_ready():
+            if time.monotonic() >= end:
+                raise SSHError(f"SCP sender timed out after {timeout}s")
+            time.sleep(0.01)
+        status = channel.recv_exit_status()
+        if status not in (0, -1):
+            raise SSHError(f"SCP sender exited with status {status}")
         os.replace(partial, local)
     except SSHError:
         raise

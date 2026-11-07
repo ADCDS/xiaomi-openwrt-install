@@ -28,6 +28,7 @@ Use `python3 revert.py --help` for profile, image, and connection options.
 import argparse
 import hashlib
 import os
+import re
 import sys
 import time
 
@@ -91,6 +92,42 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     if "ubi_kernel" not in mtd:
         raise restore.RestoreError("no ubi_kernel partition -- not the OpenWrt layout")
     k = mtd["ubi_kernel"]["index"]
+
+    # ubiformat erases PEBs as it writes, so an image that does not fit is not a
+    # clean failure: the installed kernel is already gone by the time it reports
+    # "not enough space". install.py and updater.py both check the size first;
+    # this is the path that reaches the no-fallback case, so it must too.
+    size = os.path.getsize(ubi_path)
+    if size > mtd["ubi_kernel"]["size"]:
+        raise restore.RestoreError(
+            f"{os.path.basename(ubi_path)} is {size} B, ubi_kernel holds "
+            f"{mtd['ubi_kernel']['size']} B -- refusing to erase the installed "
+            "kernel for an image that cannot fit it")
+    log(f"[1] image {size} B fits ubi_kernel ({mtd['ubi_kernel']['size']} B)")
+
+    # The same hard interlock the A/B path uses, for the same reason: mtd{k} is
+    # the partition holding the only bootable kernel, so it must not be live. A
+    # stale device 9 is this tool's own read-back from an earlier attempt and
+    # holds no live filesystem; drop it so a retry is not refused by leftovers.
+    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
+    _rc, attached = install.ssh(
+        host,
+        "for u in /sys/class/ubi/ubi[0-9]; do "
+        "printf '%s %s\\n' \"${u##*/}\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        check=False)
+    live = {line.split()[1] for line in attached.splitlines()
+            if len(line.split()) == 2 and line.split()[1].isdigit()}
+    if not live:
+        # Fail closed: reading no attached UBI would make any target look idle.
+        raise restore.RestoreError(
+            "could not read which MTDs the running UBIs sit on "
+            "(/sys/class/ubi/*/mtd_num) -- refusing to pick a target")
+    if str(k) in live:
+        raise restore.RestoreError(
+            f"ubi_kernel (mtd{k}) has a UBI attached at runtime; refusing to "
+            "overwrite a partition that may be live")
+    log(f"[1] UBI attached on mtd{sorted(int(item) for item in live)}; "
+        f"ubi_kernel is mtd{k} and is idle")
 
     blob, want_md5 = install.expected_volume(ubi_path, itb_path)
     local_md5 = hashlib.md5(open(ubi_path, "rb").read()).hexdigest()
@@ -156,10 +193,20 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
     if rc != 0:
         raise restore.RestoreError(f"the written UBI will not attach: {out!r}")
-    _rc, got = install.ssh(host, "md5sum /dev/ubi9_0", timeout=300)
+    # Read the volume named "kernel", not a fixed volume id: the installer's own
+    # read-back does the same because a lazy span anchored on the first Volume ID
+    # matches volume 0 whatever the name is.
+    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
+    named = re.search(r"Volume ID:\s+(\d+).*?Name:\s+kernel", vols, re.S)
+    if not named:
+        install.ssh(host, "ubidetach -d 9", check=False)
+        raise restore.RestoreError(f"no 'kernel' volume in the written UBI:\n{vols}")
+    dev = f"/dev/ubi9_{named.group(1)}"
+    _rc, got = install.ssh(host, f"md5sum {dev}; wc -c < {dev}", timeout=300)
     install.ssh(host, "ubidetach -d 9", check=False)
     got_md5 = got.split()[0] if got else ""
-    log(f"[1] read-back md5 {got_md5}")
+    log(f"[1] read-back {dev}: {got.splitlines()[-1] if got else '?'} B, "
+        f"md5 {got_md5}")
     if got_md5 != want_md5:
         raise restore.RestoreError(
             f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "

@@ -1,6 +1,6 @@
 # xiaomi-openwrt-install
 
-**English** · [Русский](README.ru.md)
+**English** · [Русский](README.ru.md) · [简体中文](README.zh-CN.md) · [Português (Brasil)](README.pt-BR.md)
 
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
@@ -97,7 +97,8 @@ exploit's download needs those to work.
 
 Keep a Linux machine or a UART adapter within reach, and please report how it went.
 
-`updater.py` and the web wizard are Linux-only for now.
+`updater.py` and the web wizard run on Windows 10/11 as well as Linux. What is
+still unproven on real hardware is listed in the table above.
 
 ## Install OpenWrt
 
@@ -151,8 +152,9 @@ interactively during installation with:
 python3 install.py --configure
 ```
 
-Prompts and instructions appear in Russian on a Russian system. Choose explicitly
-with `--lang ru` or `--lang en`; low-level diagnostics stay in English.
+Prompts and instructions follow your system language: English, Russian, Simplified
+Chinese or Brazilian Portuguese. Choose explicitly with `--lang en`, `ru`, `zh-CN`
+or `pt-BR`; low-level diagnostics stay in English.
 
 Download and fully verify the latest release's image set without contacting a
 router:
@@ -218,8 +220,9 @@ not been run yet. Keep a UART adapter within reach, and please report how it wen
 python3 gui/app.py
 ```
 
-A local step-by-step wizard over these tools, in English and Russian, with a dry
-run, a stage tracker, and a live log. See [gui/README.md](gui/README.md).
+A local step-by-step wizard over these tools, in English, Russian, Simplified
+Chinese and Brazilian Portuguese, with a dry run, a stage tracker, and a live
+log. See [gui/README.md](gui/README.md).
 
 ## Return to stock
 

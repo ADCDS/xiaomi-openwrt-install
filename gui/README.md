@@ -1,10 +1,11 @@
 # Web wizard (gui/)
 
-A local wizard over the command-line installer, in English and Russian. It does
-**not** reimplement any flashing logic: it builds the right arguments and runs
-`install.py`, `updater.py` or `revert.py`, streaming their output into a
-step-by-step UI with a stage tracker, a live terminal, the Wi-Fi join banner, and
-the resume-manifest path for recovery.
+A local wizard over the command-line installer, in English, Russian, Simplified
+Chinese and Brazilian Portuguese. It does **not** reimplement any flashing
+logic: it builds the right arguments and runs `install.py`, `updater.py` or
+`revert.py`, streaming their output into a step-by-step UI with a stage tracker,
+a live terminal, the Wi-Fi join banner, and the resume-manifest path for
+recovery.
 
 ## Run it
 
@@ -20,7 +21,9 @@ and every API call carries a per-session token: it is a root-capable flashing
 driver and must not be exposed on the network. Only one operation can run at a
 time.
 
-The language follows the browser. The button at the top right switches it.
+The language follows the browser and can be switched with the button at the top
+right, which cycles through English, Russian, Simplified Chinese and Brazilian
+Portuguese, each named in its own script.
 
 Options (environment variables):
 
@@ -29,14 +32,17 @@ Options (environment variables):
 
 ## Requirements
 
-Same as the CLI: Linux, Python 3.9+, `sshpass`, `openssl`, OpenSSH, `iproute2`.
-The first screen checks these for you. WSL2's network usually blocks the router's
+Same as the CLI, per platform. On Linux: Python 3.9+, `sshpass`, `openssl`,
+OpenSSH and `iproute2`. On Windows 10/11: Python 3.9+, PowerShell, and the
+packages in `requirements-windows.txt` (`paramiko`, `passlib`). The first screen
+checks these for you. WSL2's network usually blocks the router's
 connection back to the installer, so prefer a real Linux computer.
 
 ## What protects what
 
-Start with a **dry run** (the wizard offers it first): it downloads and verifies
-the images without touching the router.
+Start with a **dry run** (the wizard offers it first): it writes nothing. An
+install or update dry run never contacts the router; a revert dry run logs in and
+reads the router's state, but writes nothing.
 
 - **Install** is the only path with a fallback. Until the final `sysupgrade`, stock
   stays intact in its own slot, and the bootloader returns to it if the RAM system
@@ -51,8 +57,10 @@ wizard says so.
 
 ## Adding text
 
-All wording lives in `static/strings.json`, with the same keys under `en` and `ru`.
-`selftest.py` fails if the two languages diverge or a key the page uses is missing.
+All wording lives in `static/strings.json`, with the same keys under every
+language it ships (`en`, `ru`, `zh-CN`, `pt-BR`). `selftest.py` fails if the
+languages diverge, if a key the page uses is missing, or if the language switch
+offers a language with no catalogue.
 The tools themselves always run in English here, because `runner.py` parses their
 output.
 

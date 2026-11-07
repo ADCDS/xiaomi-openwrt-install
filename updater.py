@@ -29,6 +29,7 @@ SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
 import argparse
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -257,12 +258,28 @@ def wait_for_ram_system(host, interface, fallback, deadline_s=None):
                 f"more was written. Last: {note}")
 
 
-def resume_hint(config_tar):
-    keep = (f"--config-backup {config_tar}" if config_tar
+def _hint_path(path):
+    """A path as the operator's own shell needs it, inside a pasted hint."""
+    return subprocess.list2cmdline([path]) if hostnet.is_windows() else shlex.quote(path)
+
+
+def _keep_flag(config_tar):
+    return (f"--config-backup {_hint_path(config_tar)}" if config_tar
             else "--no-keep-settings")
+
+
+def resume_hint(config_tar):
     return t("The installed kernel has been replaced by the RAM installer, so the "
              "router boots into that now. Reach it, then run this again with "
-             "{keep} to continue; do not skip this step.", keep=keep)
+             "{keep} to continue; do not skip this step.",
+             keep=_keep_flag(config_tar))
+
+
+def retry_hint(config_tar):
+    return t("The pivot did not finish. ubi_kernel held the installed kernel, so "
+             "nothing bootable is left there: do NOT reboot or power-cycle. Re-run "
+             "the same command with {keep} to retry the write.",
+             keep=_keep_flag(config_tar))
 
 
 def run(args):
@@ -392,6 +409,18 @@ def run(args):
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
+        except restore.RestoreError as exc:
+            # pivot_to_ram reports every write-stage failure as a RestoreError,
+            # not an Abort. Nothing is listed against it, so it used to escape
+            # with a bare message on a box whose only kernel had just been
+            # overwritten. The router is still running, so the write can be
+            # retried from here; rebooting is the one thing that ends that.
+            raise Abort(f"{exc}\n{retry_hint(config_tar)}") from exc
+        except Abort as exc:
+            # Raised after the pivot succeeded, while waiting for the RAM
+            # installer: from there it is reached over the network instead.
+            raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
+        try:
             host = wait_for_ram_system(host, args.discover, fallback)
         except Abort as exc:
             raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc

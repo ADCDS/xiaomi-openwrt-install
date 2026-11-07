@@ -34,6 +34,7 @@ from unittest import mock
 import chain
 import channel
 import devices
+import i18n
 import release
 import install
 import probe
@@ -2234,6 +2235,19 @@ def test_updater():
           "nothing appeared" in (r.error or "") and "--config-backup" in r.error
           and "replaced" in r.error)
 
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=restore.RestoreError(
+        "pivot write did not finish ('fail:1'):\nubiformat: error!"))
+    check("a failed pivot write is not dropped as a bare error",
+          "ubiformat" in (r.error or "") and "--config-backup" in (r.error or ""),
+          r.error or "")
+    check("a failed pivot write warns against rebooting",
+          "do NOT reboot" in (r.error or ""), r.error or "")
+    import updater as _updater
+    hint = _updater.retry_hint("/tmp/my runs/config-backup.tar.gz")
+    check("the retry hint quotes a path the shell would split",
+          "'/tmp/my runs/config-backup.tar.gz'" in hint, hint)
+
     print("\n[updater: continuing from the RAM installer]")
     box = _UpdateBox(rootfs="tmpfs")
     r = _run_update(box, wired)
@@ -2391,7 +2405,7 @@ def test_gui_runner():
 
 
 def test_gui_strings():
-    print("\n[gui: every string exists in both languages]")
+    print("\n[gui: every string exists in every language]")
     gui, _app, prereqs, runner = _gui_modules()
     with open(os.path.join(gui, "static", "strings.json"), encoding="utf-8") as fh:
         strings = json.load(fh)
@@ -2400,16 +2414,27 @@ def test_gui_strings():
     with open(os.path.join(gui, "static", "index.html"), encoding="utf-8") as fh:
         page = fh.read()
 
-    check("English and Russian define the same keys",
-          set(strings["en"]) == set(strings["ru"]),
-          str(set(strings["en"]) ^ set(strings["ru"])))
     import re
     placeholders = lambda text: set(re.findall(r"\{(\w+)\}", text))
-    different = [k for k in strings["en"]
-                 if placeholders(strings["en"][k]) != placeholders(strings["ru"].get(k, ""))]
-    check("placeholders match across languages", not different, str(different))
-    untranslated = [k for k in strings["en"] if not strings["ru"].get(k, "").strip()]
-    check("nothing is left blank", not untranslated, str(untranslated))
+
+    check("the wizard ships every language the command line accepts",
+          set(strings) == set(i18n.LANGUAGES) - {"auto"},
+          f"{sorted(strings)} vs {sorted(i18n.LANGUAGES)}")
+    switch = re.search(r"const LANGS = \[([^\]]+)\]", script)
+    check("the language switch offers exactly the catalogues",
+          switch is not None and set(re.findall(r'"([^"]+)"', switch.group(1))) == set(strings),
+          switch.group(1) if switch else "LANGS not found")
+
+    for language in strings:
+        check(f"{language} defines the same keys as English",
+              set(strings[language]) == set(strings["en"]),
+              str(set(strings["en"]) ^ set(strings[language])))
+    different = [(language, k) for language in strings for k in strings[language]
+                 if placeholders(strings[language][k]) != placeholders(strings["en"].get(k, ""))]
+    check("placeholders match across languages", not different, str(different[:5]))
+    untranslated = [(language, k) for language in strings for k in strings[language]
+                    if not strings[language][k].strip()]
+    check("nothing is left blank", not untranslated, str(untranslated[:5]))
 
     used = set(re.findall(r'data-i18n(?:-placeholder)?="([^"]+)"', page))
     # Any dotted literal in the script: keys also travel through variables.
@@ -2434,10 +2459,9 @@ def test_gui_strings():
           all(f'id="{name}" type="password"' in page
               for name in ("wifi-key", "root-password", "current-password")))
     check("the false A/B claim on the revert card is gone",
-          "A/B" not in strings["en"]["mode.revert.tag"]
-          and "A/B" not in strings["ru"]["mode.revert.tag"])
-    check("the typed confirmation differs from a stray keystroke in both languages",
-          len(strings["en"]["confirm.word"]) > 3 and len(strings["ru"]["confirm.word"]) > 3)
+          all("A/B" not in strings[language]["mode.revert.tag"] for language in strings))
+    check("the typed confirmation differs from a stray keystroke in every language",
+          all(len(strings[language]["confirm.word"]) > 3 for language in strings))
 
 
 def test_gui_server():
@@ -2537,6 +2561,43 @@ def test_gui_server():
         runner._RUNS.clear()
 
 
+def test_revert_pivot_guards():
+    """The revert pivot must refuse what the A/B paths refuse, before erasing."""
+    print("\n[revert: the pivot's preconditions]")
+    import revert
+
+    def pivot(mtd, ssh_reply=(0, "")):
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            with mock.patch.object(revert.restore, "mtd_map", return_value=mtd), \
+                    mock.patch.object(revert.install, "ssh", return_value=ssh_reply):
+                try:
+                    revert.pivot_to_ram("router.test", image.name, "unused.itb", None)
+                except revert.restore.RestoreError as exc:
+                    return str(exc)
+        return ""
+
+    layout = {"ubi_kernel": {"index": 9, "size": 1024},
+              "rootfs": {"index": 10, "size": 8192}}
+    error = pivot(layout)
+    # ubiformat erases PEBs as it writes, so this has to fail before the write,
+    # not after it has already taken the installed kernel with it.
+    check("an image too large for ubi_kernel is refused before ubiformat",
+          "cannot fit" in error, error or "no error")
+
+    roomy = {"ubi_kernel": {"index": 9, "size": 8192},
+             "rootfs": {"index": 10, "size": 8192}}
+    error = pivot(roomy)
+    check("the pivot fails closed when it cannot see the attached UBIs",
+          "could not read" in error, error or "no error")
+
+    attached = (0, "ubi0 9\n")
+    error = pivot(roomy, attached)
+    check("the pivot refuses ubi_kernel when a UBI sits on it",
+          "has a UBI attached" in error, error or "no error")
+
+
 def main():
     t0 = time.time()
     test_profiles()
@@ -2569,6 +2630,7 @@ def main():
     test_expected_volume()
     test_install_failure_hint()
     test_updater()
+    test_revert_pivot_guards()
     test_gui_runner()
     test_gui_strings()
     test_gui_server()

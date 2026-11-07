@@ -6,6 +6,11 @@
 
 const TOKEN = new URLSearchParams(location.search).get("t") || "";
 const LANG_KEY = "xiaomi-openwrt-install-lang";
+// Every language that has a catalogue in strings.json, in switch order. The
+// button is labelled with the next language's own name, so the choice is
+// legible before it is made, and no language needs translating into another.
+const LANGS = ["en", "ru", "zh-CN", "pt-BR"];
+const LANG_NAMES = { en: "English", ru: "Русский", "zh-CN": "中文", "pt-BR": "Português" };
 const STAGES = ["preflight", "backup", "pivot", "flash", "verify"];
 const SEQUENCE = ["mode", "check", "config", "review", "run"];
 
@@ -15,14 +20,16 @@ const STATE = {
   hint: false, message: null,
 };
 
-let STRINGS = { en: {}, ru: {} };
+let STRINGS = { en: {} };
 let LANG = "en";
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 
 function t(key, values) {
-  let text = STRINGS[LANG][key] ?? STRINGS.en[key] ?? key;
+  // A catalogue that failed to load must not blank the page: fall back to
+  // English, then to the key itself, exactly as i18n.t() does in the CLI.
+  let text = (STRINGS[LANG] || {})[key] ?? STRINGS.en[key] ?? key;
   for (const [name, value] of Object.entries(values || {})) {
     text = text.replaceAll(`{${name}}`, value);
   }
@@ -54,14 +61,23 @@ function setNote(node, text) {
 function preferredLanguage() {
   try {
     const saved = localStorage.getItem(LANG_KEY);
-    if (saved === "en" || saved === "ru") return saved;
+    if (LANGS.includes(saved)) return saved;
   } catch (_) { /* a private window may refuse storage */ }
-  return (navigator.language || "").toLowerCase().startsWith("ru") ? "ru" : "en";
+  const tag = (navigator.language || "").toLowerCase().replace("_", "-");
+  if (tag.startsWith("zh")) return "zh-CN";
+  if (tag.startsWith("pt")) return "pt-BR";
+  return tag.startsWith("ru") ? "ru" : "en";
+}
+
+function nextLanguage() {
+  return LANGS[(LANGS.indexOf(LANG) + 1) % LANGS.length];
 }
 
 function applyLanguage() {
   document.documentElement.lang = LANG;
   document.title = t("app.title");
+  const button = $("#lang-switch");
+  if (button) button.textContent = LANG_NAMES[nextLanguage()];
   $$("[data-i18n]").forEach((n) => { n.textContent = t(n.dataset.i18n); });
   $$("[data-i18n-placeholder]").forEach((n) => {
     n.placeholder = t(n.dataset.i18nPlaceholder);
@@ -73,7 +89,7 @@ function applyLanguage() {
 }
 
 $("#lang-switch").addEventListener("click", () => {
-  LANG = LANG === "ru" ? "en" : "ru";
+  LANG = nextLanguage();
   try { localStorage.setItem(LANG_KEY, LANG); } catch (_) { /* see above */ }
   applyLanguage();
 });

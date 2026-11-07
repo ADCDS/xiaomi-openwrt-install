@@ -23,3 +23,7 @@ __pycache__/
 
 .ruff_cache/
 .venv/
+
+# Working notes for this session's changes: not part of the project's own
+# documentation, and not meant to be committed.
+PLAN.md

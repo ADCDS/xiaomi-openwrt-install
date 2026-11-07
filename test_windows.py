@@ -493,7 +493,14 @@ class SSHTransportTests(unittest.TestCase):
                     if not command_ready.wait(5):
                         raise AssertionError("no exec request")
                     handler(channel, commands[-1])
-                    channel.close()
+                    try:
+                        channel.close()
+                    except (EOFError, OSError):
+                        # The client can drop the connection the moment it has
+                        # the last byte; closing a channel nobody is listening
+                        # on then fails at the packet layer, and that is not a
+                        # server-side error worth failing the test for.
+                        pass
                     break
             except Exception as exc:
                 errors.append(exc)
