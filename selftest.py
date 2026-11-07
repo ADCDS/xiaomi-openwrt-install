@@ -2674,12 +2674,14 @@ def test_revert_pivot_guards():
 
     # A dry run must not change kernel state at all: the interlock only reads,
     # and the detach happens after this gate.
-    def dry(attached_reply):
+    def dry(attached, state="status=done pid=1 active=0 lock=0"):
         commands = []
 
         def ssh(host, command, **kwargs):
             commands.append(command)
-            return attached_reply
+            if command.startswith("s=$(cat /tmp/pv.status"):
+                return 0, state
+            return 0, attached
 
         with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
             image.write(b"x" * 4096)
@@ -2688,19 +2690,29 @@ def test_revert_pivot_guards():
                     mock.patch.object(revert.install, "ssh", side_effect=ssh), \
                     mock.patch.object(revert.install, "expected_volume",
                                       return_value=(b"x" * 10, "md5")):
-                result = revert.pivot_to_ram("router.test", image.name, "unused.itb",
-                                             None, dry_run=True)
+                try:
+                    result = revert.pivot_to_ram("router.test", image.name,
+                                                 "unused.itb", None, dry_run=True)
+                except revert.restore.RestoreError as exc:
+                    return exc, commands
         return result, commands
 
-    result, commands = dry((0, "ubi0 10\n"))
+    result, commands = dry("ubi0 10\n")
     check("a dry run stops before the write",
           result is None and not [c for c in commands if c.startswith("ubidetach")],
           str(commands))
 
-    result, commands = dry((0, "ubi0 10\nubi9 9\n"))
+    result, commands = dry("ubi0 10\nubi9 9\n")
     check("a dry run does not detach even a stale read-back device",
           result is None and not [c for c in commands if c.startswith("ubidetach")],
           str(commands))
+
+    # "It was not busy" proves nothing: a live device 9 with no open reference
+    # detaches just as cleanly, so only a prior pivot makes device 9 ours.
+    result, commands = dry("ubi0 10\nubi9 9\n", state="status= pid= active=0 lock=0")
+    check("device 9 on ubi_kernel is refused when no pivot ran here",
+          isinstance(result, revert.restore.RestoreError)
+          and "cannot be this tool's read-back device" in str(result), str(result))
 
     # Every one of those refusals happened before anything was erased, and
     # updater picks its advice from this tag: a wrong tag would tell the

@@ -179,6 +179,19 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
             "kernel for an image that cannot fit it")
     log(f"[1] image {size} B fits ubi_kernel ({mtd['ubi_kernel']['size']} B)")
 
+    # A previous pivot only ever leaves device 9 attached through its read-back,
+    # and that read-back only runs after a write -- which always leaves
+    # /tmp/pv.status or the lock behind. So the same state that drives the
+    # decisions below is also the evidence that an attached device 9 on
+    # ubi_kernel is this tool's own scratch and not something live.
+    state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
+    reported = {}
+    for part in state.split():
+        key, _, value = part.partition("=")
+        reported[key] = value
+    reuse_done = reported.get("status") == "done"
+    previous_pivot = bool(reported.get("status")) or reported.get("lock") == "1"
+
     # The same hard interlock the A/B path uses, for the same reason: mtd{k} is
     # the partition holding the only bootable kernel, so it must not be live.
     # This is a read only -- a dry run must not change kernel state, so a stale
@@ -208,6 +221,13 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
             f"ubi_kernel (mtd{k}) has {', '.join(sorted(on_target))} attached at "
             "runtime; refusing to overwrite a partition that may be live")
     stale_scratch = "ubi9" in on_target
+    if stale_scratch and not previous_pivot:
+        # A live device numbered 9 detaches just as cleanly as our scratch one
+        # when nothing holds a reference to it, so "not busy" proves nothing.
+        raise restore.RestoreError(
+            f"ubi_kernel (mtd{k}) has ubi9 attached, but no earlier pivot ran on "
+            "this box, so it cannot be this tool's read-back device. Refusing to "
+            "overwrite a partition that may be live.")
     log(f"[1] UBI attached on mtd{sorted(int(item) for item in by_mtd)}; "
         f"ubi_kernel is mtd{k}"
         + (", holding only our stale device 9" if stale_scratch else " and is idle"))
@@ -228,22 +248,17 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
             # that run may already have erased part of it.
             phase["written"] = True
             raise restore.RestoreError(
-                f"could not detach the stale read-back device 9: {out!r}")
+                f"could not detach the stale read-back device 9: {out!r}. "
+                "Do NOT reboot: an earlier pivot may already have erased part "
+                "of ubi_kernel. Inspect it, then re-run to retry.")
         log("[1] dropped the stale read-back device 9 that sat on ubi_kernel")
 
-    state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
-    reported = {}
-    for part in state.split():
-        key, _, value = part.partition("=")
-        reported[key] = value
-    reuse_done = reported.get("status") == "done"
     # Any status at all, or a held lock, means a previous ubiformat was issued
     # and ubi_kernel may already be partly erased -- including in the failed or
     # interrupted state the refusal below is about to report. Tagging that
     # "not-written" would drop the do-not-reboot warning in the one state where
     # clearing /tmp by rebooting is the act that leaves the box unbootable.
-    phase["written"] = (reuse_done or bool(reported.get("status"))
-                        or reported.get("lock") == "1")
+    phase["written"] = previous_pivot
     if "active=1" in state:
         raise restore.RestoreError(f"pivot ubiformat is still running ({state})")
     if not reuse_done and ("lock=1" in state or "status=fail" in state
@@ -481,6 +496,15 @@ if __name__ == "__main__":
     except (restore.RestoreError, release.ReleaseError, install.Abort,
             subprocess.TimeoutExpired) as e:
         log(f"[-] {e}")
+        # This path has no updater to turn the tag into advice, so say it here.
+        stage = getattr(e, "pivot_stage", None)
+        if stage == "write-unconfirmed":
+            log("[!] Do NOT reboot or power-cycle: ubi_kernel held the installed "
+                "kernel and now holds a write that could not be verified. The "
+                "running system is fine until it reboots. Re-run to retry.")
+        elif stage == "rebooted":
+            log("[!] The write verified and the box rebooted. Reach the RAM "
+                "installer and re-run to continue.")
         sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")
