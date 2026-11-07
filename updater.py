@@ -84,6 +84,19 @@ def check_config_backup(path):
         raise Abort(f"{path} holds no etc/config/: it is not a config backup")
 
 
+def turns_off_password_login(path):
+    """Whether restoring this archive leaves the router refusing passwords."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            member = archive.extractfile("etc/config/dropbear")
+            text = member.read().decode("utf-8", "replace") if member else ""
+    except (OSError, KeyError, tarfile.TarError):
+        return False
+    return any(line.split()[:3] in (["option", "PasswordAuth", "'off'"],
+                                    ["option", "RootPasswordAuth", "'off'"])
+               for line in text.splitlines())
+
+
 def available_memory_kb(host):
     rc, out = install.ssh(host, "grep MemAvailable /proc/meminfo", check=False)
     values = [token for token in out.split() if token.isdigit()]
@@ -336,6 +349,12 @@ def run(args):
             config_tar = None
             log("[*] clean install: settings will be reset to defaults; a backup "
                 f"of the current ones is in {outdir}")
+
+    if config_tar and turns_off_password_login(config_tar):
+        log("[!] this config turns off password login, and the final check logs in "
+            "by password. It will report that it could not verify the router even "
+            "when the update worked: when it starts waiting, check with your SSH "
+            "key instead.")
 
     manifest = os.path.join(outdir, "resume.json")
     install.write_resume_manifest(manifest, args, profile, rel, images,

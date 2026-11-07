@@ -1166,6 +1166,35 @@ def rerun_command(*arguments):
     return shlex.join(["python3", os.path.realpath(__file__), *arguments])
 
 
+# The manifest of the run in progress, for the hint printed if it fails.
+_ACTIVE_MANIFEST = None
+
+
+def continuation_hint(manifest_path=None):
+    """How to carry on after a failure, once there is a way to.
+
+    Before pre-flight the one-shot trigger may or may not be spent, so nothing
+    general can be said, and once sysupgrade has started flash() prints the
+    read-only continuation itself.
+    """
+    path = manifest_path or _ACTIVE_MANIFEST
+    if not path:
+        return None
+    try:
+        phase = load_resume_manifest(path).get("phase")
+    except Abort:
+        return None
+    if phase == "preflight-complete":
+        return t("[!] to continue this install, run: {command}\n"
+                 "    The router reconnects by itself; after a lost link that can "
+                 "take up to 30 minutes.",
+                 command=rerun_command("--resume-manifest", path))
+    if phase == "pivot-complete":
+        return t("[!] the router is in the RAM installer; to continue, run: {command}",
+                 command=rerun_command("--stage", "flash", "--resume-manifest", path))
+    return None
+
+
 def verification_command(manifest_path, interface=None):
     command = ["--verify-only", os.path.abspath(manifest_path)]
     if interface:
@@ -1995,6 +2024,8 @@ def main(argv=None):
                     "--standalone-flash only for a separately validated RAM boot")
     manifest_path = os.path.abspath(
         args.resume_manifest or os.path.join(outdir, "resume.json"))
+    global _ACTIVE_MANIFEST
+    _ACTIVE_MANIFEST = manifest_path
     attacker = None
     if not args.dry_run and args.stage != "flash":
         attacker = callback_address(args.host, args.discover, args.attacker)
@@ -2133,11 +2164,18 @@ def main(argv=None):
     return 0
 
 
+# What a run reports as a plain failure rather than a traceback.
+CLEAN_ERRORS = (Abort, ChainError, channel.ChannelError, release.ReleaseError)
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (Abort, ChainError, release.ReleaseError) as e:
+    except CLEAN_ERRORS as e:
         log(f"[-] {e}")
+        hint = continuation_hint()
+        if hint:
+            log(hint)
         sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")

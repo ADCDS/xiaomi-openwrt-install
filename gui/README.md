@@ -46,8 +46,8 @@ the images without touching the router.
   the installed kernel. Both verify that write by read-back before rebooting, and
   the recovery net for a torn write is UART or TFTP. Leave the power alone.
 
-The update path reuses the code install and revert run on hardware, but the update
-as a whole has not yet been run on a real router. The wizard says so.
+The update has run on a real router only once so far (see the README), and the
+wizard says so.
 
 ## Adding text
 

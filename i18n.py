@@ -96,6 +96,10 @@ RU = {
         "\n[+] переход выполнен. Когда RAM-система станет доступна, выполните:",
 
     # ---- install.py: failures people act on ---------------------------------
+    "[!] to continue this install, run: {command}\n    The router reconnects by itself; after a lost link that can take up to 30 minutes.":
+        "[!] чтобы продолжить установку, выполните: {command}\n    Роутер подключится сам; после потери связи это может занять до 30 минут.",
+    "[!] the router is in the RAM installer; to continue, run: {command}":
+        "[!] роутер находится в RAM-установщике; чтобы продолжить, выполните: {command}",
     "no root shell; the AP may not have come back":
         "root-доступ не получен; возможно, точка доступа не поднялась",
     "no root shell; the AP may not have come back. If it did, Windows Firewall may be blocking the router's connection back to this computer: allow python.exe inbound on TCP 8000, 4444 and 4445 from the router, or see the Windows section of the README.":

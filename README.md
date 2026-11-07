@@ -79,14 +79,25 @@ Keep the run output somewhere private. Backups, configuration archives and
 `resume.json` hold device data and session secrets, and on Windows they inherit
 the folder's NTFS permissions rather than getting POSIX modes.
 
-**How far this has been tested.** The port is by
-[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install), who confirmed a
-complete native install on a physical RD03v2: Windows 10, Wi-Fi, stock 2.0.28 to
-release v1.14 standard, on 2026-10-11. This repository carries that port on newer
-installer code. The current code, v2.x releases, wired installs and `revert.py`
-have automated coverage on Windows but have not yet been run from Windows against
-a real router. Keep a Linux machine or a UART adapter within reach, and please
-report how it went.
+If a run stops partway, it prints the command that continues it. Do not restart
+from the beginning: the exploit's trigger works only once per factory reset.
+
+In a virtual machine, give Windows a bridged or macvtap network card. USB
+passthrough of an RTL8153 adapter froze on sustained sends in testing, and the
+exploit's download needs those to work.
+
+**How far this has been tested** on a real RD03v2. The port is by
+[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install).
+
+| From Windows | Result |
+|---|---|
+| Wi-Fi, stock 2.0.28 to v1.14 standard, on Windows 10 | Installed on 2026-10-11 (alexsys87), on older code |
+| Cable, stock 2.0.28 to v2.1.2 with a root password, on Windows 11 25H2 in a VM | Installed on 2026-11-07, on this code, including continuing an interrupted run |
+| Wi-Fi with this code, and `revert.py` | Automated tests only, not yet run against a real router |
+
+Keep a Linux machine or a UART adapter within reach, and please report how it went.
+
+`updater.py` and the web wizard are Linux-only for now.
 
 ## Install OpenWrt
 
@@ -194,9 +205,12 @@ that point, reach the RAM installer and run the command again with
 `--config-backup` and the backup it saved. It logs in by password, so a router set
 to SSH keys only (`PasswordAuth off`) is refused before anything is written.
 
-The update reuses the code the install and revert paths run on real hardware, but
-the update as a whole **has not yet been run on a real router**. Keep a UART adapter
-within reach, and please report how it went.
+So far this has run on a real router **once**: from Linux over a cable, v2.1.2 with
+`--config-backup`, on 2026-11-07. Every stage worked, and the router came back with
+its config byte-identical. That config has password login off, so the final check
+could not log in; the tool warns about this in advance, and the result was verified
+with an SSH key instead. A plain update of a router that keeps password login has
+not been run yet. Keep a UART adapter within reach, and please report how it went.
 
 ## Web wizard
 

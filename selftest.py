@@ -2020,12 +2020,18 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
             with open(path, "wb") as fh:
                 fh.write(kind.encode())
             images[kind] = {"name": kind, "path": path, "sha256": "x", "verified": True}
-        good = os.path.join(tmp, "good.tar.gz")
-        with tarfile.open(good, "w:gz") as tf:
-            body = b"config system\n"
-            info = tarfile.TarInfo("etc/config/system")
-            info.size = len(body)
-            tf.addfile(info, io.BytesIO(body))
+        def archive(path, members):
+            with tarfile.open(path, "w:gz") as tf:
+                for name, body in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(body)
+                    tf.addfile(info, io.BytesIO(body))
+            return path
+        good = archive(os.path.join(tmp, "good.tar.gz"),
+                       {"etc/config/system": b"config system\n"})
+        key_only = archive(os.path.join(tmp, "key-only.tar.gz"), {
+            "etc/config/system": b"config system\n",
+            "etc/config/dropbear": b"config dropbear\n\toption PasswordAuth 'off'\n"})
 
         def fake_scp_from(host, remote, local):
             if backup == "garbage":
@@ -2087,7 +2093,8 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         try:
             with contextlib.redirect_stdout(stdout):
                 arguments = list(argv) + ["--outdir", os.path.join(tmp, "out"), "--yes"]
-                arguments = [good if item == "GOOD_BACKUP" else item for item in arguments]
+                named = {"GOOD_BACKUP": good, "KEY_ONLY_BACKUP": key_only}
+                arguments = [named.get(item, item) for item in arguments]
                 updater.main(arguments)
         except (install.Abort, restore.RestoreError) as exc:
             outcome.error = str(exc)
@@ -2100,6 +2107,28 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         outcome.output = stdout.getvalue()
         outcome.good_backup = good
     return outcome
+
+
+def test_install_failure_hint():
+    print("\n[install: a failure says how to continue]")
+    import channel as ch
+    check("a lost shell is a plain failure, not a traceback",
+          ch.ChannelError in install.CLEAN_ERRORS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "resume.json")
+        def hint_at(phase):
+            install._write_resume_data(path, {"version": 1, "phase": phase})
+            return install.continuation_hint(path) or ""
+        check("after pre-flight the same manifest resumes",
+              "--resume-manifest" in hint_at("preflight-complete")
+              and "--stage" not in hint_at("preflight-complete"))
+        check("after the pivot it goes straight to the flash stage",
+              "--stage flash --resume-manifest" in hint_at("pivot-complete"))
+        check("before pre-flight nothing general can be promised",
+              hint_at("prepared") == "")
+        check("after sysupgrade starts, flash() has said what to do",
+              hint_at("flash-started") == "")
+    check("no manifest, no hint", install.continuation_hint("/nonexistent/resume.json") is None)
 
 
 def _wrote_nothing(box, outcome):
@@ -2244,6 +2273,16 @@ def test_updater():
                     transports={"wlan0": "wifi"})
     check("a clean install cannot be verified over the Wi-Fi it turns off",
           _wrote_nothing(box, r) and "clean install" in (r.error or ""))
+
+    print("\n[updater: restoring a key-only config]")
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--config-backup", "KEY_ONLY_BACKUP"])
+    check("a backup that disables password login warns before the write",
+          r.flash is not None and "turns off password login" in r.output, r.error or "")
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--config-backup", "GOOD_BACKUP"])
+    check("an ordinary backup does not",
+          r.flash is not None and "turns off password login" not in r.output)
 
     box = _UpdateBox(ssid="")
     r = _run_update(box, [], route="wlan0", transports={"wlan0": "wifi"})
@@ -2527,6 +2566,7 @@ def main():
     test_tagged_revert_cache()
     test_stock_image()
     test_expected_volume()
+    test_install_failure_hint()
     test_updater()
     test_gui_runner()
     test_gui_strings()
