@@ -2636,6 +2636,27 @@ def test_default_routes_fail_closed():
               install.default_routes() == [], "")
 
 
+def test_pivot_advice():
+    """A tagged failure must become an instruction, not a bare message."""
+    print("\n[revert: advice after a failed pivot]")
+    import revert
+
+    class Tagged(Exception):
+        pass
+
+    for stage, wanted in (("write-unconfirmed", "Do NOT reboot"),
+                          ("rebooted", "Reach the RAM installer"),
+                          ("not-written", None),
+                          (None, None)):
+        error = Tagged("boom")
+        if stage:
+            error.pivot_stage = stage
+        advice = revert.pivot_advice(error)
+        label = stage or "no tag"
+        check(f"{label} gets {'advice' if wanted else 'no advice'}",
+              (wanted in advice) if wanted else advice is None, str(advice))
+
+
 def test_revert_pivot_guards():
     """The revert pivot must refuse what the A/B paths refuse, before erasing."""
     print("\n[revert: the pivot's preconditions]")
@@ -2712,7 +2733,8 @@ def test_revert_pivot_guards():
     result, commands = dry("ubi0 10\nubi9 9\n", state="status= pid= active=0 lock=0")
     check("device 9 on ubi_kernel is refused when no pivot ran here",
           isinstance(result, revert.restore.RestoreError)
-          and "cannot be this tool's read-back device" in str(result), str(result))
+          and "no record of a pivot" in str(result)
+          and "ubidetach -d 9" in str(result), str(result))
 
     # Every one of those refusals happened before anything was erased, and
     # updater picks its advice from this tag: a wrong tag would tell the
@@ -2911,6 +2933,7 @@ def main():
     test_install_failure_hint()
     test_updater()
     test_default_routes_fail_closed()
+    test_pivot_advice()
     test_revert_pivot_guards()
     test_kernel_volume_id()
     test_read_back_kernel()

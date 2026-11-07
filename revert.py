@@ -134,6 +134,24 @@ def read_back_kernel(host, k, want_md5):
     return dev
 
 
+def pivot_advice(error):
+    """What to add after a pivot failure, or None when there is nothing to add.
+
+    `pivot_to_ram` tags any exception it raises with how far the write got, but
+    the tag is only useful if the caller turns it into an instruction, and a
+    standalone revert has no updater to do that for it.
+    """
+    stage = getattr(error, "pivot_stage", None)
+    if stage == "write-unconfirmed":
+        return ("Do NOT reboot or power-cycle: ubi_kernel held the installed "
+                "kernel and now holds a write that could not be verified. The "
+                "running system is fine until it reboots. Re-run to retry.")
+    if stage == "rebooted":
+        return ("The write verified. Reach the RAM installer (allow it about a "
+                "minute to start) and re-run to continue.")
+    return None
+
+
 def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
                  recover_stale_lock=False):
     """Put the RAM image in `ubi_kernel` and boot it. Returns the new host.
@@ -220,14 +238,22 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
         raise restore.RestoreError(
             f"ubi_kernel (mtd{k}) has {', '.join(sorted(on_target))} attached at "
             "runtime; refusing to overwrite a partition that may be live")
+    # Device 9 is this toolchain's reserved scratch number: install.verify_written,
+    # restore.do_restore and read_back_kernel are its only users, and ubiattach
+    # fails outright when the number is taken. A live device numbered 9 still
+    # detaches as cleanly as our own, so "it was not busy" proves nothing; it is
+    # ours only when a pivot ran here to leave it.
     stale_scratch = "ubi9" in on_target
     if stale_scratch and not previous_pivot:
-        # A live device numbered 9 detaches just as cleanly as our scratch one
-        # when nothing holds a reference to it, so "not busy" proves nothing.
+        # The attachment is kernel state, so it outlives /tmp: an operator who
+        # cleared /tmp, or a box where the status file never landed, reaches
+        # this. Say how to get out rather than claiming no pivot ever ran.
         raise restore.RestoreError(
-            f"ubi_kernel (mtd{k}) has ubi9 attached, but no earlier pivot ran on "
-            "this box, so it cannot be this tool's read-back device. Refusing to "
-            "overwrite a partition that may be live.")
+            f"ubi_kernel (mtd{k}) has ubi9 attached, but this box has no record "
+            f"of a pivot ({state.strip() or 'empty'}), so it cannot be told "
+            "apart from a partition that is live. If you know device 9 is not "
+            "in use, detach it on the router (ubidetach -d 9) and re-run. "
+            "Nothing has been written.")
     log(f"[1] UBI attached on mtd{sorted(int(item) for item in by_mtd)}; "
         f"ubi_kernel is mtd{k}"
         + (", holding only our stale device 9" if stale_scratch else " and is idle"))
@@ -496,15 +522,20 @@ if __name__ == "__main__":
     except (restore.RestoreError, release.ReleaseError, install.Abort,
             subprocess.TimeoutExpired) as e:
         log(f"[-] {e}")
-        # This path has no updater to turn the tag into advice, so say it here.
-        stage = getattr(e, "pivot_stage", None)
-        if stage == "write-unconfirmed":
-            log("[!] Do NOT reboot or power-cycle: ubi_kernel held the installed "
-                "kernel and now holds a write that could not be verified. The "
-                "running system is fine until it reboots. Re-run to retry.")
-        elif stage == "rebooted":
-            log("[!] The write verified and the box rebooted. Reach the RAM "
-                "installer and re-run to continue.")
+        advice = pivot_advice(e)
+        if advice:
+            log(f"[!] {advice}")
+        sys.exit(1)
+    except Exception as e:                              # noqa: BLE001 -- see below
+        # The pivot tags every exception it raises, including ones this list
+        # does not name (an OSError from the transport, for one). Show those
+        # with their advice instead of a traceback, and leave every untagged
+        # exception alone so real bugs still report a stack.
+        advice = pivot_advice(e)
+        if not advice:
+            raise
+        log(f"[-] {e}")
+        log(f"[!] {advice}")
         sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")
