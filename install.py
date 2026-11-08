@@ -1158,8 +1158,37 @@ def permanent_system_matches(profile, board, rootfs_type, mtd_text):
             and rootfs_type.strip() == "overlay" and partitions_ok)
 
 
+def installed_revision(host):
+    """The build revision the running system reports, or ""."""
+    _rc, out = ssh(host, "cat /etc/openwrt_version 2>/dev/null", check=False)
+    return out.strip()
+
+
+def require_expected_revision(host, expected):
+    """Refuse to call a flash done when a different build came up.
+
+    The release publishes `version.buildinfo`, the same revision string a built
+    system carries in `/etc/openwrt_version`, so this compares what was
+    requested with what actually booted. An unknown expected revision is logged,
+    not failed: a release that does not publish the asset gives us nothing to
+    compare.
+    """
+    got = installed_revision(host)
+    if not expected:
+        log(f"[3] installed revision: {got or 'unknown'}")
+        return got
+    if got != expected:
+        raise Abort(
+            f"the router came up on revision {(got or 'unknown')!r}, not the "
+            f"{expected!r} this run wrote. Do not report this as a completed "
+            "update: check /etc/openwrt_version on the device first.")
+    log(f"[3] installed revision matches the release: {got}")
+    return got
+
+
 def verify_permanent_system(profile, interface=None, fallback=None, host=None,
-                            deadline_s=600, router_mac=None):
+                            deadline_s=600, router_mac=None,
+                            expected_revision=""):
     """Rediscover and prove the permanent system without writing anything.
 
     These checks log in with the configured root password. The router's DHCP
@@ -1209,6 +1238,7 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
         if rc1 == rc2 == rc3 == 0 and permanent_system_matches(
                 profile, board, rtype, mtd_text):
             log(f"[3] installed board={board.strip()} rootfs_type=overlay")
+            require_expected_revision(candidate, expected_revision)
             log(t("[+] OpenWrt is installed on NAND."))
             return candidate
         last = (f"board={board.strip()!r} rootfs={rtype.strip()!r}; expected "
@@ -1279,7 +1309,7 @@ def build_sysupgrade_launcher(opts):
 def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           manifest_path=None, transport="wired", verify_interface=None,
           permanent_wifi_ssid=None, verify_fallback=None,
-          verify_transport=None, router_iface=None):
+          verify_transport=None, router_iface=None, expected_revision=""):
     """router_iface: the router-facing interface on a wired install, where the
     RAM system's own DHCP makes it this host's gateway (gateway_conflict)."""
     log(t("\n=== stage 3: flash (sysupgrade from the RAM system) ==="))
@@ -1449,7 +1479,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         verify_permanent_system(
             profile, interface=verify_interface, fallback=verify_fallback,
             host=host if not verify_interface else None,
-            router_mac=router_mac)
+            router_mac=router_mac, expected_revision=expected_revision)
     except Abort as exc:
         log(t("[!] sysupgrade was launched; do not run the flash stage again"))
         log(t("[!] verification-only continuation:"))
@@ -1732,6 +1762,25 @@ def prompt_firstboot(args):
                 "Wi-Fi country code (required when SSID is set, for example BR): "
             )).strip().upper()
     return args
+
+
+def ssid_from_config_archive(path, profile):
+    """The SSID an installer-generated config archive enables, or ""."""
+    import tarfile
+    member_name = f"etc/uci-defaults/{profile.firstboot_script}"
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            source = archive.extractfile(member_name)
+            body = source.read().decode("utf-8") if source else ""
+    except (OSError, KeyError, tarfile.TarError, UnicodeDecodeError):
+        return ""
+    match = re.search(r"uci -q set wireless\.\$vif\.ssid=(.+)$", body, re.M)
+    if not match:
+        return ""
+    text = match.group(1).strip()
+    if len(text) >= 2 and text[0] == "'" and text[-1] == "'":
+        text = text[1:-1].replace("'\\''", "'")
+    return text
 
 
 def validate_wifi_config_archive(path, profile, ssid):
@@ -2272,7 +2321,8 @@ def main(argv=None):
               manifest_path, args.transport, args.verify_interface,
               args.wifi_ssid, verify_fallback, verify_transport,
               router_iface=(args.discover if args.transport == "wired"
-                            else None))
+                            else None),
+              expected_revision=release.revision(rel, args.images))
     else:
         log(t("\n[+] pivot done. When the RAM system is reachable, run:"))
         log("    " + rerun_command(args.image, "--stage", "flash",

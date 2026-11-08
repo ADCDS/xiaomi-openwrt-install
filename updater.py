@@ -186,11 +186,15 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     return rootfs
 
 
-def permanent_ssid(host, args, verify_transport):
+def permanent_ssid(host, args, verify_transport, rootfs, profile):
     """The network final verification waits on, known before anything is written.
 
     install.flash refuses without one, but only after the pivot, when the
-    installed kernel is already gone.
+    installed kernel is already gone. Where the answer comes from matters: on
+    the resume path `host` is the RAM installer, whose wireless config is the
+    installer's own, so asking it would strand the operator on a network that
+    disappears. The config archive, when there is one, is what sysupgrade -f
+    will apply and therefore what says which network the box returns on.
     """
     if verify_transport != "wifi":
         return args.wifi_ssid
@@ -199,7 +203,21 @@ def permanent_ssid(host, args, verify_transport):
                       "verified over Wi-Fi. Connect a cable and pass "
                       "--verify-interface, or keep the settings."))
     if args.wifi_ssid:
+        if args.config_backup:
+            install.validate_wifi_config_archive(args.config_backup, profile,
+                                                 args.wifi_ssid)
         return args.wifi_ssid
+    if args.config_backup:
+        archived = install.ssid_from_config_archive(args.config_backup, profile)
+        if not archived:
+            raise Abort(t("the config archive does not enable a Wi-Fi network, so "
+                          "the update cannot be verified over Wi-Fi. Pass "
+                          "--verify-interface to verify over a cable."))
+        return archived
+    if rootfs == "tmpfs":
+        raise Abort(t("the router is in the RAM installer, whose wireless config "
+                      "is the installer's, not yours. Pass --wifi-ssid, or "
+                      "--config-backup with the archive the earlier run saved."))
     rc, out = install.ssh(host, "uci -q get wireless.@wifi-iface[0].ssid",
                           check=False)
     ssid = out.strip()
@@ -361,7 +379,8 @@ def run(args):
     rootfs = preflight(host, profile, rel, images, args.images,
                        router_iface=args.discover if gateway_ok else None)
     verify_transport = install.detect_transport(args.verify_interface)
-    args.wifi_ssid = permanent_ssid(host, args, verify_transport)
+    args.wifi_ssid = permanent_ssid(host, args, verify_transport, rootfs,
+                                    profile)
 
     if rootfs == "tmpfs":
         # The config of a RAM system is the installer's defaults. Backing that up
@@ -444,7 +463,8 @@ def run(args):
         args.transport, args.verify_interface, args.wifi_ssid,
         profile.openwrt_host if verify_transport == "wired" else None,
         verify_transport,
-        router_iface=args.discover if args.transport == "wired" else None)
+        router_iface=args.discover if args.transport == "wired" else None,
+        expected_revision=release.revision(rel, args.images))
     log(t("[+] update complete: your settings were restored." if config_tar
           else "[+] update complete: the new release is running with default settings."))
     return 0

@@ -2643,6 +2643,57 @@ def test_default_routes_fail_closed():
               install.default_routes() == [], "")
 
 
+def test_update_verification():
+    """The update must verify the right network, and the right build."""
+    print("\n[updater: what it verifies against]")
+    import types
+    import devices as _devices
+    import updater
+    profile = _devices.get_profile("rd03v2")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wifi = os.path.join(tmp, "wifi.tar.gz")
+        install.build_config_tar(wifi, "Home Net's", "hunter22", profile)
+        plain = os.path.join(tmp, "plain.tar.gz")
+        install.build_config_tar(plain, None, None, profile)
+
+        check("the archive's SSID is read back, quotes and all",
+              install.ssid_from_config_archive(wifi, profile) == "Home Net's",
+              install.ssid_from_config_archive(wifi, profile))
+        check("an archive without Wi-Fi yields no SSID",
+              install.ssid_from_config_archive(plain, profile) == "",
+              install.ssid_from_config_archive(plain, profile))
+
+        args = types.SimpleNamespace(wifi_ssid=None, keep_settings=True,
+                                     config_backup=wifi)
+        check("on the resume path the SSID comes from the archive",
+              updater.permanent_ssid("ram-host", args, "wifi", "tmpfs",
+                                     profile) == "Home Net's")
+
+        args = types.SimpleNamespace(wifi_ssid=None, keep_settings=True,
+                                     config_backup=None)
+        try:
+            updater.permanent_ssid("ram-host", args, "wifi", "tmpfs", profile)
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check("the RAM installer's own SSID is never used as the owner's",
+              "RAM installer" in error, error)
+
+    with mock.patch.object(install, "ssh", return_value=(0, "r0+38070\n")):
+        check("a matching installed revision passes",
+              install.require_expected_revision("h", "r0+38070") == "r0+38070")
+        check("an unpublished revision is logged, not failed",
+              install.require_expected_revision("h", "") == "r0+38070")
+        try:
+            install.require_expected_revision("h", "r0+99999")
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check("a different build coming up is refused",
+              "came up on revision" in error, error)
+
+
 def test_ubi9_reservation():
     """Every read-back must refuse a device 9 it does not own."""
     print("\n[ubi: device 9 is reserved toolchain-wide]")
@@ -3068,6 +3119,7 @@ def main():
     test_install_failure_hint()
     test_updater()
     test_default_routes_fail_closed()
+    test_update_verification()
     test_ubi9_reservation()
     test_pivot_advice()
     test_revert_pivot_guards()

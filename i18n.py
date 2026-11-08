@@ -134,6 +134,10 @@ RU = {
         "доступно только {available} КиБ памяти, а образу RAM нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "после чистой установки Wi-Fi выключен, поэтому проверить её по Wi-Fi нельзя. Подключите кабель и укажите --verify-interface либо сохраните настройки.",
+    "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":
+        'роутер находится в RAM-установщике, и его настройки Wi-Fi -- это настройки установщика, а не ваши. Укажите --wifi-ssid или --config-backup с архивом, сохранённым прошлым запуском.',
+    'the config archive does not enable a Wi-Fi network, so the update cannot be verified over Wi-Fi. Pass --verify-interface to verify over a cable.':
+        'архив настроек не включает сеть Wi-Fi, поэтому обновление нельзя проверить по Wi-Fi. Укажите --verify-interface, чтобы проверить по кабелю.',
     "cannot tell which SSID to rejoin after the update; pass it with --wifi-ssid, or verify over a cable with --verify-interface.":
         "неизвестно, к какой сети подключаться после обновления; укажите её через --wifi-ssid или проверяйте по кабелю с --verify-interface.",
     "The installed kernel has been replaced by the RAM installer, so the router boots into that now. Reach it, then run this again with {keep} to continue; do not skip this step.":
@@ -284,6 +288,10 @@ ZH_CN = {
         "当前仅剩 {available} KiB 内存，而 RAM 镜像需要 {needed} KiB。请先释放一些内存（例如停止可以暂时停用的服务），然后重新运行。",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "全新安装会关闭 Wi-Fi，因此无法通过 Wi-Fi 验证。请连接网线并指定 --verify-interface，或保留原有设置。",
+    "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":
+        '路由器当前处于 RAM 安装系统，其无线配置是安装系统的，不是你的。请指定 --wifi-ssid，或用 --config-backup 指定先前运行保存的归档。',
+    'the config archive does not enable a Wi-Fi network, so the update cannot be verified over Wi-Fi. Pass --verify-interface to verify over a cable.':
+        '该配置归档未启用 Wi-Fi 网络，因此无法通过 Wi-Fi 验证更新。请指定 --verify-interface 通过网线验证。',
     "cannot tell which SSID to rejoin after the update; pass it with --wifi-ssid, or verify over a cable with --verify-interface.":
         "无法确定更新后应重新连接哪个 SSID；请用 --wifi-ssid 指定，或用网线配合 --verify-interface 进行验证。",
     "The installed kernel has been replaced by the RAM installer, so the router boots into that now. Reach it, then run this again with {keep} to continue; do not skip this step.":
@@ -434,6 +442,10 @@ PT_BR = {
         "só há {available} KiB de memória disponível e a imagem em RAM precisa de {needed} KiB. Libere um pouco primeiro, por exemplo parando serviços dispensáveis, e execute isto de novo.",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "uma instalação limpa deixa o Wi-Fi desativado, então não é possível verificá-la por Wi-Fi. Conecte um cabo e passe --verify-interface, ou mantenha as configurações.",
+    "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":
+        'o roteador está no instalador em RAM, e a configuração de Wi-Fi dele é a do instalador, não a sua. Passe --wifi-ssid, ou --config-backup com o arquivo salvo pela execução anterior.',
+    'the config archive does not enable a Wi-Fi network, so the update cannot be verified over Wi-Fi. Pass --verify-interface to verify over a cable.':
+        'o arquivo de configuração não ativa uma rede Wi-Fi, então a atualização não pode ser verificada por Wi-Fi. Passe --verify-interface para verificar por cabo.',
     "cannot tell which SSID to rejoin after the update; pass it with --wifi-ssid, or verify over a cable with --verify-interface.":
         "não é possível saber a qual SSID se reconectar após a atualização; informe-o com --wifi-ssid, ou verifique por cabo com --verify-interface.",
     "The installed kernel has been replaced by the RAM installer, so the router boots into that now. Reach it, then run this again with {keep} to continue; do not skip this step.":
