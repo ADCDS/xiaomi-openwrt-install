@@ -99,8 +99,8 @@ def build_argv(mode, opts):
     def common(argv):
         if iface():
             argv += ["--interface", iface()]
-        if opts.get("root_password"):
-            argv += ["--root-password", str(opts["root_password"])]
+        # The root password and the Wi-Fi key travel in the environment: an
+        # argv item is readable from /proc/<pid>/cmdline by any local user.
         return argv + (["--dry-run"] if dry else ["--yes"])
 
     if mode == "install":
@@ -109,8 +109,6 @@ def build_argv(mode, opts):
             argv += ["--verify-interface", iface("verify_interface")]
         if opts.get("wifi_ssid"):
             argv += ["--wifi-ssid", str(opts["wifi_ssid"])]
-        if opts.get("wifi_key"):
-            argv += ["--wifi-key", str(opts["wifi_key"])]
         if opts.get("wifi_country"):
             argv += ["--wifi-country", str(opts["wifi_country"])]
         return common(argv)
@@ -147,6 +145,8 @@ class Run:
         self.id = uuid.uuid4().hex[:12]
         self.mode = mode
         self.dry_run = bool(opts.get("dry_run"))
+        self.secrets = {key: str(opts[key]) for key in ("root_password", "wifi_key")
+                        if opts.get(key)}
         self.argv = build_argv(mode, opts)
         self.shown_argv = shlex.join(redact(self.argv))
         self.events = []                 # append-only; SSE replays from an index
@@ -177,9 +177,18 @@ class Run:
             encoding="utf-8", errors="replace", bufsize=1,
             # The parsing below reads the tools' English output; the browser
             # does the translating, whatever language this system runs in.
-            env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8",
-                 "XIAOMI_INSTALL_LANG": "en"})
+            env=self._child_env())
         threading.Thread(target=self._pump, daemon=True).start()
+
+    def _child_env(self):
+        """The child's environment, carrying the secrets argv must not hold."""
+        env = {**os.environ, "PYTHONUNBUFFERED": "1",
+               "PYTHONIOENCODING": "utf-8", "XIAOMI_INSTALL_LANG": "en"}
+        if self.secrets.get("root_password"):
+            env["RD03V2_ROOT_PASSWORD"] = self.secrets["root_password"]
+        if self.secrets.get("wifi_key"):
+            env["RD03V2_WIFI_KEY"] = self.secrets["wifi_key"]
+        return env
 
     def _pump(self):
         for raw in self.proc.stdout:

@@ -71,12 +71,15 @@ def scp_from(host, remote, local):
     src = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for password in install.SSH_PASSWORDS:
-        result = subprocess.run(
-            (["sshpass", "-p", password] if shutil.which("sshpass") else []) +
-            ["scp", "-O", "-o", "StrictHostKeyChecking=no",
-             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-             "-o", "NumberOfPasswordPrompts=1", src, local],
-            capture_output=True, text=True, timeout=300)
+        argv = ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+                "-o", "NumberOfPasswordPrompts=1", src, local]
+        env = None
+        if shutil.which("sshpass"):
+            argv = ["sshpass", "-e"] + argv
+            env = install.password_env(password)
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=300, env=env)
         if result.returncode == 0:
             return
         last = result.stderr.strip()
@@ -341,7 +344,7 @@ def run(args):
         log(t("[dry-run] router was not contacted"))
         return 0
 
-    install.require_host_tools()
+    install.require_host_tools(password=bool(args.root_password))
     if args.root_password:
         install.SSH_PASSWORDS.append(args.root_password)
         restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
@@ -491,7 +494,7 @@ def parse_args(argv=None):
     ap.add_argument("--outdir", default=None, help="run output directory")
     ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
                     help="language for prompts and instructions (default: system)")
-    args = ap.parse_args(argv)
+    args = install.absorb_secret_env(ap.parse_args(argv))
     args.tag = args.tag or devices.get_profile(args.device).default_release
     return args
 

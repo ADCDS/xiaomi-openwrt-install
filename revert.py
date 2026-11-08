@@ -427,14 +427,14 @@ def main():
                     help="clear an inactive stale writer lock after inspection")
     ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
                     help="language for prompts and instructions (default: system)")
-    args = ap.parse_args()
+    args = install.absorb_secret_env(ap.parse_args())
     i18n.set_language(args.lang)
     i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.release = args.release or profile.default_release
     args.discover = install.canonical_interface(args.discover)
     if not args.dry_run:
-        install.require_host_tools()
+        install.require_host_tools(password=bool(args.root_password))
     if args.transport == "auto" and args.discover:
         args.transport = install.detect_transport(args.discover)
     elif args.transport == "auto":
@@ -539,28 +539,35 @@ def main():
     return 1
 
 
+REPORTED_FAILURES = (restore.RestoreError, release.ReleaseError,
+                     install.Abort, subprocess.TimeoutExpired)
+
+
+def is_reported_failure(error):
+    """True when the CLI prints this instead of a traceback.
+
+    Everything the pivot raises carries a `pivot_stage`, including classes the
+    tuple above does not name (an OSError from the transport, for one).
+    """
+    return isinstance(error, REPORTED_FAILURES) or hasattr(error, "pivot_stage")
+
+
+def failure_advice(error):
+    """The advice line to print after a reported failure, or None."""
+    return pivot_advice(error)
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (restore.RestoreError, release.ReleaseError, install.Abort,
-            subprocess.TimeoutExpired) as e:
-        log(f"[-] {e}")
-        advice = pivot_advice(e)
-        if advice:
-            log(f"[!] {advice}")
-        sys.exit(1)
-    except Exception as e:                              # noqa: BLE001 -- see below
-        # The pivot tags every exception it raises, including ones this list
-        # does not name (an OSError from the transport, for one). Show those
-        # with their advice instead of a traceback, and leave every untagged
-        # exception alone so real bugs still report a stack.
-        if not hasattr(e, "pivot_stage"):
-            raise
-        log(f"[-] {e}")
-        advice = pivot_advice(e)
-        if advice:
-            log(f"[!] {advice}")
-        sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")
         sys.exit(130)
+    except Exception as e:                              # noqa: BLE001 -- classified
+        if not is_reported_failure(e):
+            raise
+        log(f"[-] {e}")
+        advice = failure_advice(e)
+        if advice:
+            log(f"[!] {advice}")
+        sys.exit(1)

@@ -147,12 +147,18 @@ def ssh(host, cmd, timeout=180, check=True):
         return result
     last = (1, "")
     for pw in SSH_PASSWORDS:
-        base = ["sshpass", "-p", pw] if _have("sshpass") else []
+        env = None
+        if _have("sshpass"):
+            base = ["sshpass", "-e"]
+            env = password_env(pw)
+        else:
+            base = []
         base += ["ssh", "-o", "StrictHostKeyChecking=no",
                  "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                  "-o", "ConnectTimeout=15", "-o", "PubkeyAuthentication=no",
                  "-o", "NumberOfPasswordPrompts=1", f"root@{host}", cmd]
-        r = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(base, capture_output=True, text=True,
+                           timeout=timeout, env=env)
         last = (r.returncode, (r.stdout + r.stderr).strip())
         if r.returncode == 0:
             return last
@@ -390,6 +396,13 @@ def remote_job_state(host, status_path, lock_dir):
     return state
 
 
+def password_env(password):
+    """Environment for `sshpass -e`; `-p` would expose it in /proc."""
+    env = dict(os.environ)
+    env["SSHPASS"] = password or ""
+    return env
+
+
 def require_own_ubi9(host, k):
     """Device 9 is this toolchain's scratch device; never detach one we lack.
 
@@ -573,12 +586,17 @@ def scp(host, local, remote):
             return winssh.upload(host, local, remote, SSH_PASSWORDS)
         except winssh.SSHError as exc:
             raise RestoreError(str(exc)) from exc
-    base = ["sshpass", "-p", ""] if _have("sshpass") else []
+    env = None
+    if _have("sshpass"):
+        base = ["sshpass", "-e"]
+        env = password_env("")
+    else:
+        base = []
     base += ["scp", "-O", "-o", "StrictHostKeyChecking=no",
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
              local, f"root@[{host}]:{remote}" if ":" in host
              else f"root@{host}:{remote}"]
-    subprocess.run(base, check=True, timeout=900)
+    subprocess.run(base, check=True, timeout=900, env=env)
 
 
 if __name__ == "__main__":

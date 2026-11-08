@@ -434,8 +434,10 @@ def test_router_gateway():
     # The RAM stage offers only the empty password.
     tried = []
 
-    def denied(cmd, **_kw):
-        tried.append(cmd[2])
+    def denied(cmd, **kwargs):
+        # sshpass receives the secret through SSHPASS (`-e`), not argv.
+        tried.append(kwargs.get("env", {}).get("SSHPASS",
+                                               cmd[2] if len(cmd) > 2 else None))
         return mock.Mock(returncode=255, stdout="",
                          stderr="root@h: Permission denied (password).")
     with mock.patch.object(install.subprocess, "run", side_effect=denied), \
@@ -2379,8 +2381,9 @@ def test_gui_runner():
 
     argv = runner.build_argv("update", {"release": "latest", "wifi_ssid": "Home",
                                         "root_password": "pw", "dry_run": False})
-    check("an update carries the current password and no Wi-Fi settings",
-          "--root-password" in argv and not any("wifi" in a for a in argv))
+    check("an update keeps the password out of argv and carries no Wi-Fi settings",
+          "--root-password" not in argv and not any("wifi" in a for a in argv),
+          str(argv))
     check("the tools run under this interpreter", argv[0] == sys.executable)
     check("a real run answers the confirmations up front", "--yes" in argv)
     check("a dry run does not",
@@ -2402,7 +2405,11 @@ def test_gui_runner():
                                  "wifi_ssid": "Home", "wifi_country": "RU"})
     check("secrets never leave in the shown command",
           "hunter" not in run.shown_argv and "Home" in run.shown_argv, run.shown_argv)
-    check("...but the tool itself still gets them", "hunter2" in run.argv)
+    env = run._child_env()
+    check("...but the child receives them in its environment",
+          env.get("RD03V2_ROOT_PASSWORD") == "hunter2"
+          and env.get("RD03V2_WIFI_KEY") == "hunter3"
+          and "hunter2" not in run.argv, str(run.argv))
 
     print("\n[gui: stages follow the tools' real banners]")
     banners = {
@@ -2746,6 +2753,21 @@ def test_pivot_advice():
 
     class Tagged(Exception):
         pass
+
+    # The CLI reports these instead of tracebacking; everything else raises.
+    class Tagged(Exception):
+        pass
+
+    reported = Tagged("boom")
+    reported.pivot_stage = "not-written"
+    for error, expected in (
+            (restore.RestoreError("x"), True),
+            (install.Abort("x"), True),
+            (subprocess.TimeoutExpired("ssh", 30), True),
+            (reported, True),
+            (OSError("plain"), False)):
+        check(f"{type(error).__name__} is {'reported' if expected else 'raised'}",
+              revert.is_reported_failure(error) is expected, repr(error))
 
     for stage, wanted in (("write-unconfirmed", "Do NOT reboot"),
                           ("rebooted", "Reach the RAM installer"),

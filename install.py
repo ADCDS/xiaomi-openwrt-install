@@ -992,9 +992,12 @@ def ssh(host, cmd, timeout=120, check=True, passwords=None):
                 "-o", "PubkeyAuthentication=no", "-o", "LogLevel=ERROR",
                 "-o", "NumberOfPasswordPrompts=1",
                 f"root@{host}", cmd]
+        env = None
         if shutil.which("sshpass"):
-            base = ["sshpass", "-p", pw] + base
-        r = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
+            base = ["sshpass", "-e"] + base
+            env = password_env(pw)
+        r = subprocess.run(base, capture_output=True, text=True,
+                           timeout=timeout, env=env)
         last = (r.returncode, (r.stdout + r.stderr).strip())
         if r.returncode == 0:
             return last
@@ -1016,12 +1019,15 @@ def scp_to(host, local, remote, passwords=None):
     dest = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for pw in SSH_PASSWORDS if passwords is None else passwords:
-        r = subprocess.run(
-            (["sshpass", "-p", pw] if shutil.which("sshpass") else []) +
-            ["scp", "-O", "-o", "StrictHostKeyChecking=no",
-             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-             "-o", "NumberOfPasswordPrompts=1", local, dest],
-            capture_output=True, text=True, timeout=900)
+        argv = ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+                "-o", "NumberOfPasswordPrompts=1", local, dest]
+        env = None
+        if shutil.which("sshpass"):
+            argv = ["sshpass", "-e"] + argv
+            env = password_env(pw)
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=900, env=env)
         if r.returncode == 0:
             return
         last = r.stderr.strip()
@@ -1387,10 +1393,23 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         with open(launcher, "w", encoding="utf-8", newline="\n") as output:
             output.write(script_body)
         ram_scp(host, launcher, "/tmp/run-sysupgrade.sh")
-    rc, active_upgrade = ram_ssh(
-        host, "pgrep -f '[s]ysupgrade' | head -1", check=False)
-    if rc == 0 and active_upgrade.strip():
-        raise Abort(f"sysupgrade is already running (pid {active_upgrade.strip()})")
+    # The probe has to tell "nothing is running" from "I cannot tell". A bare
+    # `pgrep ... | head -1` takes head's status, so a BusyBox without pgrep
+    # prints "not found" to stderr, leaves the output empty, and reads as idle.
+    _rc, probe = ram_ssh(
+        host,
+        "if command -v pgrep >/dev/null 2>&1; then "
+        "p=$(pgrep -f '[s]ysupgrade' | head -1); echo \"probe=pgrep busy=${p:-none}\"; "
+        "elif command -v ps >/dev/null 2>&1; then "
+        "p=$(ps w 2>/dev/null | grep '[s]ysupgrade' | grep -v grep | head -1); "
+        "echo \"probe=ps busy=${p:-none}\"; "
+        "else echo \"probe=none busy=unknown\"; fi",
+        check=False)
+    if "busy=" not in probe or "busy=unknown" in probe:
+        raise Abort("cannot tell whether sysupgrade is already running on the "
+                    f"RAM system ({probe!r}); refusing to start a second writer")
+    if "busy=none" not in probe:
+        raise Abort(f"sysupgrade is already running ({probe.strip()})")
     ram_ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
                   "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
             check=True)
@@ -1602,13 +1621,53 @@ def canonical_interface(interface):
         raise Abort(str(exc)) from exc
 
 
-def require_host_tools():
-    """Fail before touching the router if this host cannot talk to it."""
+def password_env(password):
+    """Environment for `sshpass -e`, so the secret never reaches argv.
+
+    `sshpass -p <password>` puts it in /proc/<pid>/cmdline, readable by any
+    local user for the life of the process, and in the transcript's argv line.
+    """
+    env = dict(os.environ)
+    env["SSHPASS"] = password or ""
+    return env
+
+
+def absorb_secret_env(args):
+    """Fill a secret from the environment when no flag carried it.
+
+    The wizard launches these tools, and an argument is visible to every local
+    user; passing it in the environment keeps it out of argv. The variable is
+    consumed so that nothing this process spawns inherits it either.
+    """
+    args.root_password = (getattr(args, "root_password", None)
+                          or os.environ.pop("RD03V2_ROOT_PASSWORD", None))
+    if hasattr(args, "wifi_key"):
+        args.wifi_key = (args.wifi_key
+                         or os.environ.pop("RD03V2_WIFI_KEY", None))
+    return args
+
+
+def require_host_tools(password=False):
+    """Fail before touching the router if this host cannot talk to it.
+
+    On Linux every one of these is used by the first contact with the router,
+    so a missing tool belongs here rather than in a failure after the pivot.
+    `sshpass` is required because every Linux SSH call disables pubkey auth and
+    offers a password. `openssl` is only needed to hash a root password.
+    """
     if hostnet.is_windows():
         try:
             winssh.dependencies()
         except winssh.SSHError as exc:
             raise Abort(str(exc)) from exc
+        return
+    needed = ["ssh", "scp", "sshpass", "ip"]
+    if password:
+        needed.append("openssl")
+    missing = [tool for tool in needed if shutil.which(tool) is None]
+    if missing:
+        raise Abort("this host is missing " + ", ".join(missing)
+                    + "; install them before the router is touched")
 
 
 def callback_address(host, interface, override=None):
@@ -1861,7 +1920,7 @@ def verify_resume_selection(resume, args, profile, rel, images):
 
 def main(argv=None):
     os.umask(0o077)
-    args = parse_args(argv)
+    args = absorb_secret_env(parse_args(argv))
     i18n.set_language(args.lang)
     i18n.tolerate_console_encoding()
     if args.list_interfaces:
@@ -1925,7 +1984,7 @@ def main(argv=None):
     args.discover = canonical_interface(args.discover)
     args.verify_interface = canonical_interface(args.verify_interface)
     if not args.dry_run:
-        require_host_tools()
+        require_host_tools(password=bool(args.root_password))
 
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
         args.discover = chain.local_interface(args.host)

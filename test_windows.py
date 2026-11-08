@@ -286,8 +286,9 @@ class FlashOverWindowsTransportTests(unittest.TestCase):
         if "xiaomi-sysupgrade.ack" in command and "touch" in command:
             self.running = "permanent"
             return 0, "ack-sent"
-        if "pgrep" in command:
-            return 1, ""
+        if "probe=" in command or "pgrep" in command:
+            # The RAM-stage guard now prints a definite probe result.
+            return 0, "probe=pgrep busy=none"
         if "echo up" in command:
             return 0, "up"
         return 0, ""

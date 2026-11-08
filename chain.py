@@ -269,7 +269,7 @@ def initialise(host, ssid=None, reboot=True, wait=300):
         raise ChainError("could not determine an SSID to submit; pass one")
 
     stok = login(host, FACTORY_ADMIN_HASH)
-    log(f"[1] logged in with the factory account hash, stok={stok}")
+    log("[1] logged in with the factory account hash")
     res = api(host, stok, "api/xqsystem/router_init",
               {"wifi24Ssid": ssid, "wifi50Ssid": ssid})
     # setSPwd()/setInited() run even when `code` reports a validation error on
@@ -425,7 +425,7 @@ def admin_session(host, ident=b"ota0001", timeout=20.0):
     h256, cfg = leak_web_passwd256(host, ident, timeout)
     log(f"[2] leaked web_passwd256 = {h256[:16]}...")
     stok = login(host, h256)
-    log(f"[2] admin session minted: stok={stok}")
+    log("[2] admin session minted")
     return stok, cfg
 
 
