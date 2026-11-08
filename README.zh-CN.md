@@ -17,6 +17,8 @@
 | Linux，原厂固件 2.0.28 和 2.0.12 | 主要场景，已在真实路由器上验证 |
 | Windows 10、Wi-Fi、原厂固件 2.0.28、发布版 v1.14 `standard` | 已于 2026 年 10 月 11 日在真实路由器上验证（[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)），基于较早版本的代码 |
 | 虚拟机中的 Windows 11 25H2、网线、原厂固件 2.0.28、发布版 v2.1.2、设置了 root 密码 | 已于 2026 年 11 月 7 日在此版本代码上于真实路由器验证，包括继续被中断的运行 |
+| `updater.py`，从 Linux 恢复已保存的配置 | 于 2026 年 11 月 7 日运行过一次。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录 |
+| 从 Windows 运行 `updater.py`，以及更新仍允许密码登录的路由器 | 自动化测试；**尚未在真实路由器上验证** |
 | Windows、Wi-Fi，此版本代码 | 自动化测试；**尚未在真实路由器上验证** |
 | Windows，恢复原厂固件（`revert.py`） | 自动化测试；**尚未在真实路由器上验证** |
 
@@ -81,6 +83,10 @@ py -3 install.py --release vX.Y.Z --transport wifi --offline --dry-run
 
 不带 NSS 的构建只存在于 v1.x 系列的最新发布版中：`py -3 install.py standard --release v1.14`。
 
+`--root-password 密码` 可在不使用 `--configure` 交互提问的情况下设置新系统的 root 密码；`--attacker 地址` 用于在多网卡主机上自动选择会挑错回调地址时手动指定。
+
+自动化时可以把机密通过 `RD03V2_ROOT_PASSWORD` 和 `RD03V2_WIFI_KEY` 传入，这样它们不会出现在进程参数列表中：变量在启动时被读取并消费，网页向导正是为此使用的。
+
 ## 3. 复位与连接
 
 1. 用 Reset 按钮执行硬件复位。
@@ -139,7 +145,7 @@ python3 install.py --transport wifi --interface WIFI_INTERFACE \
 
 最后应出现 `[+] OpenWrt 已安装到 NAND。`
 
-如果运行被中断，安装器会输出用于继续的命令。不要从头开始：漏洞触发器在每次恢复出厂设置之后只会生效一次。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
+如果运行在预检之后被中断，安装器会输出用于继续的命令；在此之前的失败不会输出，因为一次性触发器可能尚未生效。无论哪种情况都不要从头开始：漏洞触发器在每次恢复出厂设置之后只会生效一次。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
 
 看到 `flash-started` 或「不要断开电源」之类的提示之后，**不要断开电源，不要复位路由器，也不要重新执行固件写入阶段**。
 
@@ -211,9 +217,11 @@ python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 
 把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release TAG` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在这块板子上，常规的 `sysupgrade` 会导致变砖，因此更新通过 RAM 安装器进行。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
 
-这里没有 A/B 冗余：出现故障时的保障是 UART。如果运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上同样可用。哪些场景尚未在真实路由器上验证，见上表。
+这里没有 A/B 冗余：出现故障时的保障是 UART。如果运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上与 Linux 一样可用，但尚未从 Windows 对真实路由器执行过更新；哪些场景尚未验证见上表。
 
-到目前为止，更新在真实路由器上只运行过**一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）。请在手边备好 UART 适配器，并反馈结果。
+常用参数：`--verify-interface 接口` 选择最终检查所用的接口，与 `--no-keep-settings` 一起使用时必须提供（该选项会关闭 Wi-Fi）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
+
+到目前为止，更新在真实路由器上只运行过**一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录——工具会事先提示，结果改用 SSH 密钥验证。仍允许密码登录的路由器尚未执行过更新。请在手边备好 UART 适配器，并反馈结果。
 
 ## 网页向导
 
@@ -235,6 +243,12 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface 
 
 `revert.py` 会校验原厂镜像，下载 RAM 系统镜像，把路由器切换到 RAM，恢复原厂固件，并等待原厂系统响应，报告其硬件、ROM 以及设置向导是否在等待。恢复请使用它，而不要重新执行固件写入：执行 `sysupgrade` 之后，原厂的 A/B 备份已经被擦除（见 [NOTICE](NOTICE)）。
 
+## 支持的设备
+
+| 配置 | 硬件 | 安装来源 | 恢复原厂固件 |
+|---|---|---|---|
+| `rd03v2` | Xiaomi AX3000T RD03v2，Qualcomm IPQ5018 | 原厂 2.0.28 与 2.0.12，已在真实路由器上验证 | 2.0.28 与 2.0.12，已在真实路由器上验证 |
+
 ## 其他工具
 
 | 命令 | 用途 |
@@ -242,7 +256,11 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface 
 | `python3 release.py --device rd03v2` | 显示最新发布版以及所需的文件。 |
 | `python3 release.py --device rd03v2 --download --wifi --dest images` | 下载并校验镜像。 |
 | `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | 重新连接到被中断运行的回调通道。 |
+| `python3 probe.py --device rd03v2` | 采集硬件与闪存布局信息，不写入原始固件分区。会初始化或重启原厂固件、修改其状态，并消耗一次性触发器。 |
+| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover 接口` | 从已启动的 RAM 系统执行底层原厂固件写入。 |
+| `python3 ubiparse.py /path/to/ubi-dump.bin` | 离线解析 UBI 转储。 |
 | `python3 selftest.py` | 无需路由器的检查（Linux）。在 Windows 中：`py -3 -m unittest test_hostnet test_windows test_i18n`。 |
+| `python3 updater.py --dry-run` | 下载并校验更新的镜像，不接触路由器。 |
 
 `probe.py` 未在 Windows 上验证；它的自动 Wi-Fi 重连只在 Linux 上有效。被中断的运行、各个阶段以及恢复流程在[技术文档](docs/technical.md)中有说明（英文）。
 

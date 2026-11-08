@@ -1,6 +1,6 @@
 # xiaomi-openwrt-install
 
-**English** · [Русский](README.ru.md) · [简体中文](README.zh-CN.md) · [Português (Brasil)](README.pt-BR.md)
+**English** · [Русский](README.ru.md) · [简体中文](README.zh-CN.md) · [Português (Brasil)](README.pt-BR.md) · [Technical reference](docs/technical.md)
 
 Install OpenWrt on a supported Xiaomi router without UART or soldering, or
 return an installed router to an approved stock image.
@@ -79,8 +79,11 @@ Keep the run output somewhere private. Backups, configuration archives and
 `resume.json` hold device data and session secrets, and on Windows they inherit
 the folder's NTFS permissions rather than getting POSIX modes.
 
-If a run stops partway, it prints the command that continues it. Do not restart
-from the beginning: the exploit's trigger works only once per factory reset.
+If a run stops partway it prints the command that continues it, once it has
+passed pre-flight. A failure before that prints no continuation: the one-shot
+trigger may or may not have been spent, so nothing general can be said. Do not
+restart from the beginning either way — the exploit's trigger works only once
+per factory reset.
 
 In a virtual machine, give Windows a bridged or macvtap network card. USB
 passthrough of an RTL8153 adapter froze on sustained sends in testing, and the
@@ -93,6 +96,8 @@ exploit's download needs those to work.
 |---|---|
 | Wi-Fi, stock 2.0.28 to v1.14 standard, on Windows 10 | Installed on 2026-10-11 (alexsys87), on older code |
 | Cable, stock 2.0.28 to v2.1.2 with a root password, on Windows 11 25H2 in a VM | Installed on 2026-11-07, on this code, including continuing an interrupted run |
+| `updater.py` on Linux, restoring a saved config | Ran once on 2026-11-07. Every write stage worked; the final password login could not complete, because the restored config disables it |
+| `updater.py` from Windows, or against a router that keeps password login | Automated tests only, not yet run against a real router |
 | Wi-Fi with this code, and `revert.py` | Automated tests only, not yet run against a real router |
 
 Keep a Linux machine or a UART adapter within reach, and please report how it went.
@@ -127,7 +132,9 @@ while you join it. By default, final verification uses that same Wi-Fi
 interface, so before doing anything to the router the installer requires the
 SSID, passphrase, and country code for the permanent system. An interactive run
 prompts for missing values; automation must pass `--wifi-ssid`, `--wifi-key`,
-and `--wifi-country`. After `sysupgrade` makes the temporary network disappear,
+and `--wifi-country`. Secrets may also arrive through `RD03V2_ROOT_PASSWORD` and
+`RD03V2_WIFI_KEY`, so that they never appear in a process argument list; the
+variables are consumed on startup, and the web wizard uses them for that reason. After `sysupgrade` makes the temporary network disappear,
 join that permanent SSID. The installer never prints its passphrase.
 
 To keep permanent Wi-Fi disabled, select an Ethernet interface for the final
@@ -176,7 +183,13 @@ python3 install.py --release v2.0.0 --offline
 ```
 
 If GitHub is unavailable, an explicitly selected tag can also use its verified
-cache. Selecting `latest` requires GitHub access.
+cache. Selecting `latest` requires GitHub access. A Wi-Fi install needs
+`--transport wifi` for its own cache; the wired run caches only the radio-silent
+images.
+
+`--root-password PASS` sets the installed system's root password without the
+interactive `--configure` prompts, and `--attacker ADDRESS` pins the callback
+address when automatic selection would pick the wrong one on a multihomed host.
 
 If the connection is lost after `sysupgrade` starts, do not repeat the flash
 stage. Use the private manifest printed by the original run to perform only
@@ -201,6 +214,15 @@ through the RAM installer, as
 [the firmware's manual procedure](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)
 does. It saves a config backup in a private `update-*` folder before writing.
 
+Useful flags: `--verify-interface IFACE` chooses the interface for the final
+check, and is required with `--no-keep-settings`, which leaves Wi-Fi off;
+`--wifi-ssid NAME` names the network to rejoin when continuing a run that stopped
+in the RAM installer, whose own wireless config is the installer's; `--offline`
+uses only the verified cache; `--yes` answers the confirmations up front;
+`--device`, `--images` and `--outdir` pick a profile, an image cache and an output
+directory; `--recover-stale-lock` clears an interrupted pivot state once you have
+inspected it.
+
 There is no A/B fallback here: the installed kernel is overwritten on the way into
 RAM, and the recovery net for a torn write is UART. If the run is interrupted after
 that point, reach the RAM installer and run the command again with
@@ -208,11 +230,12 @@ that point, reach the RAM installer and run the command again with
 to SSH keys only (`PasswordAuth off`) is refused before anything is written.
 
 So far this has run on a real router **once**: from Linux over a cable, v2.1.2 with
-`--config-backup`, on 2026-11-07. Every stage worked, and the router came back with
-its config byte-identical. That config has password login off, so the final check
-could not log in; the tool warns about this in advance, and the result was verified
-with an SSH key instead. A plain update of a router that keeps password login has
-not been run yet. Keep a UART adapter within reach, and please report how it went.
+`--config-backup`, on 2026-11-07. Every write stage worked; the final password
+login could not complete, because the restored config turns password login off.
+The tool warns about this in advance, and the result was verified with an SSH key
+instead. A plain update of a router that keeps password login, and any update from
+Windows, have not been run at all. Keep a UART adapter within reach, and please
+report how it went.
 
 ## Web wizard
 

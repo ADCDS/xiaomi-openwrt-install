@@ -27,6 +27,8 @@ assim fica mais fácil anexá-lo a um relato de erro.
 | Linux, firmwares de fábrica 2.0.28 e 2.0.12 | Cenário principal, verificado em roteador real |
 | Windows 10, Wi-Fi, firmware de fábrica 2.0.28, release v1.14 `standard` | Verificado em roteador real em 11 de outubro de 2026 ([alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)), em uma versão anterior do código |
 | Windows 11 25H2 em máquina virtual, cabo, firmware de fábrica 2.0.28, release v2.1.2, com senha de root | Verificado em roteador real em 7 de novembro de 2026 nesta versão do código, incluindo a retomada de uma execução interrompida |
+| `updater.py` no Linux, restaurando uma configuração salva | Executado uma vez em 7 de novembro de 2026. Todas as etapas de gravação funcionaram; o login final por senha não completou, porque a configuração restaurada o desativa |
+| `updater.py` a partir do Windows, ou contra um roteador que mantém login por senha | Testes automatizados; **ainda não verificado em roteador real** |
 | Windows, Wi-Fi nesta versão do código | Testes automatizados; **ainda não verificado em roteador real** |
 | Windows, retorno ao firmware de fábrica (`revert.py`) | Testes automatizados; **ainda não verificado em roteador real** |
 
@@ -122,6 +124,14 @@ py -3 install.py --release vX.Y.Z --transport wifi --offline --dry-run
 A build sem NSS existe apenas no último release da linha v1.x:
 `py -3 install.py standard --release v1.14`.
 
+`--root-password SENHA` define a senha de root do sistema instalado sem as perguntas
+interativas de `--configure`, e `--attacker ENDEREÇO` fixa o endereço de callback
+quando a escolha automática pegaria o errado em um host com várias interfaces.
+
+Para automação, os segredos podem vir por `RD03V2_ROOT_PASSWORD` e
+`RD03V2_WIFI_KEY`, para não aparecerem na lista de argumentos do processo: as
+variáveis são consumidas na inicialização, e é por isso que o assistente web as usa.
+
 ## 3. Reset e conexão
 
 1. Faça o reset de hardware com o botão Reset.
@@ -199,9 +209,10 @@ manualmente às novas redes.
 
 No final deve aparecer `[+] O OpenWrt está instalado na NAND.`
 
-Se a execução for interrompida, o instalador imprime o comando para continuar.
-Não comece de novo: o gatilho da vulnerabilidade só funciona uma vez por reset de
-fábrica. Depois de perder o link, o roteador pode levar até 30 minutos para se
+Se a execução for interrompida depois da pré-verificação, o instalador imprime o
+comando para continuar; antes disso ele não imprime, porque o gatilho de uso único
+pode ainda não ter sido usado. Não comece de novo em nenhum dos casos: o gatilho da
+vulnerabilidade só funciona uma vez por reset de fábrica. Depois de perder o link, o roteador pode levar até 30 minutos para se
 conectar de novo.
 
 Depois das mensagens `flash-started` ou “não desligue a alimentação”, **não desligue a alimentação, não resete o roteador e não execute a etapa de gravação novamente**.
@@ -313,12 +324,23 @@ Aqui não há reserva A/B: o seguro para o caso de falha é o UART. Se a execuç
 interrompida, conecte-se ao instalador em RAM e repita o comando com
 `--config-backup` e a cópia salva. O login é feito por senha, então um roteador com
 acesso somente por chaves (`PasswordAuth off`) será recusado antes do início da
-gravação. No Windows também funciona. O que ainda não foi verificado em roteador real
-está na tabela acima.
+gravação. No Windows funciona como no Linux, mas nunca houve uma atualização a partir
+do Windows contra um roteador real; o que ainda não foi verificado está na tabela acima.
 
-Em roteador real, a atualização até agora foi executada **uma única vez** (a partir
-do Linux, por cabo, v2.1.2, em 7 de novembro de 2026). Mantenha um adaptador UART à
-mão e relate o resultado.
+Opções úteis: `--verify-interface INTERFACE` escolhe a interface da verificação final
+e é obrigatório com `--no-keep-settings`, que deixa o Wi-Fi desligado; `--wifi-ssid
+NOME` indica a rede para reconectar quando a execução continua a partir do instalador
+em RAM; `--offline` usa apenas o cache verificado; `--yes` responde às confirmações
+antecipadamente; `--device`, `--images` e `--outdir` escolhem o perfil, o cache de
+imagens e a pasta de saída; `--recover-stale-lock` limpa um estado de transição
+interrompido depois que você o inspecionar.
+
+Em roteador real, a atualização foi executada **uma única vez** (a partir do Linux,
+por cabo, v2.1.2, em 7 de novembro de 2026). Todas as etapas de gravação funcionaram;
+o login final por senha não completou, porque a configuração restaurada o desativa — a
+ferramenta avisa disso antes, e o resultado foi verificado com uma chave SSH. Uma
+atualização de um roteador que mantém login por senha ainda não foi feita. Mantenha um
+adaptador UART à mão e relate o resultado.
 
 ## Assistente web
 
@@ -352,6 +374,12 @@ aguardando. Use-o para o retorno, e não uma nova execução da
 gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (veja o
 [NOTICE](NOTICE)).
 
+## Dispositivo suportado
+
+| Perfil | Hardware | Origem da instalação | Retorno ao firmware de fábrica |
+|---|---|---|---|
+| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Firmware de fábrica 2.0.28 e 2.0.12, verificado em roteador real | 2.0.28 e 2.0.12, verificado em roteador real |
+
 ## Ferramentas adicionais
 
 | Comando | Finalidade |
@@ -359,7 +387,11 @@ gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (vej
 | `python3 release.py --device rd03v2` | Mostrar o último release e os arquivos necessários. |
 | `python3 release.py --device rd03v2 --download --wifi --dest images` | Baixar e verificar as imagens. |
 | `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reconectar ao canal de retorno de uma execução interrompida. |
+| `python3 probe.py --device rd03v2` | Coletar evidências de hardware e do layout do flash sem gravar nas partições de firmware. Inicializa ou reinicia o firmware de fábrica, altera o estado dele e consome o gatilho de uso único. |
+| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE` | Executar o gravador de fábrica de baixo nível a partir de um sistema em RAM já iniciado. |
+| `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspecionar um dump UBI offline. |
 | `python3 selftest.py` | Verificações sem roteador (Linux). No Windows: `py -3 -m unittest test_hostnet test_windows test_i18n`. |
+| `python3 updater.py --dry-run` | Baixar e verificar as imagens de uma atualização sem contatar o roteador. |
 
 O `probe.py` não foi testado no Windows; a reconexão automática ao Wi-Fi dele só
 funciona no Linux. Execuções interrompidas, etapas individuais e recuperação estão

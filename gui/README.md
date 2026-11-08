@@ -28,15 +28,35 @@ Portuguese, each named in its own script.
 Options (environment variables):
 
 - `RD03V2_GUI_PORT`: fixed port (default: a free one chosen by the OS)
+- `RD03V2_GUI_TOKEN`: pin the session token instead of generating one; it still
+  appears in the URL and in every API call, so a pinned value is only as private
+  as the terminal you print it in
 - `RD03V2_GUI_NO_BROWSER=1`: do not open a browser automatically
 
 ## Requirements
 
 Same as the CLI, per platform. On Linux: Python 3.9+, `sshpass`, `openssl`,
 OpenSSH and `iproute2`. On Windows 10/11: Python 3.9+, PowerShell, and the
-packages in `requirements-windows.txt` (`paramiko`, `passlib`). The first screen
-checks these for you. WSL2's network usually blocks the router's
+packages in `requirements-windows.txt` (`paramiko`, `passlib`). The wizard asks
+for `openssl` even when no root password is set, because the field is offered;
+the CLI only requires it when it has to hash one. The first screen checks these
+for you. WSL2's network usually blocks the router's
 connection back to the installer, so prefer a real Linux computer.
+
+## What each mode asks for
+
+| Mode | Fields |
+|---|---|
+| Install | interface (or automatic), release, and an optional block for the installed system: Wi-Fi SSID, key and country, plus its root password |
+| Update | interface, release, the installed system's current root password, the keep-settings switch, and — to continue a run that stopped in the RAM installer — the saved config archive |
+| Return to stock | interface, release, and the path to an approved stock image |
+| Every mode | a dry-run switch at the end; a real run needs the typed `FLASH` confirmation |
+
+Values are checked before anything runs: interface and release names are
+restricted to a safe character set, a leading dash is refused where a value could
+be read as a flag, and an update refuses a clean install over Wi-Fi because the
+new system would come back with its radios off. Secrets travel to the child
+process in its environment, never on its command line.
 
 ## What protects what
 
@@ -57,8 +77,10 @@ wizard says so.
 
 ## Adding text
 
-All wording lives in `static/strings.json`, with the same keys under every
-language it ships (`en`, `ru`, `zh-CN`, `pt-BR`). `selftest.py` fails if the
+All translated UI strings live in `static/strings.json`, with the same keys
+under every language it ships (`en`, `ru`, `zh-CN`, `pt-BR`). Two strings are
+deliberately not there: the language names in `static/app.js`, because each is
+written in its own script, and the static page title in `static/index.html`. `selftest.py` fails if the
 languages diverge, if a key the page uses is missing, or if the language switch
 offers a language with no catalogue.
 The tools themselves always run in English here, because `runner.py` parses their

@@ -16,8 +16,12 @@ system is a criminal offence in most jurisdictions.
 It writes to NAND. Specifically it roots the stock firmware, pivots into an
 OpenWrt RAM initramfs, and runs `sysupgrade` to install the squashfs to flash,
 optionally applying the root password and Wi-Fi configuration you provide.
-Without `--configure`, OpenWrt keeps its defaults: no root password and radios
-disabled. This **replaces the vendor firmware**. It also consumes the one-shot
+What the installed system starts with depends on how you configure the run: on
+an Ethernet install with no configuration flags, OpenWrt keeps its defaults —
+no root password and radios disabled. A Wi-Fi install always needs a permanent
+SSID, passphrase and country, so its radios come up configured, and Wi-Fi
+installs are prompted for those even without `--configure`. `--root-password`
+sets a root password without the interactive prompts. This **replaces the vendor firmware**. It also consumes the one-shot
 `cap_init` trigger in the process, which is what the exploit requires and is
 not reversible except by a factory reset.
 

@@ -18,10 +18,11 @@ other Xiaomi models, but that does not establish their flash layout, boot
 flags, OpenWrt image, or restoration procedure. Every additional model needs
 its own reviewed and hardware-tested profile before this tool will accept it.
 
-The port's documented install needs a USB↔UART adapter on the board's pads plus
-a TFTP server over Ethernet, because the bootloader is locked. This drives it
-instead through a pre-auth root RCE in the stock firmware's mesh daemon, pivots
-into the OpenWrt RAM initramfs, and runs the sanctioned `sysupgrade` from there.
+The port's older manual route needs a USB↔UART adapter on the board's pads plus
+a TFTP server over Ethernet, because the bootloader is locked. This tool drives
+the same result without either, through a pre-auth root RCE in the stock
+firmware's mesh daemon: it pivots into the OpenWrt RAM initramfs and runs the
+sanctioned `sysupgrade` from there.
 
 `chain.py` implements the exploit documented in
 [`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure).
@@ -29,9 +30,12 @@ The advisory contains the PoC and disclosure timeline. Read
 [`NOTICE`](../NOTICE) before running anything, and understand the recovery path
 in [Going back to stock](#going-back-to-stock).
 
-Verified end to end on hardware: factory state → configured OpenWrt on NAND,
-and back to the stock image marked hardware-tested below, repeatedly, in both
-directions.
+The install path has been run end to end on hardware on 2026-11-07: factory
+state → OpenWrt on NAND, from the stock AP on this host's USB Ethernet adapter,
+with `resume.json` reaching `phase: flash-complete` and the installed revision
+matching the release. The return path was run on earlier code; the pivot it now
+uses was rewritten several times afterwards, so treat `revert.py` as
+unit-tested but not re-verified on hardware in its current form.
 
 ## Prerequisites
 
@@ -41,11 +45,12 @@ A Linux laptop, Python **3.9+**, and:
 sudo apt install sshpass openssl        # or your distro's equivalent
 ```
 
-`sshpass` is not optional. Without it the scripts fall back to an interactive
-`ssh` password prompt that fails as `Permission denied` — which looks exactly
-like a wrong password rather than a missing package. `openssl` is used to hash
-the root password. `ping` with IPv6 support (`ping6` is used when present),
-`ip`, `ssh`, `scp` and `tar` are assumed present.
+`sshpass` is not optional. `install.py`, `updater.py` and `revert.py` check for
+it, with `ssh`, `scp` and `ip`, before they contact the router, and refuse with
+the missing name rather than a confusing failure later. The lower-level
+`restore.py` has not been given that check and still degrades to a bare `ssh`
+call. `openssl` is needed only to hash a root password. `ping` with IPv6 support
+(`ping6` is used when present) is used opportunistically.
 
 **The laptop needs an address on the router's stock setup network.** Stock
 serves DHCP there; the OpenWrt RAM system is reached by IPv6 link-local, so its
@@ -149,6 +154,13 @@ disabled, pass a wired `--verify-interface` and connect that link when asked.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | fact-finding run used to establish the layout below; avoids raw firmware-partition writes but changes stock configuration and mesh state |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
+| `updater.py` | OpenWrt → newer OpenWrt over SSH, through the same RAM pivot, keeping or replacing the configuration |
+| `hostnet.py` | host networking: adapters, routes, neighbours, and the Windows PowerShell equivalents |
+| `winssh.py` | password SSH and legacy SCP for Windows, including Dropbear without an SFTP subsystem |
+| `i18n.py` | the message catalogues (`en`, `ru`, `zh-CN`, `pt-BR`) and `--lang` selection |
+| `gui/` | the local web wizard: an HTTP server, an argv builder, prerequisite checks and a single-page UI |
+| `install.cmd` | Windows entry point that re-invokes `install.py` under the Windows interpreter |
+| `requirements-windows.txt` | `paramiko` and `passlib`, the Windows equivalents of `sshpass` and `openssl` |
 | `selftest.py` | checks that run without a router, with additional coverage when matching release artifacts are available |
 | `installer-wifi.rc.local.patch` | the port change that makes the RAM initramfs beacon (shipped in v1.7 and later) |
 | `LICENSE` | GPL-2.0-only |
@@ -175,10 +187,30 @@ XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
 
 ## Interrupted runs
 
-Each run writes a mode-`0600` `resume.json` inside its mode-`0700` output
-directory. It records the device profile, release, flavor, transport, exact
-image hashes, configuration archive, callback address, permanent SSID (never
-its passphrase), and callback token. When a manual stage is needed, use the
+Each `install.py` or `updater.py` run writes a `resume.json` inside its output
+directory, mode `0600` in a mode-`0700` directory on POSIX and inheriting the
+folder's ACLs on Windows. `revert.py`, `restore.py` and `probe.py` write none.
+It records the device profile, release, flavor, transport, exact image hashes,
+configuration archive, callback address, permanent SSID and callback token. The
+JSON never stores the Wi-Fi passphrase; the archive it names does contain it.
+
+### Manual stages
+
+`install.py` can be run one stage at a time, which is what its continuation
+command does:
+
+```sh
+python3 install.py --resume-manifest OUTDIR/resume.json --stage preflight
+python3 install.py --resume-manifest OUTDIR/resume.json --stage pivot
+python3 install.py --resume-manifest OUTDIR/resume.json --stage flash
+```
+
+`--stage flash` requires a manifest; `--standalone-flash` is the exception, for
+a RAM system booted and validated separately. `--openwrt-host` points straight
+at the RAM system, or at the installed one for `--verify-only`, when discovery
+would pick the wrong peer; `--skip-exploit` reuses a root channel that is
+already up; `--config-tar` supplies the first-boot archive for the flash stage;
+`--images` and `--outdir` relocate the cache and the output directory. When a manual stage is needed, use the
 continuation command printed by `install.py`; the flash stage refuses selection
 drift. `attach.py` likewise requires the bind address and token from this
 manifest.
@@ -353,13 +385,21 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
 
 ## Safety properties
 
-- **Nothing is written until every gate passes.** Model, `flash_type` against
-  the release's own declaration, partition map, which slot is live cross-checked
-  between `/proc/cmdline` and two nvram flags, and a hard interlock that refuses
-  to target a partition with a UBI attached to it.
-- **Every write is verified by read-back before it is trusted.** The kernel
-  volume is compared byte-for-byte against the image — as a prefix plus `0xff`
-  padding, because the volume is dynamic and reads back LEB-aligned.
+- **No NAND write happens until every gate passes.** Model, `flash_type`
+  against the release's own declaration, partition map, which slot is live
+  cross-checked between `/proc/cmdline` and two nvram flags, and a hard
+  interlock that refuses to target a partition with a UBI attached to it.
+  Earlier stages do change stock state: `chain.initialise` completes the setup
+  wizard, `chain.plant` writes the `encryption` fields, and `chain.trigger`
+  fires the one-shot `cap_init`. Those are configuration and mesh-state
+  changes, and they are what the pre-flight gates are checked after.
+- **Every pivot and restore write is verified by read-back.** The kernel volume
+  is compared against the image — an MD5 over a prefix plus `0xff` padding,
+  because the volume is dynamic and reads back LEB-aligned — and the fastboot
+  restore compares every volume it wrote. The final `sysupgrade` is launched
+  detached and is **not** read back: it is proven by the installed system
+  booting, matching the profile's partition sizes, and reporting the release's
+  own revision from `/etc/openwrt_version`.
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and
