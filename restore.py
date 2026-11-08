@@ -54,7 +54,9 @@ import sys
 import time
 
 import devices
+import hostnet
 import ubiparse
+import winssh
 
 HDR1_MAGIC = b"HDR1"
 
@@ -133,14 +135,30 @@ SSH_PASSWORDS = [""]
 
 
 def ssh(host, cmd, timeout=180, check=True):
+    if hostnet.is_windows():
+        try:
+            result = winssh.run(host, cmd, SSH_PASSWORDS, timeout)
+        except winssh.SSHError as exc:
+            if not check:
+                return 1, str(exc)
+            raise RestoreError(str(exc)) from exc
+        if check and result[0] != 0:
+            raise RestoreError(f"ssh {cmd[:60]!r}: {result[1]}")
+        return result
     last = (1, "")
     for pw in SSH_PASSWORDS:
-        base = ["sshpass", "-p", pw] if _have("sshpass") else []
+        env = None
+        if _have("sshpass"):
+            base = ["sshpass", "-e"]
+            env = password_env(pw)
+        else:
+            base = []
         base += ["ssh", "-o", "StrictHostKeyChecking=no",
                  "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                  "-o", "ConnectTimeout=15", "-o", "PubkeyAuthentication=no",
                  "-o", "NumberOfPasswordPrompts=1", f"root@{host}", cmd]
-        r = subprocess.run(base, capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run(base, capture_output=True, text=True,
+                           timeout=timeout, env=env)
         last = (r.returncode, (r.stdout + r.stderr).strip())
         if r.returncode == 0:
             return last
@@ -161,6 +179,7 @@ def locate(host, iface, profile):
     any gateway is refused as before (see install.gateway_conflict)."""
     import install
     router_iface = None
+    iface = install.canonical_interface(iface)
     if not host and iface:
         wired = install.detect_transport(iface) == "wired"
         gateway_ok = wired and not any(SSH_PASSWORDS)
@@ -377,6 +396,66 @@ def remote_job_state(host, status_path, lock_dir):
     return state
 
 
+def password_env(password):
+    """Environment for `sshpass -e`; `-p` would expose it in /proc."""
+    env = dict(os.environ)
+    env["SSHPASS"] = password or ""
+    return env
+
+
+def require_own_ubi9(host, k):
+    """Device 9 is this toolchain's scratch device; never detach one we lack.
+
+    Every read-back in this toolchain attaches at device 9, so a live device 9
+    on a different MTD would be detached by the read-back below -- a state
+    change outside the reservation the hardcoded number relies on.
+    """
+    rc, attached = ssh(
+        host,
+        "for u in /sys/class/ubi/ubi*; do [ -d \"$u\" ] || continue; "
+        "n=${u##*/}; case \"$n\" in *\"_\"*) continue ;; esac; "
+        "printf '%s %s\\n' \"$n\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        check=False)
+    by_mtd = {}
+    readable = rc == 0
+    if readable:
+        for line in attached.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) == 1 and "_" in fields[0]:
+                # A UBI volume directory (ubi0_0, ubi0_127), not a device. The
+                # shell loop filters them, but a glob that misses one must not
+                # make the map look unreadable and refuse a healthy box.
+                continue
+            if (len(fields) != 2 or not fields[0].startswith("ubi")
+                    or not fields[1].isdigit()):
+                # A partial map can hide a device 9, so fail closed on it.
+                readable = False
+                break
+            by_mtd.setdefault(fields[1], set()).add(fields[0])
+    if not readable:
+        raise RestoreError(
+            "could not read which MTDs the running UBIs sit on "
+            f"({attached.strip() or 'no output'}) -- refusing to detach a device "
+            "this tool cannot account for")
+    # A clean, empty map is normal here and must not be an error: do_restore
+    # runs from the RAM initramfs, where nothing has to be attached. Only an
+    # unreadable map is a problem, and it is handled above.
+    for mtd, devices in by_mtd.items():
+        if "ubi9" in devices and mtd != str(k):
+            raise RestoreError(
+                f"device 9 is attached to mtd{mtd}, not to mtd{k} that is being "
+                "read back; refusing to detach a device this tool does not own")
+    live_target = by_mtd.get(str(k), set()) - {"ubi9"}
+    if live_target:
+        raise RestoreError(
+            f"mtd{k} already has {', '.join(sorted(live_target))} attached; "
+            "refusing to read back a partition that is live. If that is "
+            "unexpected on the RAM initramfs, inspect it on the device and "
+            "detach it before re-running.")
+
+
 def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
     import tempfile
     k, _ = p["write"]
@@ -415,7 +494,7 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
             print(f"[1] md5 {local_md5} verified on the device")
 
             script = os.path.join(tmp, "restore.sh")
-            with open(script, "w") as fh:
+            with open(script, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(RESTORE_SCRIPT.format(k=k, r=rd, tail_off=hex(tail_off),
                                                tail_cnt=tail_cnt,
                                                rootfs_cnt=rootfs_cnt))
@@ -449,6 +528,7 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
     print("[2] ubiformat + erases reported done")
 
     print("[3] reading the volumes back")
+    require_own_ubi9(host, k)
     ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
     rc, out = ssh(host, f"ubiattach -m {k} -d 9", timeout=180, check=False)
     if rc != 0:
@@ -501,12 +581,22 @@ def do_restore(host, payload, want_md5, p, profile, recover_stale_lock=False):
 
 
 def scp(host, local, remote):
-    base = ["sshpass", "-p", ""] if _have("sshpass") else []
+    if hostnet.is_windows():
+        try:
+            return winssh.upload(host, local, remote, SSH_PASSWORDS)
+        except winssh.SSHError as exc:
+            raise RestoreError(str(exc)) from exc
+    env = None
+    if _have("sshpass"):
+        base = ["sshpass", "-e"]
+        env = password_env("")
+    else:
+        base = []
     base += ["scp", "-O", "-o", "StrictHostKeyChecking=no",
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
              local, f"root@[{host}]:{remote}" if ":" in host
              else f"root@{host}:{remote}"]
-    subprocess.run(base, check=True, timeout=900)
+    subprocess.run(base, check=True, timeout=900, env=env)
 
 
 if __name__ == "__main__":

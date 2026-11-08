@@ -28,14 +28,18 @@ Use `python3 revert.py --help` for profile, image, and connection options.
 import argparse
 import hashlib
 import os
+import re
+import subprocess
 import sys
 import time
 
 import devices
+import i18n
 import install
 import release
 import restore
 from chain import log
+from i18n import t
 
 
 def verified_ram_images(rel, images_dir, flavour="default", wifi=False):
@@ -76,6 +80,103 @@ def remote_job_state(host, status_path, lock_dir):
     return state
 
 
+def kernel_volume_id(ubinfo_text):
+    """The volume id of the volume named `kernel`, or None.
+
+    `ubinfo -a` emits one block per volume, so each block's own id must be read.
+    A lazy span from the FIRST "Volume ID:" to a given Name matches volume 0 for
+    every name -- the mistake restore.do_restore records, which silently md5s
+    the wrong device and calls a good write bad.
+    """
+    for chunk in re.split(r"(?=Volume ID:)", ubinfo_text):
+        vid = re.search(r"Volume ID:\s+(\d+)", chunk)
+        name = re.search(r"Name:\s+(\S+)", chunk)
+        if vid and name and name.group(1) == "kernel":
+            return vid.group(1)
+    return None
+
+
+def read_back_kernel(host, k, want_md5):
+    """Attach the freshly written UBI, md5 its kernel volume, detach.
+
+    Returns the device that was read. Raises RestoreError if the UBI will not
+    attach, carries no volume named `kernel`, or reads back a different md5.
+    """
+    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
+    rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
+    if rc != 0:
+        raise restore.RestoreError(
+            f"the written UBI will not attach: {out!r}. Do NOT reboot: "
+            "ubi_kernel held the installed kernel and now holds a write that "
+            "could not be verified. The running system is fine until it "
+            "reboots. Re-run now to retry the write.")
+    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
+    vid = kernel_volume_id(vols)
+    if vid is None:
+        install.ssh(host, "ubidetach -d 9", check=False)
+        raise restore.RestoreError(
+            f"no 'kernel' volume in the written UBI:\n{vols}\n"
+            "Do NOT reboot: ubi_kernel held the installed kernel and now holds "
+            "a write that could not be verified. Re-run now to retry the write.")
+    dev = f"/dev/ubi9_{vid}"
+    _rc, got = install.ssh(host, f"md5sum {dev}; wc -c < {dev}", timeout=300)
+    install.ssh(host, "ubidetach -d 9", check=False)
+    got_md5 = got.split()[0] if got else ""
+    log(f"[1] read-back {dev}: {got.splitlines()[-1] if got else '?'} B, "
+        f"md5 {got_md5}")
+    if got_md5 != want_md5:
+        raise restore.RestoreError(
+            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "
+            "ubi_kernel held the installed kernel and now holds a bad write, so "
+            "nothing bootable is left there. The running system is fine until it "
+            "reboots. Re-run now to retry the write.")
+    log("[1] read-back matches the image byte for byte")
+    return dev
+
+
+def check_stale_readback(host, want_md5):
+    """Refuse to detach a device 9 that does not hold the image we would write.
+
+    Device 9 on ubi_kernel is only accepted as this tool's own read-back when a
+    pivot ran here, but "a pivot ran" does not prove *this* attachment is its
+    read-back. Content does: the read-back attached the image it had just
+    written, so its kernel volume carries this run's md5. A different content is
+    either another program's device or a read-back from a different release --
+    both are refused, and the message says how to get out. Nothing is written.
+    """
+    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
+    vid = kernel_volume_id(vols)
+    got = ""
+    if vid is not None:
+        _rc, out = install.ssh(host, f"md5sum /dev/ubi9_{vid}", check=False)
+        got = out.split()[0] if out else ""
+    if got != want_md5:
+        raise restore.RestoreError(
+            f"device 9 on ubi_kernel holds md5 {got or 'unknown'}, not the "
+            f"{want_md5} this image would write, so it cannot be shown to be "
+            "this tool's read-back. Inspect it; if you know what it is, detach "
+            "it on the router (ubidetach -d 9) and re-run. Nothing has been "
+            "written by this run.")
+
+
+def pivot_advice(error):
+    """What to add after a pivot failure, or None when there is nothing to add.
+
+    `pivot_to_ram` tags any exception it raises with how far the write got, but
+    the tag is only useful if the caller turns it into an instruction, and a
+    standalone revert has no updater to do that for it.
+    """
+    stage = getattr(error, "pivot_stage", None)
+    if stage == "write-unconfirmed":
+        return ("Do NOT reboot or power-cycle: ubi_kernel held the installed "
+                "kernel and now holds a write that could not be verified. The "
+                "running system is fine until it reboots. Re-run to retry.")
+    if stage == "rebooted":
+        return ("The write verified. Reach the RAM installer (allow it about a "
+                "minute to start) and re-run to continue.")
+    return None
+
+
 def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
                  recover_stale_lock=False):
     """Put the RAM image in `ubi_kernel` and boot it. Returns the new host.
@@ -84,11 +185,126 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
     of it at boot and nothing holds it since -- so overwriting it under the
     running system is safe. What is not safe is rebooting onto a bad write,
     hence the read-back before the reboot.
+
+    A failure is tagged with `pivot_stage` -- `not-written`,
+    `write-unconfirmed` or `rebooted` -- because the exception class cannot say
+    how far it got: the same RestoreError and Abort are raised before the write,
+    after it was issued, and once the box is already in the RAM installer, and
+    what the operator should do differs completely between those.
     """
+    phase = {"written": False, "pivoted": False}
+    try:
+        return _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
+                             recover_stale_lock, phase)
+    except Exception as exc:
+        exc.pivot_stage = ("rebooted" if phase["pivoted"]
+                           else "write-unconfirmed" if phase["written"]
+                           else "not-written")
+        raise
+
+
+def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
+                  recover_stale_lock, phase):
     mtd = restore.mtd_map(host)
     if "ubi_kernel" not in mtd:
         raise restore.RestoreError("no ubi_kernel partition -- not the OpenWrt layout")
     k = mtd["ubi_kernel"]["index"]
+
+    # ubiformat erases PEBs as it writes, so an image that does not fit is not a
+    # clean failure: the installed kernel is already gone by the time it reports
+    # "not enough space". install.py and updater.py both check the size first;
+    # this is the path that reaches the no-fallback case, so it must too.
+    size = os.path.getsize(ubi_path)
+    if size > mtd["ubi_kernel"]["size"]:
+        raise restore.RestoreError(
+            f"{os.path.basename(ubi_path)} is {size} B, ubi_kernel holds "
+            f"{mtd['ubi_kernel']['size']} B -- refusing to erase the installed "
+            "kernel for an image that cannot fit it")
+    log(f"[1] image {size} B fits ubi_kernel ({mtd['ubi_kernel']['size']} B)")
+
+    # A previous pivot only ever leaves device 9 attached through its read-back,
+    # and that read-back only runs after a write -- which always leaves
+    # /tmp/pv.status or the lock behind. So the same state that drives the
+    # decisions below is also the evidence that an attached device 9 on
+    # ubi_kernel is this tool's own scratch and not something live.
+    state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
+    reported = {}
+    for part in state.split():
+        key, _, value = part.partition("=")
+        reported[key] = value
+    reuse_done = reported.get("status") == "done"
+    previous_pivot = bool(reported.get("status")) or reported.get("lock") == "1"
+
+    # The same hard interlock the A/B path uses, for the same reason: mtd{k} is
+    # the partition holding the only bootable kernel, so it must not be live.
+    # This is a read only -- a dry run must not change kernel state, so a stale
+    # device 9 left by an earlier read-back is only recorded here and dropped
+    # after the dry-run gate below. Detaching first would also hide a live ubi9
+    # from the very check it is meant to satisfy.
+    map_rc, attached = install.ssh(
+        host,
+        "for u in /sys/class/ubi/ubi*; do [ -d \"$u\" ] || continue; "
+        "n=${u##*/}; case \"$n\" in *\"_\"*) continue ;; esac; "
+        "printf '%s %s\\n' \"$n\" \"$(cat $u/mtd_num 2>/dev/null)\"; done",
+        check=False)
+    by_mtd = {}
+    if map_rc == 0:
+        for line in attached.splitlines():
+            if not line.strip():
+                continue
+            fields = line.split()
+            if len(fields) == 1 and "_" in fields[0]:
+                # A UBI volume directory (ubi0_0, ubi0_127), not a device. The
+                # shell loop filters them, but a glob that misses one must not
+                # make the map look unreadable and refuse a healthy box.
+                continue
+            if (len(fields) != 2 or not fields[0].startswith("ubi")
+                    or not fields[1].isdigit()):
+                # A partial map can hide a device 9, so fail closed on it.
+                by_mtd = {}
+                break
+            by_mtd.setdefault(fields[1], set()).add(fields[0])
+    if not by_mtd:
+        # Fail closed: reading no attached UBI would make any target look idle.
+        raise restore.RestoreError(
+            "could not read which MTDs the running UBIs sit on "
+            "(/sys/class/ubi/*/mtd_num) -- refusing to pick a target")
+    for other_mtd, devices in by_mtd.items():
+        if other_mtd != str(k) and "ubi9" in devices:
+            raise restore.RestoreError(
+                f"device 9 is attached to mtd{other_mtd}, not to ubi_kernel "
+                f"(mtd{k}). This tool reserves device 9 for its own read-back "
+                "and will not detach a device it does not own. Detach it on the "
+                "router (ubidetach -d 9) or reboot, then re-run. Nothing has "
+                "been written by this run.")
+
+    on_target = by_mtd.get(str(k), set())
+    # Device 9 is this tool's own scratch device, used only for the read-back;
+    # it can outlive a run that died there. Anything else on ubi_kernel is live.
+    if on_target - {"ubi9"}:
+        raise restore.RestoreError(
+            f"ubi_kernel (mtd{k}) has {', '.join(sorted(on_target))} attached at "
+            "runtime; refusing to overwrite a partition that may be live")
+    # Device 9 is this toolchain's reserved scratch number: install.verify_written,
+    # restore.do_restore and read_back_kernel are its only users, and ubiattach
+    # fails outright when the number is taken. A live device numbered 9 still
+    # detaches as cleanly as our own, so "it was not busy" proves nothing; it is
+    # ours only when a pivot ran here to leave it.
+    stale_scratch = "ubi9" in on_target
+    if stale_scratch and not previous_pivot:
+        # The attachment is kernel state, so it outlives /tmp: an operator who
+        # cleared /tmp, or a box where the status file never landed, reaches
+        # this. Say how to get out rather than claiming no pivot ever ran.
+        raise restore.RestoreError(
+            f"ubi_kernel (mtd{k}) has ubi9 attached, but this box has no record "
+            f"of a pivot ({state.strip() or 'empty'}), so it cannot be told "
+            "apart from a partition that is live. If you know device 9 is not "
+            "in use, detach it on the router (ubidetach -d 9) and re-run. This "
+            "run has written nothing, but a previous pivot may have, so do not "
+            "reboot until you know what device 9 is.")
+    log(f"[1] UBI attached on mtd{sorted(int(item) for item in by_mtd)}; "
+        f"ubi_kernel is mtd{k}"
+        + (", holding only our stale device 9" if stale_scratch else " and is idle"))
 
     blob, want_md5 = install.expected_volume(ubi_path, itb_path)
     local_md5 = hashlib.md5(open(ubi_path, "rb").read()).hexdigest()
@@ -98,8 +314,26 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         log("[1] [dry-run] stopping before the write")
         return None
 
-    state = remote_job_state(host, "/tmp/pv.status", "/tmp/pv.lock")
-    reuse_done = "status=done" in state
+    if stale_scratch:
+        # Only now, so that a dry run really is read-only.
+        check_stale_readback(host, want_md5)
+        rc, out = install.ssh(host, "ubidetach -d 9", check=False)
+        if rc != 0:
+            # Device 9 sits on ubi_kernel, so an earlier read-back ran -- and
+            # that run may already have erased part of it.
+            phase["written"] = True
+            raise restore.RestoreError(
+                f"could not detach the stale read-back device 9: {out!r}. "
+                "Do NOT reboot: an earlier pivot may already have erased part "
+                "of ubi_kernel. Inspect it, then re-run to retry.")
+        log("[1] dropped the stale read-back device 9 that sat on ubi_kernel")
+
+    # Any status at all, or a held lock, means a previous ubiformat was issued
+    # and ubi_kernel may already be partly erased -- including in the failed or
+    # interrupted state the refusal below is about to report. Tagging that
+    # "not-written" would drop the do-not-reboot warning in the one state where
+    # clearing /tmp by rebooting is the act that leaves the box unbootable.
+    phase["written"] = previous_pivot
     if "active=1" in state:
         raise restore.RestoreError(f"pivot ubiformat is still running ({state})")
     if not reuse_done and ("lock=1" in state or "status=fail" in state
@@ -107,7 +341,10 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         if not recover_stale_lock:
             raise restore.RestoreError(
                 f"stale/failed pivot state requires --recover-stale-lock "
-                f"after inspection ({state})")
+                f"after inspection ({state}). Do not reboot to clear it: an "
+                "interrupted ubiformat may already have erased part of "
+                f"ubi_kernel. Inspect /tmp/pv.log, then retry with "
+                "--recover-stale-lock.")
         install.ssh(host, "rm -rf /tmp/pv.lock; rm -f /tmp/pv.status")
         log(f"[1] explicitly cleared inactive stale pivot state: {state}")
 
@@ -124,16 +361,21 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
             sh = os.path.join(tmp, "pv.sh")
-            with open(sh, "w") as fh:
+            with open(sh, "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(PIVOT_SCRIPT.format(k=k))
             install.scp_to(host, sh, "/tmp/pv.sh")
         install.ssh(host, "chmod +x /tmp/pv.sh; rm -f /tmp/pv.status",
                     check=True)
+        phase["written"] = True         # ubiformat is about to erase PEBs
         rc, out = install.ssh(
             host, "start-stop-daemon -S -b -x /tmp/pv.sh; echo rc=$?",
             check=False)
         log(f"[1] launch: {out.strip()}")
         if "rc=0" not in out:
+            # The launcher answered and refused, so no ubiformat started. A
+            # transport error above leaves the flag set instead, which is the
+            # conservative direction: a write may have begun.
+            phase["written"] = False
             raise restore.RestoreError(f"pivot launcher failed: {out!r}")
 
         deadline = time.time() + 300
@@ -150,24 +392,12 @@ def pivot_to_ram(host, ubi_path, itb_path, iface, dry_run=False, fallback=None,
                 f"pivot write did not finish ({status!r}):\n{tail}")
         log("[1] ubiformat done")
 
-    install.ssh(host, "ubidetach -d 9 2>/dev/null; true", check=False)
-    rc, out = install.ssh(host, f"ubiattach -m {k} -d 9", timeout=120, check=False)
-    if rc != 0:
-        raise restore.RestoreError(f"the written UBI will not attach: {out!r}")
-    _rc, got = install.ssh(host, "md5sum /dev/ubi9_0", timeout=300)
-    install.ssh(host, "ubidetach -d 9", check=False)
-    got_md5 = got.split()[0] if got else ""
-    log(f"[1] read-back md5 {got_md5}")
-    if got_md5 != want_md5:
-        raise restore.RestoreError(
-            f"read-back {got_md5} != expected {want_md5}. Do NOT reboot: "
-            "ubi_kernel held the installed kernel and now holds a bad write, so "
-            "nothing bootable is left there. The running system is fine until it "
-            "reboots. Re-run now to retry the write.")
-    log("[1] read-back matches the image byte for byte")
+    read_back_kernel(host, k, want_md5)
+    phase["written"] = False            # the write is confirmed good
+    phase["pivoted"] = True             # from here the box boots the RAM image
 
     install.ssh(host, "start-stop-daemon -S -b -x /sbin/reboot", check=False)
-    log("[1] rebooting into the RAM initramfs")
+    log(t("[1] rebooting into the RAM initramfs"))
     time.sleep(15)
     return install.wait_and_discover(iface, fallback=fallback) if iface else host
 
@@ -221,9 +451,16 @@ def main():
                     help="explicit digest for an unlisted development image")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
-    args = ap.parse_args()
+    ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
+                    help="language for prompts and instructions (default: system)")
+    args = install.absorb_secret_env(ap.parse_args())
+    i18n.set_language(args.lang)
+    i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.release = args.release or profile.default_release
+    args.discover = install.canonical_interface(args.discover)
+    if not args.dry_run:
+        install.require_host_tools(password=bool(args.root_password))
     if args.transport == "auto" and args.discover:
         args.transport = install.detect_transport(args.discover)
     elif args.transport == "auto":
@@ -260,16 +497,17 @@ def main():
     log(f"[*] RAM-image NAND gate: PASS -- {why}")
 
     if rtype != "tmpfs":
-        log("\n=== step 1: pivot into the RAM initramfs ===")
+        log(t("\n=== step 1: pivot into the RAM initramfs ==="))
         if args.transport == "wifi":
-            log("[1] when the installed network disappears, join "
-                f"{profile.installer_wifi_ssid!r} with key "
-                f"{profile.installer_wifi_key!r}; this temporary RAM system "
-                "has a passwordless root account, so keep the link isolated")
+            log(t("[1] when the installed network disappears, join {ssid!r} with "
+                  "key {key!r}; this temporary RAM system has a passwordless root "
+                  "account, so keep the link isolated",
+                  ssid=profile.installer_wifi_ssid,
+                  key=profile.installer_wifi_key))
         if not args.yes and not args.dry_run:
-            if input(f"[?] write {os.path.basename(ubi)} to ubi_kernel and "
-                     "reboot? [type YES] ").strip() != "YES":
-                raise restore.RestoreError("declined")
+            if input(t("[?] write {image} to ubi_kernel and reboot? [type YES] ",
+                       image=os.path.basename(ubi))).strip() != "YES":
+                raise restore.RestoreError(t("declined"))
         newhost = pivot_to_ram(host, ubi, itb, args.discover, args.dry_run,
                                fallback=fallback,
                                recover_stale_lock=args.recover_stale_lock)
@@ -289,20 +527,20 @@ def main():
     else:
         log("[*] already running from RAM -- skipping the pivot")
 
-    log("\n=== step 2: restore stock ===")
+    log(t("\n=== step 2: restore stock ==="))
     mtd = restore.check_target(host, profile)
     plan = restore.plan(mtd, profile)
     if args.dry_run:
         log("[dry-run] stopping before the restore write.")
         return 0
     if not args.yes:
-        if input("[?] erase OpenWrt and write stock? [type RESTORE] ").strip() \
+        if input(t("[?] erase OpenWrt and write stock? [type RESTORE] ")).strip() \
                 != "RESTORE":
-            raise restore.RestoreError("declined")
+            raise restore.RestoreError(t("declined"))
     restore.do_restore(host, payload, restore.img_volumes(payload, profile), plan,
                        profile, recover_stale_lock=args.recover_stale_lock)
 
-    log("\n=== step 3: wait for stock ===")
+    log(t("\n=== step 3: wait for stock ==="))
     import chain
     deadline = time.time() + 420
     while time.time() < deadline:
@@ -313,20 +551,49 @@ def main():
             continue
         log(f"[+] stock is up: hardware={info.get('hardware')} "
             f"rom={info.get('romversion')} inited={info.get('inited')}")
+        identity_error = devices.stock_identity_error(profile, info)
+        if identity_error:
+            log(f"[!] stock answered, but it is not the restored router: "
+                f"{identity_error}")
+            return 1
         if info.get("inited") == 0:
-            log("[+] factory defaults -- the setup wizard is waiting")
+            log(t("[+] factory defaults -- the setup wizard is waiting"))
         return 0
-    log(f"[!] stock did not answer on {profile.stock_host} within 7 minutes. It may "
-        "still be booting; check that this host has an address on that subnet.")
+    log(t("[!] stock did not answer on {host} within 7 minutes. It may still be "
+          "booting; check that this host has an address on that subnet.",
+          host=profile.stock_host))
     return 1
+
+
+REPORTED_FAILURES = (restore.RestoreError, release.ReleaseError,
+                     install.Abort, subprocess.TimeoutExpired)
+
+
+def is_reported_failure(error):
+    """True when the CLI prints this instead of a traceback.
+
+    Everything the pivot raises carries a `pivot_stage`, including classes the
+    tuple above does not name (an OSError from the transport, for one).
+    """
+    return isinstance(error, REPORTED_FAILURES) or hasattr(error, "pivot_stage")
+
+
+def failure_advice(error):
+    """The advice line to print after a reported failure, or None."""
+    return pivot_advice(error)
 
 
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (restore.RestoreError, release.ReleaseError, install.Abort) as e:
-        log(f"[-] {e}")
-        sys.exit(1)
     except KeyboardInterrupt:
         log("\n[*] interrupted")
         sys.exit(130)
+    except Exception as e:                              # noqa: BLE001 -- classified
+        if not is_reported_failure(e):
+            raise
+        log(f"[-] {e}")
+        advice = failure_advice(e)
+        if advice:
+            log(f"[!] {advice}")
+        sys.exit(1)

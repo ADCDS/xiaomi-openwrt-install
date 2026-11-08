@@ -301,6 +301,25 @@ def download(rel, name, destdir, progress=True):
     return path
 
 
+def revision(rel, destdir="images"):
+    """The build revision this release publishes, or "" when it cannot be read.
+
+    `version.buildinfo` is the same string a built system carries in
+    `/etc/openwrt_version`, so it is what a finished flash can be checked
+    against. It is a 20-byte asset and this is best effort: an offline run, or a
+    release that does not publish it, simply does not get the check.
+    """
+    if "version.buildinfo" not in rel.assets:
+        return ""
+    try:
+        path = download(rel, "version.buildinfo", cache_dir(rel, destdir),
+                        progress=False)
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except (OSError, ReleaseError):
+        return ""
+
+
 def checksums(rel, destdir):
     """Parse sha256sums.txt.  Absent on a release that predates it, in which
     case the caller gets nothing to check against and should say so out loud

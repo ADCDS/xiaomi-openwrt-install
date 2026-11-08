@@ -29,6 +29,7 @@ SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
 import argparse
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,11 +38,15 @@ import time
 
 import chain
 import devices
+import hostnet
+import i18n
 import install
 import release
 import restore
 import revert
+import winssh
 from chain import ChainError, log
+from i18n import t
 from install import Abort
 
 REMOTE_BACKUP = "/tmp/config-backup.tar.gz"
@@ -58,15 +63,23 @@ ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
 def scp_from(host, remote, local):
     """Copy remote:path off the box. install.py only ever sends."""
+    if hostnet.is_windows():
+        try:
+            return winssh.download(host, remote, local, install.SSH_PASSWORDS)
+        except winssh.SSHError as exc:
+            raise Abort(str(exc)) from exc
     src = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for password in install.SSH_PASSWORDS:
-        result = subprocess.run(
-            (["sshpass", "-p", password] if shutil.which("sshpass") else []) +
-            ["scp", "-O", "-o", "StrictHostKeyChecking=no",
-             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
-             "-o", "NumberOfPasswordPrompts=1", src, local],
-            capture_output=True, text=True, timeout=300)
+        argv = ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+                "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
+                "-o", "NumberOfPasswordPrompts=1", src, local]
+        env = None
+        if shutil.which("sshpass"):
+            argv = ["sshpass", "-e"] + argv
+            env = install.password_env(password)
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                timeout=300, env=env)
         if result.returncode == 0:
             return
         last = result.stderr.strip()
@@ -82,6 +95,19 @@ def check_config_backup(path):
         raise Abort(f"{path} is not a readable config backup: {exc}")
     if not any(name.lstrip("./").startswith("etc/config/") for name in names):
         raise Abort(f"{path} holds no etc/config/: it is not a config backup")
+
+
+def turns_off_password_login(path):
+    """Whether restoring this archive leaves the router refusing passwords."""
+    try:
+        with tarfile.open(path, "r:gz") as archive:
+            member = archive.extractfile("etc/config/dropbear")
+            text = member.read().decode("utf-8", "replace") if member else ""
+    except (OSError, KeyError, tarfile.TarError):
+        return False
+    return any(line.split()[:3] in (["option", "PasswordAuth", "'off'"],
+                                    ["option", "RootPasswordAuth", "'off'"])
+               for line in text.splitlines())
 
 
 def available_memory_kb(host):
@@ -114,16 +140,17 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     Returns the rootfs type: 'overlay' for the installed system, or 'tmpfs' when
     an earlier run already reached the RAM installer.
     """
-    log("\n=== stage 1: pre-flight (nothing is written) ===")
+    log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
     # Refuses this host's own gateway; see install.gateway_conflict.
     install.check_is_openwrt_ram(host, router_iface=router_iface)
     rc, out = install.ssh(host, "echo up", timeout=30, check=False)
     if rc != 0:
         if "Permission denied" in out:
-            raise Abort(
-                f"{host} refused the root password offered. Pass the current one "
+            raise Abort(t(
+                "{host} refused the root password offered. Pass the current one "
                 "with --root-password. A router set to SSH keys only "
-                "(PasswordAuth off) is not supported: nothing was written.")
+                "(PasswordAuth off) is not supported: nothing was written.",
+                host=host))
         raise Abort(f"cannot log in to {host}: {out}")
 
     board, rootfs = revert.state_of(host, profile)   # refuses any other board
@@ -152,38 +179,57 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     needed = size // 1024 + MEMORY_MARGIN_KB
     log(f"[1] {available} KiB available, the upload needs {needed} KiB")
     if available < needed:
-        raise Abort(f"only {available} KiB of memory is available and the RAM "
-                    f"image needs {needed} KiB. Free some first, for example by "
-                    "stopping services you can spare, then run this again.")
+        raise Abort(t("only {available} KiB of memory is available and the RAM "
+                      "image needs {needed} KiB. Free some first, for example by "
+                      "stopping services you can spare, then run this again.",
+                      available=available, needed=needed))
     return rootfs
 
 
-def permanent_ssid(host, args, verify_transport):
+def permanent_ssid(host, args, verify_transport, rootfs, profile):
     """The network final verification waits on, known before anything is written.
 
     install.flash refuses without one, but only after the pivot, when the
-    installed kernel is already gone.
+    installed kernel is already gone. Where the answer comes from matters: on
+    the resume path `host` is the RAM installer, whose wireless config is the
+    installer's own, so asking it would strand the operator on a network that
+    disappears. The config archive, when there is one, is what sysupgrade -f
+    will apply and therefore what says which network the box returns on.
     """
     if verify_transport != "wifi":
         return args.wifi_ssid
     if not args.keep_settings:
-        raise Abort("a clean install leaves Wi-Fi disabled, so it cannot be "
-                    "verified over Wi-Fi. Connect a cable and pass "
-                    "--verify-interface, or keep the settings.")
+        raise Abort(t("a clean install leaves Wi-Fi disabled, so it cannot be "
+                      "verified over Wi-Fi. Connect a cable and pass "
+                      "--verify-interface, or keep the settings."))
     if args.wifi_ssid:
+        if args.config_backup:
+            install.validate_wifi_config_archive(args.config_backup, profile,
+                                                 args.wifi_ssid)
         return args.wifi_ssid
+    if args.config_backup:
+        archived = install.ssid_from_config_archive(args.config_backup, profile)
+        if not archived:
+            raise Abort(t("the config archive does not enable a Wi-Fi network, so "
+                          "the update cannot be verified over Wi-Fi. Pass "
+                          "--verify-interface to verify over a cable."))
+        return archived
+    if rootfs == "tmpfs":
+        raise Abort(t("the router is in the RAM installer, whose wireless config "
+                      "is the installer's, not yours. Pass --wifi-ssid, or "
+                      "--config-backup with the archive the earlier run saved."))
     rc, out = install.ssh(host, "uci -q get wireless.@wifi-iface[0].ssid",
                           check=False)
     ssid = out.strip()
     if rc != 0 or not ssid:
-        raise Abort("cannot tell which SSID to rejoin after the update; pass it "
-                    "with --wifi-ssid, or verify over a cable with "
-                    "--verify-interface.")
+        raise Abort(t("cannot tell which SSID to rejoin after the update; pass it "
+                      "with --wifi-ssid, or verify over a cable with "
+                      "--verify-interface."))
     return ssid
 
 
 def backup_config(host, outdir):
-    log("\n=== backup ===")
+    log(t("\n=== backup ==="))
     install.ssh(host, f"sysupgrade -b {REMOTE_BACKUP}", timeout=120)
     local = os.path.join(outdir, "config-backup.tar.gz")
     scp_from(host, REMOTE_BACKUP, local)
@@ -233,16 +279,34 @@ def wait_for_ram_system(host, interface, fallback, deadline_s=None):
                 f"more was written. Last: {note}")
 
 
-def resume_hint(config_tar):
-    keep = (f"--config-backup {config_tar}" if config_tar
+def _hint_path(path):
+    """A path as the operator's own shell needs it, inside a pasted hint."""
+    return subprocess.list2cmdline([path]) if hostnet.is_windows() else shlex.quote(path)
+
+
+def _keep_flag(config_tar):
+    return (f"--config-backup {_hint_path(config_tar)}" if config_tar
             else "--no-keep-settings")
-    return ("The installed kernel has been replaced by the RAM installer, so the "
-            "router boots into that now. Reach it, then run this again with "
-            f"{keep} to continue; do not skip this step.")
+
+
+def resume_hint(config_tar):
+    return t("The installed kernel has been replaced by the RAM installer, so the "
+             "router boots into that now. Reach it, then run this again with "
+             "{keep} to continue; do not skip this step.",
+             keep=_keep_flag(config_tar))
+
+
+def retry_hint(config_tar):
+    return t("The pivot did not finish. ubi_kernel held the installed kernel, so "
+             "nothing bootable is left there: do NOT reboot or power-cycle. Re-run "
+             "the same command with {keep} to retry the write.",
+             keep=_keep_flag(config_tar))
 
 
 def run(args):
     os.umask(0o077)
+    i18n.set_language(args.lang)
+    i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.image = {"default": "standard", "nss": "nss"}[args.flavour]
 
@@ -254,8 +318,9 @@ def run(args):
 
     # Which RAM installer to write depends on the link: the wired one has no
     # radios and would strand a Wi-Fi laptop. So neither may be guessed.
-    args.discover = (args.discover
+    args.discover = (install.canonical_interface(args.discover)
                      or chain.local_interface(args.host or profile.openwrt_host))
+    args.verify_interface = install.canonical_interface(args.verify_interface)
     if args.transport == "auto":
         if args.discover:
             args.transport = install.detect_transport(args.discover)
@@ -263,8 +328,8 @@ def run(args):
             args.transport = "wired"
             log("[*] no route to the router during dry-run; verifying wired images")
     if not args.dry_run and not (args.discover and args.transport != "auto"):
-        raise Abort("cannot determine the router-facing interface; pass "
-                    "--interface IFACE")
+        raise Abort(t("cannot determine the router-facing interface; pass "
+                      "--interface IFACE"))
     args.verify_interface = args.verify_interface or args.discover
     wifi = args.transport == "wifi"
     log(f"[*] transport: {args.transport}"
@@ -274,7 +339,7 @@ def run(args):
         args.outdir or f"update-{time.strftime('%Y%m%d-%H%M%S')}")
     os.makedirs(outdir, mode=0o700, exist_ok=True)
     os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "w"))
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
     log(f"[*] output -> {outdir}/")
 
     rel = release.resolve(args.tag, profile, args.images, offline=args.offline,
@@ -294,9 +359,10 @@ def run(args):
         f"({'with' if wifi else 'without'} radios)")
 
     if args.dry_run:
-        log("[dry-run] router was not contacted")
+        log(t("[dry-run] router was not contacted"))
         return 0
 
+    install.require_host_tools(password=bool(args.root_password))
     if args.root_password:
         install.SSH_PASSWORDS.append(args.root_password)
         restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
@@ -313,17 +379,18 @@ def run(args):
     rootfs = preflight(host, profile, rel, images, args.images,
                        router_iface=args.discover if gateway_ok else None)
     verify_transport = install.detect_transport(args.verify_interface)
-    args.wifi_ssid = permanent_ssid(host, args, verify_transport)
+    args.wifi_ssid = permanent_ssid(host, args, verify_transport, rootfs,
+                                    profile)
 
     if rootfs == "tmpfs":
         # The config of a RAM system is the installer's defaults. Backing that up
         # and restoring it would silently wipe the owner's settings.
         log("[*] already in the RAM installer -- continuing an interrupted update")
         if args.keep_settings and not args.config_backup:
-            raise Abort(
+            raise Abort(t(
                 "this is the RAM installer, so its config is not yours. Pass "
                 "--config-backup with the config-backup.tar.gz the earlier run "
-                "saved, or --no-keep-settings to install clean.")
+                "saved, or --no-keep-settings to install clean."))
         config_tar = args.config_backup if args.keep_settings else None
     else:
         if args.config_backup:
@@ -337,26 +404,55 @@ def run(args):
             log("[*] clean install: settings will be reset to defaults; a backup "
                 f"of the current ones is in {outdir}")
 
+    if config_tar and turns_off_password_login(config_tar):
+        log(t("[!] this config turns off password login, and the final check logs "
+              "in by password. It will report that it could not verify the router "
+              "even when the update worked: when it starts waiting, check with your "
+              "SSH key instead."))
+
     manifest = os.path.join(outdir, "resume.json")
     install.write_resume_manifest(manifest, args, profile, rel, images,
                                   secrets.token_hex(16), config_tar)
 
     if rootfs != "tmpfs":
-        log("\n=== stage 2: pivot into the RAM installer ===")
-        log("[2] there is no A/B fallback on an installed system: this overwrites "
-            "the installed kernel. Leave the power alone from here.")
+        log(t("\n=== stage 2: pivot into the RAM installer ==="))
+        log(t("[2] there is no A/B fallback on an installed system: this overwrites "
+              "the installed kernel. Leave the power alone from here."))
         if wifi:
-            log(f"[2] when this network disappears, join "
-                f"{profile.installer_wifi_ssid!r} with key "
-                f"{profile.installer_wifi_key!r}; the RAM system has a passwordless "
-                "root account, so keep the link isolated")
-        install.confirm(
-            f"overwrite ubi_kernel with {os.path.basename(ubi)} and reboot? From "
-            "here the only way out is finishing the update, or UART.", args.yes)
+            log(t("[2] when this network disappears, join {ssid!r} with key {key!r}; "
+                  "the RAM system has a passwordless root account, so keep the link "
+                  "isolated",
+                  ssid=profile.installer_wifi_ssid, key=profile.installer_wifi_key))
+        install.confirm(t(
+            "overwrite ubi_kernel with {image} and reboot? From here the only way "
+            "out is finishing the update, or UART.",
+            image=os.path.basename(ubi)), args.yes)
         try:
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
+        except Exception as exc:            # noqa: BLE001 -- tagged by the pivot
+            # What to say depends on how far the write got, and the exception
+            # class cannot express that: pivot_to_ram tags the stage instead.
+            # Catching Exception rather than (Abort, RestoreError) keeps a
+            # transport timeout raised mid-write from escaping with no advice.
+            stage = getattr(exc, "pivot_stage", None)
+            if stage is None:
+                raise
+            if stage == "write-unconfirmed":
+                # ubiformat was issued and its result is not known: the
+                # partition that held the installed kernel is not trustworthy,
+                # so the router must not be rebooted and the write retried now.
+                raise Abort(f"{exc}\n{retry_hint(config_tar)}") from exc
+            if stage == "rebooted":
+                # The write verified and the box rebooted; it is reached over
+                # the network from the RAM installer instead.
+                raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
+            # Nothing was written. The router is still the installed system and
+            # still bootable, so neither hint applies and saying either would
+            # be a false claim about the state of ubi_kernel.
+            raise Abort(str(exc)) from exc
+        try:
             host = wait_for_ram_system(host, args.discover, fallback)
         except Abort as exc:
             raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
@@ -367,10 +463,10 @@ def run(args):
         args.transport, args.verify_interface, args.wifi_ssid,
         profile.openwrt_host if verify_transport == "wired" else None,
         verify_transport,
-        router_iface=args.discover if args.transport == "wired" else None)
-    log("[+] update complete: "
-        + ("your settings were restored."
-           if config_tar else "the new release is running with default settings."))
+        router_iface=args.discover if args.transport == "wired" else None,
+        expected_revision=release.revision(rel, args.images))
+    log(t("[+] update complete: your settings were restored." if config_tar
+          else "[+] update complete: the new release is running with default settings."))
     return 0
 
 
@@ -416,7 +512,9 @@ def parse_args(argv=None):
                     help="device profile")
     ap.add_argument("--images", default="images", help="image cache directory")
     ap.add_argument("--outdir", default=None, help="run output directory")
-    args = ap.parse_args(argv)
+    ap.add_argument("--lang", choices=i18n.LANGUAGES, default="auto",
+                    help="language for prompts and instructions (default: system)")
+    args = install.absorb_secret_env(ap.parse_args(argv))
     args.tag = args.tag or devices.get_profile(args.device).default_release
     return args
 

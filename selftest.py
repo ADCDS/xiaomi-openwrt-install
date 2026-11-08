@@ -34,11 +34,15 @@ from unittest import mock
 import chain
 import channel
 import devices
+import i18n
 import release
 import install
 import probe
 import restore
 import ubiparse
+
+# Assertions below are on the English text, whatever this machine's language.
+os.environ["XIAOMI_INSTALL_LANG"] = "en"
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 NAND_SUPPORT_FIXTURE = os.path.join(
@@ -430,8 +434,10 @@ def test_router_gateway():
     # The RAM stage offers only the empty password.
     tried = []
 
-    def denied(cmd, **_kw):
-        tried.append(cmd[2])
+    def denied(cmd, **kwargs):
+        # sshpass receives the secret through SSHPASS (`-e`), not argv.
+        tried.append(kwargs.get("env", {}).get("SSHPASS",
+                                               cmd[2] if len(cmd) > 2 else None))
         return mock.Mock(returncode=255, stdout="",
                          stderr="root@h: Permission denied (password).")
     with mock.patch.object(install.subprocess, "run", side_effect=denied), \
@@ -629,6 +635,21 @@ def test_stager():
         "mixed / unknown": [
             {"ifname": "wl0", "ssid": "A", "encryption": "", "password": ""},
         ],
+        # The captured values come back from the stock router over plain HTTP.
+        # A legal WPA2 key may contain an apostrophe, and anything crafted must
+        # not be able to close the quote and run a command as root.
+        "wpa2 with an apostrophe": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2",
+             "password": "pa'ss", "channel": "6"},
+        ],
+        "wpa2 with spaces at the edges": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2",
+             "password": " spaced key ", "channel": "6"},
+        ],
+        "hostile encryption mode": [
+            {"ifname": "wl0", "ssid": "A", "encryption": "psk2'; id #",
+             "password": "x", "channel": "6"},
+        ],
     }
     for label, restore in cases.items():
         blob = channel.build_stager(
@@ -647,7 +668,19 @@ def test_stager():
     wpa = channel.build_stager(
         "10.0.0.1", 8000, 4444, cases["wpa2 with a known key"], "testtoken")
     check("wpa2 case restores the captured cipher", b"encryption='psk2'" in wpa)
+
+    quoted = channel.build_stager("192.0.2.2", 8000, 4444, [
+        {"ifname": "wl0", "encryption": "psk2", "password": "pa'ss"}], "t")
+    check("a key with an apostrophe is quoted, not left unterminated",
+          b"'pa'\"'\"'ss'" in quoted, quoted.decode(errors="replace")[-400:])
+    spaced = channel.build_stager("192.0.2.2", 8000, 4444, [
+        {"ifname": "wl0", "encryption": "psk2", "password": " spaced key "}], "t")
+    check("a key with meaningful spaces is not silently trimmed",
+          b"' spaced key '" in spaced, spaced.decode(errors="replace")[-400:])
     check("wpa2 case restores the captured key", b"key='hunter22'" in wpa)
+    hint = channel.expected_wifi([{"encryption": "psk2", "password": " spaced key "}])
+    check("the reconnect hint does not trim a key's spaces",
+          hint[0][2].endswith("key= spaced key "), str(hint))
     open_ = channel.build_stager(
         "10.0.0.1", 8000, 4444, [], "testtoken")
     check("unknown radio config falls back to an open AP",
@@ -2003,7 +2036,7 @@ class _UpdateBox:
 
 
 def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(True, "ok"),
-                backup=None, deadline=None, pivot_error=None):
+                backup=None, deadline=None, pivot_error=None, pivot_stage=None):
     """updater.main() against `box`; returns what it did and how it ended."""
     import contextlib
     import types
@@ -2017,12 +2050,18 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
             with open(path, "wb") as fh:
                 fh.write(kind.encode())
             images[kind] = {"name": kind, "path": path, "sha256": "x", "verified": True}
-        good = os.path.join(tmp, "good.tar.gz")
-        with tarfile.open(good, "w:gz") as tf:
-            body = b"config system\n"
-            info = tarfile.TarInfo("etc/config/system")
-            info.size = len(body)
-            tf.addfile(info, io.BytesIO(body))
+        def archive(path, members):
+            with tarfile.open(path, "w:gz") as tf:
+                for name, body in members.items():
+                    info = tarfile.TarInfo(name)
+                    info.size = len(body)
+                    tf.addfile(info, io.BytesIO(body))
+            return path
+        good = archive(os.path.join(tmp, "good.tar.gz"),
+                       {"etc/config/system": b"config system\n"})
+        key_only = archive(os.path.join(tmp, "key-only.tar.gz"), {
+            "etc/config/system": b"config system\n",
+            "etc/config/dropbear": b"config dropbear\n\toption PasswordAuth 'off'\n"})
 
         def fake_scp_from(host, remote, local):
             if backup == "garbage":
@@ -2036,6 +2075,9 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
                        recover_stale_lock=False):
             outcome.pivots += 1
             if pivot_error:
+                # The real pivot tags how far the write got, and updater picks
+                # its advice from that, so the stand-in has to tag it too.
+                pivot_error.pivot_stage = pivot_stage or "write-unconfirmed"
                 raise pivot_error
             box.pivot()
             return "fe80::1%eth0"
@@ -2084,7 +2126,8 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         try:
             with contextlib.redirect_stdout(stdout):
                 arguments = list(argv) + ["--outdir", os.path.join(tmp, "out"), "--yes"]
-                arguments = [good if item == "GOOD_BACKUP" else item for item in arguments]
+                named = {"GOOD_BACKUP": good, "KEY_ONLY_BACKUP": key_only}
+                arguments = [named.get(item, item) for item in arguments]
                 updater.main(arguments)
         except (install.Abort, restore.RestoreError) as exc:
             outcome.error = str(exc)
@@ -2097,6 +2140,28 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         outcome.output = stdout.getvalue()
         outcome.good_backup = good
     return outcome
+
+
+def test_install_failure_hint():
+    print("\n[install: a failure says how to continue]")
+    import channel as ch
+    check("a lost shell is a plain failure, not a traceback",
+          ch.ChannelError in install.CLEAN_ERRORS)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "resume.json")
+        def hint_at(phase):
+            install._write_resume_data(path, {"version": 1, "phase": phase})
+            return install.continuation_hint(path) or ""
+        check("after pre-flight the same manifest resumes",
+              "--resume-manifest" in hint_at("preflight-complete")
+              and "--stage" not in hint_at("preflight-complete"))
+        check("after the pivot it goes straight to the flash stage",
+              "--stage flash --resume-manifest" in hint_at("pivot-complete"))
+        check("before pre-flight nothing general can be promised",
+              hint_at("prepared") == "")
+        check("after sysupgrade starts, flash() has said what to do",
+              hint_at("flash-started") == "")
+    check("no manifest, no hint", install.continuation_hint("/nonexistent/resume.json") is None)
 
 
 def _wrote_nothing(box, outcome):
@@ -2197,10 +2262,42 @@ def test_updater():
     check("that failure says how to continue", "--config-backup" in (r.error or ""))
 
     box = _UpdateBox()
-    r = _run_update(box, wired, pivot_error=install.Abort("nothing appeared on eth0"))
+    r = _run_update(box, wired, pivot_error=install.Abort("nothing appeared on eth0"),
+                    pivot_stage="rebooted")
     check("losing the box after the pivot says how to continue",
           "nothing appeared" in (r.error or "") and "--config-backup" in r.error
           and "replaced" in r.error)
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=restore.RestoreError(
+        "pivot write did not finish ('fail:1'):\nubiformat: error!"),
+        pivot_stage="write-unconfirmed")
+    check("a failed pivot write is not dropped as a bare error",
+          "ubiformat" in (r.error or "") and "--config-backup" in (r.error or ""),
+          r.error or "")
+    check("a failed pivot write warns against rebooting",
+          "do NOT reboot" in (r.error or ""), r.error or "")
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=subprocess.TimeoutExpired("ssh", 30),
+                    pivot_stage="write-unconfirmed")
+    check("a transport timeout mid-write still gets the retry advice",
+          "--config-backup" in (r.error or "") and "do NOT reboot" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox()
+    r = _run_update(box, wired, pivot_error=restore.RestoreError(
+        "img.ubi is 4096 B, ubi_kernel holds 1024 B -- refusing to erase the "
+        "installed kernel for an image that cannot fit it"),
+        pivot_stage="not-written")
+    check("a refusal before the write makes no claim about the kernel",
+          "cannot fit" in (r.error or "")
+          and "do NOT reboot" not in (r.error or "")
+          and "replaced" not in (r.error or ""), r.error or "")
+    import updater as _updater
+    hint = _updater.retry_hint("/tmp/my runs/config-backup.tar.gz")
+    check("the retry hint quotes a path the shell would split",
+          "'/tmp/my runs/config-backup.tar.gz'" in hint, hint)
 
     print("\n[updater: continuing from the RAM installer]")
     box = _UpdateBox(rootfs="tmpfs")
@@ -2242,6 +2339,16 @@ def test_updater():
     check("a clean install cannot be verified over the Wi-Fi it turns off",
           _wrote_nothing(box, r) and "clean install" in (r.error or ""))
 
+    print("\n[updater: restoring a key-only config]")
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--config-backup", "KEY_ONLY_BACKUP"])
+    check("a backup that disables password login warns before the write",
+          r.flash is not None and "turns off password login" in r.output, r.error or "")
+    box = _UpdateBox(rootfs="tmpfs")
+    r = _run_update(box, wired + ["--config-backup", "GOOD_BACKUP"])
+    check("an ordinary backup does not",
+          r.flash is not None and "turns off password login" not in r.output)
+
     box = _UpdateBox(ssid="")
     r = _run_update(box, [], route="wlan0", transports={"wlan0": "wifi"})
     check("an unknown SSID stops before the kernel is overwritten",
@@ -2274,8 +2381,9 @@ def test_gui_runner():
 
     argv = runner.build_argv("update", {"release": "latest", "wifi_ssid": "Home",
                                         "root_password": "pw", "dry_run": False})
-    check("an update carries the current password and no Wi-Fi settings",
-          "--root-password" in argv and not any("wifi" in a for a in argv))
+    check("an update keeps the password out of argv and carries no Wi-Fi settings",
+          "--root-password" not in argv and not any("wifi" in a for a in argv),
+          str(argv))
     check("the tools run under this interpreter", argv[0] == sys.executable)
     check("a real run answers the confirmations up front", "--yes" in argv)
     check("a dry run does not",
@@ -2297,7 +2405,11 @@ def test_gui_runner():
                                  "wifi_ssid": "Home", "wifi_country": "RU"})
     check("secrets never leave in the shown command",
           "hunter" not in run.shown_argv and "Home" in run.shown_argv, run.shown_argv)
-    check("...but the tool itself still gets them", "hunter2" in run.argv)
+    env = run._child_env()
+    check("...but the child receives them in its environment",
+          env.get("RD03V2_ROOT_PASSWORD") == "hunter2"
+          and env.get("RD03V2_WIFI_KEY") == "hunter3"
+          and "hunter2" not in run.argv, str(run.argv))
 
     print("\n[gui: stages follow the tools' real banners]")
     banners = {
@@ -2349,7 +2461,7 @@ def test_gui_runner():
 
 
 def test_gui_strings():
-    print("\n[gui: every string exists in both languages]")
+    print("\n[gui: every string exists in every language]")
     gui, _app, prereqs, runner = _gui_modules()
     with open(os.path.join(gui, "static", "strings.json"), encoding="utf-8") as fh:
         strings = json.load(fh)
@@ -2358,22 +2470,34 @@ def test_gui_strings():
     with open(os.path.join(gui, "static", "index.html"), encoding="utf-8") as fh:
         page = fh.read()
 
-    check("English and Russian define the same keys",
-          set(strings["en"]) == set(strings["ru"]),
-          str(set(strings["en"]) ^ set(strings["ru"])))
     import re
     placeholders = lambda text: set(re.findall(r"\{(\w+)\}", text))
-    different = [k for k in strings["en"]
-                 if placeholders(strings["en"][k]) != placeholders(strings["ru"].get(k, ""))]
-    check("placeholders match across languages", not different, str(different))
-    untranslated = [k for k in strings["en"] if not strings["ru"].get(k, "").strip()]
-    check("nothing is left blank", not untranslated, str(untranslated))
+
+    check("the wizard ships every language the command line accepts",
+          set(strings) == set(i18n.LANGUAGES) - {"auto"},
+          f"{sorted(strings)} vs {sorted(i18n.LANGUAGES)}")
+    switch = re.search(r"const LANGS = \[([^\]]+)\]", script)
+    check("the language switch offers exactly the catalogues",
+          switch is not None and set(re.findall(r'"([^"]+)"', switch.group(1))) == set(strings),
+          switch.group(1) if switch else "LANGS not found")
+
+    for language in strings:
+        check(f"{language} defines the same keys as English",
+              set(strings[language]) == set(strings["en"]),
+              str(set(strings["en"]) ^ set(strings[language])))
+    different = [(language, k) for language in strings for k in strings[language]
+                 if placeholders(strings[language][k]) != placeholders(strings["en"].get(k, ""))]
+    check("placeholders match across languages", not different, str(different[:5]))
+    untranslated = [(language, k) for language in strings for k in strings[language]
+                    if not strings[language][k].strip()]
+    check("nothing is left blank", not untranslated, str(untranslated[:5]))
 
     used = set(re.findall(r'data-i18n(?:-placeholder)?="([^"]+)"', page))
     # Any dotted literal in the script: keys also travel through variables.
     used |= set(re.findall(r'"([a-z_0-9]+(?:\.[a-z_0-9]+)+)"', script)) - {"strings.json"}
     used |= {f"stage.{s}" for s in runner.STAGES}
     used |= {f"prereq.{c['id']}" for c in prereqs.collect()["checks"]}
+    used |= {"prereq.paramiko", "prereq.passlib", "prereq.powershell"}
     used |= {f"prereq.platform.{p}" for p in ("linux", "wsl", "windows", "macos", "other")}
     for mode in ("install", "update", "revert"):
         used |= {f"config.lede.{mode}", f"review.action.{mode}", f"mode.{mode}.h"}
@@ -2391,10 +2515,9 @@ def test_gui_strings():
           all(f'id="{name}" type="password"' in page
               for name in ("wifi-key", "root-password", "current-password")))
     check("the false A/B claim on the revert card is gone",
-          "A/B" not in strings["en"]["mode.revert.tag"]
-          and "A/B" not in strings["ru"]["mode.revert.tag"])
-    check("the typed confirmation differs from a stray keystroke in both languages",
-          len(strings["en"]["confirm.word"]) > 3 and len(strings["ru"]["confirm.word"]) > 3)
+          all("A/B" not in strings[language]["mode.revert.tag"] for language in strings))
+    check("the typed confirmation differs from a stray keystroke in every language",
+          all(len(strings[language]["confirm.word"]) > 3 for language in strings))
 
 
 def test_gui_server():
@@ -2494,6 +2617,494 @@ def test_gui_server():
         runner._RUNS.clear()
 
 
+def test_default_routes_fail_closed():
+    """An unreadable route table must not read as "not your gateway"."""
+    print("\n[host: default routes]")
+    with mock.patch.object(install.subprocess, "run", side_effect=OSError("no ip")):
+        try:
+            install.default_routes()
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+    check("an unreadable route table fails closed", "default routes" in error, error)
+
+    failed = mock.Mock(returncode=2, stdout="", stderr="ip: bad")
+    with mock.patch.object(install.subprocess, "run", return_value=failed):
+        try:
+            install.default_routes()
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+    check("a failing ip command fails closed", "default routes" in error, error)
+
+    empty = mock.Mock(returncode=0, stdout="", stderr="")
+    with mock.patch.object(install.subprocess, "run", return_value=empty):
+        check("a genuinely empty table is still no gateways",
+              install.default_routes() == [], "")
+
+
+def test_update_verification():
+    """The update must verify the right network, and the right build."""
+    print("\n[updater: what it verifies against]")
+    import types
+    import devices as _devices
+    import updater
+    profile = _devices.get_profile("rd03v2")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wifi = os.path.join(tmp, "wifi.tar.gz")
+        install.build_config_tar(wifi, "Home Net's", "hunter22", profile)
+        plain = os.path.join(tmp, "plain.tar.gz")
+        install.build_config_tar(plain, None, None, profile)
+
+        check("the archive's SSID is read back, quotes and all",
+              install.ssid_from_config_archive(wifi, profile) == "Home Net's",
+              install.ssid_from_config_archive(wifi, profile))
+        check("an archive without Wi-Fi yields no SSID",
+              install.ssid_from_config_archive(plain, profile) == "",
+              install.ssid_from_config_archive(plain, profile))
+
+        args = types.SimpleNamespace(wifi_ssid=None, keep_settings=True,
+                                     config_backup=wifi)
+        check("on the resume path the SSID comes from the archive",
+              updater.permanent_ssid("ram-host", args, "wifi", "tmpfs",
+                                     profile) == "Home Net's")
+
+        args = types.SimpleNamespace(wifi_ssid=None, keep_settings=True,
+                                     config_backup=None)
+        try:
+            updater.permanent_ssid("ram-host", args, "wifi", "tmpfs", profile)
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check("the RAM installer's own SSID is never used as the owner's",
+              "RAM installer" in error, error)
+
+    with mock.patch.object(install, "ssh", return_value=(0, "r0+38070\n")):
+        check("a matching installed revision passes",
+              install.require_expected_revision("h", "r0+38070") == "r0+38070")
+        check("an unpublished revision is logged, not failed",
+              install.require_expected_revision("h", "") == "r0+38070")
+        try:
+            install.require_expected_revision("h", "r0+99999")
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check("a different build coming up is refused",
+              "came up on revision" in error, error)
+
+
+def test_ubi9_reservation():
+    """Every read-back must refuse a device 9 it does not own."""
+    print("\n[ubi: device 9 is reserved toolchain-wide]")
+
+    class FakeChannel:
+        def __init__(self, map_reply):
+            self.map_reply = map_reply
+            self.commands = []
+
+        def run(self, cmd, timeout=120, retries=2, quiet=False):
+            self.commands.append(cmd)
+            if cmd.startswith("for u in /sys/class/ubi"):
+                return self.map_reply
+            return 0, ""
+
+    ch = FakeChannel((0, "ubi0 0\nubi9 5\n"))
+    try:
+        install.verify_written(ch, 9, "deadbeef", 4096)
+        error = "no error"
+    except install.Abort as exc:
+        error = str(exc)
+    check("the install read-back refuses a device 9 on another mtd",
+          "attached to mtd5" in error, error)
+    check("the install read-back detaches nothing before that check",
+          not [c for c in ch.commands if c.startswith("ubidetach")],
+          str(ch.commands))
+
+    with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\nubi9 7\n")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore read-back refuses a device 9 on another mtd",
+          "attached to mtd7" in error, error)
+
+    for label, reply, wanted in (
+            ("unreadable map", (1, "cat: /sys/class/ubi: No such file"),
+             "cannot account for"),
+            ("partial map", (0, "ubi0 0\nubi9\n"), "cannot account for"),
+            ("live target", (0, "ubi0 9\n"), "already has ubi0 attached")):
+        ch = FakeChannel(reply)
+        try:
+            install.verify_written(ch, 9, "deadbeef", 4096)
+            error = "no error"
+        except install.Abort as exc:
+            error = str(exc)
+        check(f"the install read-back fails closed on an {label}",
+              wanted in error, error)
+
+        with mock.patch.object(restore, "ssh", return_value=reply):
+            try:
+                restore.require_own_ubi9("router.test", 9)
+                error = "no error"
+            except restore.RestoreError as exc:
+                error = str(exc)
+        check(f"the restore read-back fails closed on an {label}",
+              wanted in error, error)
+
+    # do_restore runs from the RAM initramfs, where a successful, empty map is
+    # the normal case: nothing has to be attached there. Treating it as
+    # unreadable would abort every stock restore after the write.
+    # The shape a real router returns: device dirs plus volume dirs, whose
+    # mtd_num is empty. Before this was handled, every map on hardware looked
+    # unreadable and the pivot refused a healthy box.
+    real = "ubi0 19\nubi0_0 \nubi0_1 \nubi0_127 \n"
+    ch = FakeChannel((0, real))
+    try:
+        install.require_own_ubi9(ch, 18)
+        error = "no error"
+    except install.Abort as exc:
+        error = str(exc)
+    check("volume directories in the map do not look like unreadable entries",
+          error == "no error", error)
+
+    with mock.patch.object(restore, "ssh", return_value=(0, real)):
+        try:
+            restore.require_own_ubi9("router.test", 18)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore map parser ignores volume directories too",
+          error == "no error", error)
+
+    with mock.patch.object(restore, "ssh", return_value=(0, "")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("the restore read-back allows a clean empty map",
+          error == "no error", error)
+
+    with mock.patch.object(restore, "ssh", return_value=(0, "ubi0 0\n")):
+        try:
+            restore.require_own_ubi9("router.test", 9)
+            error = "no error"
+        except restore.RestoreError as exc:
+            error = str(exc)
+    check("a device 9 that is not attached at all is left alone",
+          error == "no error", error)
+
+
+def test_pivot_advice():
+    """A tagged failure must become an instruction, not a bare message."""
+    print("\n[revert: advice after a failed pivot]")
+    import revert
+
+    class Tagged(Exception):
+        pass
+
+    # The CLI reports these instead of tracebacking; everything else raises.
+    class Tagged(Exception):
+        pass
+
+    reported = Tagged("boom")
+    reported.pivot_stage = "not-written"
+    for error, expected in (
+            (restore.RestoreError("x"), True),
+            (install.Abort("x"), True),
+            (subprocess.TimeoutExpired("ssh", 30), True),
+            (reported, True),
+            (OSError("plain"), False)):
+        check(f"{type(error).__name__} is {'reported' if expected else 'raised'}",
+              revert.is_reported_failure(error) is expected, repr(error))
+
+    for stage, wanted in (("write-unconfirmed", "Do NOT reboot"),
+                          ("rebooted", "Reach the RAM installer"),
+                          ("not-written", None),
+                          (None, None)):
+        error = Tagged("boom")
+        if stage:
+            error.pivot_stage = stage
+        advice = revert.pivot_advice(error)
+        label = stage or "no tag"
+        check(f"{label} gets {'advice' if wanted else 'no advice'}",
+              (wanted in advice) if wanted else advice is None, str(advice))
+
+
+def test_revert_pivot_guards():
+    """The revert pivot must refuse what the A/B paths refuse, before erasing."""
+    print("\n[revert: the pivot's preconditions]")
+    import revert
+
+    def pivot(mtd, ssh_reply=(0, "")):
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            with mock.patch.object(revert.restore, "mtd_map", return_value=mtd), \
+                    mock.patch.object(revert.install, "ssh", return_value=ssh_reply):
+                try:
+                    revert.pivot_to_ram("router.test", image.name, "unused.itb", None)
+                except revert.restore.RestoreError as exc:
+                    return exc
+        return None
+
+    layout = {"ubi_kernel": {"index": 9, "size": 1024},
+              "rootfs": {"index": 10, "size": 8192}}
+    error = pivot(layout)
+    # ubiformat erases PEBs as it writes, so this has to fail before the write,
+    # not after it has already taken the installed kernel with it.
+    check("an image too large for ubi_kernel is refused before ubiformat",
+          "cannot fit" in str(error), str(error) or "no error")
+
+    roomy = {"ubi_kernel": {"index": 9, "size": 8192},
+             "rootfs": {"index": 10, "size": 8192}}
+    error = pivot(roomy)
+    check("the pivot fails closed when it cannot see the attached UBIs",
+          "could not read" in str(error), str(error) or "no error")
+
+    # ubi0 on mtd9 means a real UBI -- the running one -- sits on ubi_kernel.
+    error = pivot(roomy, (0, "ubi0 9\n"))
+    check("the pivot refuses ubi_kernel when a live UBI sits on it",
+          "attached at runtime" in str(error), str(error) or "no error")
+
+    # A dry run must not change kernel state at all: the interlock only reads,
+    # and the detach happens after this gate.
+    def dry(attached, state="status=done pid=1 active=0 lock=0"):
+        commands = []
+
+        def ssh(host, command, **kwargs):
+            commands.append(command)
+            if command.startswith("s=$(cat /tmp/pv.status"):
+                return 0, state
+            return 0, attached
+
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            with mock.patch.object(revert.restore, "mtd_map", return_value=roomy), \
+                    mock.patch.object(revert.install, "ssh", side_effect=ssh), \
+                    mock.patch.object(revert.install, "expected_volume",
+                                      return_value=(b"x" * 10, "md5")):
+                try:
+                    result = revert.pivot_to_ram("router.test", image.name,
+                                                 "unused.itb", None, dry_run=True)
+                except revert.restore.RestoreError as exc:
+                    return exc, commands
+        return result, commands
+
+    result, commands = dry("ubi0 10\n")
+    check("a dry run stops before the write",
+          result is None and not [c for c in commands if c.startswith("ubidetach")],
+          str(commands))
+
+    result, commands = dry("ubi0 10\nubi9 9\n")
+    check("a dry run does not detach even a stale read-back device",
+          result is None and not [c for c in commands if c.startswith("ubidetach")],
+          str(commands))
+
+    # "It was not busy" proves nothing: a live device 9 with no open reference
+    # detaches just as cleanly, so only a prior pivot makes device 9 ours.
+    result, commands = dry("ubi0 10\nubi9 9\n", state="status= pid= active=0 lock=0")
+    check("device 9 on ubi_kernel is refused when no pivot ran here",
+          isinstance(result, revert.restore.RestoreError)
+          and "no record of a pivot" in str(result)
+          and "ubidetach -d 9" in str(result), str(result))
+
+    result, commands = dry("nonsense line\n")
+    check("the pivot fails closed on an unreadable attached-UBI map",
+          isinstance(result, revert.restore.RestoreError)
+          and "refusing to pick a target" in str(result), str(result))
+
+    result, commands = dry("ubi0 10\nubi9 5\n")
+    check("a device 9 attached to another mtd is never detached",
+          isinstance(result, revert.restore.RestoreError)
+          and "attached to mtd5" in str(result), str(result))
+
+    # Every one of those refusals happened before anything was erased, and
+    # updater picks its advice from this tag: a wrong tag would tell the
+    # operator that nothing bootable is left when the box is perfectly intact.
+    check("a refusal before the write is tagged not-written",
+          all(getattr(e, "pivot_stage", None) == "not-written"
+              for e in (pivot(layout), pivot(roomy), pivot(roomy, (0, "ubi0 9\n")))),
+          "missing or wrong pivot_stage")
+
+
+def test_kernel_volume_id():
+    """The read-back must find the kernel volume by name, not by position."""
+    print("\n[revert: reading the kernel volume back]")
+    import revert
+
+    multi = ("Volume ID:   0 (on ubi9)\n"
+             "Type:          dynamic\n"
+             "Name:          rootfs\n"
+             "Volume ID:   1 (on ubi9)\n"
+             "Type:          dynamic\n"
+             "Name:          kernel\n"
+             "Volume ID:   2 (on ubi9)\n"
+             "Name:          rootfs_data\n")
+    check("the kernel volume is found by name, not by position",
+          revert.kernel_volume_id(multi) == "1", revert.kernel_volume_id(multi))
+    check("a volume named rootfs is not taken for the kernel",
+          revert.kernel_volume_id("Volume ID:   0 (on ubi9)\nName: rootfs\n") is None)
+
+
+def test_read_back_kernel():
+    """The read-back attaches, reads the named volume, and always detaches."""
+    print("\n[revert: the read-back]")
+    import revert
+    volumes = ("Volume ID:   0 (on ubi9)\nName:          rootfs\n"
+               "Volume ID:   1 (on ubi9)\nName:          kernel\n")
+
+    def fake(md5_line):
+        calls = []
+
+        def ssh(host, command, **kwargs):
+            calls.append(command)
+            if command.startswith("ubiattach"):
+                return 0, ""
+            if command.startswith("ubinfo"):
+                return 0, volumes
+            if command.startswith("md5sum /dev/ubi9_"):
+                return 0, md5_line + "\n4096"
+            return 0, ""
+        return ssh, calls
+
+    ssh, calls = fake("abc123  4096")
+    with mock.patch.object(revert.install, "ssh", side_effect=ssh):
+        dev = revert.read_back_kernel("router.test", 9, "abc123")
+    check("the read-back reads the kernel volume, not volume 0",
+          dev == "/dev/ubi9_1", dev)
+    check("the read-back detaches device 9 again on the way out",
+          sum(1 for c in calls if c.startswith("ubidetach")) == 2, str(calls))
+
+    ssh, calls = fake("deadbeef  4096")
+    with mock.patch.object(revert.install, "ssh", side_effect=ssh):
+        try:
+            revert.read_back_kernel("router.test", 9, "abc123")
+            error = "no error"
+        except revert.restore.RestoreError as exc:
+            error = str(exc)
+    check("a mismatched read-back refuses loudly without rebooting",
+          "Do NOT reboot" in error, error)
+    check("a mismatched read-back still detaches device 9",
+          sum(1 for c in calls if c.startswith("ubidetach")) == 2, str(calls))
+
+
+def test_pivot_stage_tagging():
+    """The stage tag is what updater turns into advice; test its producer.
+
+    Since updater picks "do not reboot, retry" vs "reach the RAM installer"
+    from `pivot_stage`, a wrong tag is a wrong instruction on the one path with
+    no fallback.
+    """
+    print("\n[revert: tagging how far the pivot got]")
+    import revert
+
+    roomy = {"ubi_kernel": {"index": 9, "size": 8192},
+             "rootfs": {"index": 10, "size": 8192}}
+
+    def scripted(*, job_state="status= pid= active=0 lock=0", poll="fail:1",
+                 md5=None, discover=None, launch="rc=0", attached="ubi0 10\n",
+                 stale_md5=None):
+        seen = {"detached": False}
+
+        def ssh(host, command, **kwargs):
+            if command.startswith("for u in /sys/class/ubi/ubi"):
+                return 0, attached
+            if command.startswith("s=$(cat /tmp/pv.status"):
+                return 0, job_state
+            if command.startswith("md5sum /tmp/ini.ubi"):
+                return 0, md5 + "  /tmp/ini.ubi"
+            if command.startswith("start-stop-daemon -S -b -x /tmp/pv.sh"):
+                return 0, launch
+            if command.startswith("cat /tmp/pv.status"):
+                return 0, poll
+            if command.startswith("tail -20 /tmp/pv.log"):
+                return 0, "ubiformat: error!"
+            if command.startswith("ubinfo"):
+                return 0, "Volume ID:   1 (on ubi9)\nName:          kernel\n"
+            if command.startswith("md5sum /dev/ubi9_"):
+                # Before we drop device 9, report what the stale one holds.
+                if stale_md5 and not seen["detached"]:
+                    return 0, stale_md5 + "\n4096"
+                return 0, md5 + "\n4096"
+            if command.strip() == "ubidetach -d 9":
+                seen["detached"] = True
+                return 0, ""
+            return 0, ""
+        return ssh
+
+    def run(iface=None, **kwargs):
+        with tempfile.NamedTemporaryFile(suffix=".ubi") as image:
+            image.write(b"x" * 4096)
+            image.flush()
+            md5 = hashlib.md5(b"x" * 4096).hexdigest()
+            ssh = scripted(md5=md5, **kwargs)
+            patches = [
+                mock.patch.object(revert.restore, "mtd_map", return_value=roomy),
+                mock.patch.object(revert.install, "ssh", side_effect=ssh),
+                mock.patch.object(revert.install, "scp_to", return_value=None),
+                mock.patch.object(revert.install, "expected_volume",
+                                  return_value=(b"x" * 4096, md5)),
+                mock.patch.object(revert.time, "sleep", return_value=None),
+            ]
+            if kwargs.get("discover") is not None:
+                patches.append(mock.patch.object(
+                    revert.install, "wait_and_discover",
+                    side_effect=kwargs["discover"]))
+            for patch in patches:
+                patch.start()
+            try:
+                revert.pivot_to_ram("router.test", image.name, "unused.itb", iface)
+            except Exception as exc:                       # noqa: BLE001 - the point
+                return exc
+            finally:
+                for patch in reversed(patches):
+                    patch.stop()
+        return None
+
+    # Device 9 on ubi_kernel after a pivot is only ours if it carries this
+    # image: a different md5 is either another program's device or a read-back
+    # from another release, and detaching it is not ours to do.
+    error = run(job_state="status=done pid=1 active=0 lock=0",
+                attached="ubi0 10\nubi9 9\n", poll="done",
+                stale_md5="deadbeefdeadbeefdeadbeefdeadbeef")
+    check("a stale device 9 holding another image is refused",
+          isinstance(error, revert.restore.RestoreError)
+          and "cannot be shown to be" in str(error), str(error))
+
+    error = run(job_state="status=fail:1 pid= active=0 lock=1")
+    check("a failed prior pivot is tagged as an unconfirmed write",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          getattr(error, "pivot_stage", "missing"))
+
+    # The pivot script's EXIT trap removes the lock on a normal failed exit, so
+    # this -- not the lock=1 variant above -- is the state real hardware leaves
+    # behind. It also isolates the "any status means a write was issued" term.
+    error = run(launch="start-stop-daemon: not found")
+    check("a launcher that refuses outright is not called a write",
+          getattr(error, "pivot_stage", None) == "not-written",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
+    error = run(job_state="status=fail:1 pid=1234 active=0 lock=0")
+    check("a failed pivot that cleaned its lock up is still an unconfirmed write",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          getattr(error, "pivot_stage", "missing"))
+
+    error = run()
+    check("a write that dies mid-flight is tagged write-unconfirmed",
+          getattr(error, "pivot_stage", None) == "write-unconfirmed",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
+    error = run(iface="eth0", poll="done",
+                discover=revert.install.Abort("nothing appeared on eth0"))
+    check("a failure after the write verified is tagged rebooted",
+          getattr(error, "pivot_stage", None) == "rebooted",
+          f"{getattr(error, 'pivot_stage', 'missing')}: {error}")
+
+
 def main():
     t0 = time.time()
     test_profiles()
@@ -2524,7 +3135,16 @@ def main():
     test_tagged_revert_cache()
     test_stock_image()
     test_expected_volume()
+    test_install_failure_hint()
     test_updater()
+    test_default_routes_fail_closed()
+    test_update_verification()
+    test_ubi9_reservation()
+    test_pivot_advice()
+    test_revert_pivot_guards()
+    test_kernel_volume_id()
+    test_read_back_kernel()
+    test_pivot_stage_tagging()
     test_gui_runner()
     test_gui_strings()
     test_gui_server()

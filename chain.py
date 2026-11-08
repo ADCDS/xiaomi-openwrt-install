@@ -49,6 +49,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import hostnet
+
 # ---- firmware constants -----------------------------------------------------
 
 # The mesh authenticator, literal @0xcabb in /usr/sbin/cab_meshd. Identical on
@@ -141,6 +143,15 @@ def api(host, stok, path, params=None):
 
 
 def _route_field(host, field):
+    if hostnet.is_windows():
+        # Same contract as `ip route get` failing below. A router-facing link
+        # drops its address while the box reboots, and the callers polling
+        # through that treat None as "no route yet".
+        try:
+            source, interface = hostnet.route(host)
+        except hostnet.NetworkError:
+            return None
+        return {"src": source, "dev": interface}.get(field)
     try:
         out = subprocess.run(
             ["ip", "-o", "route", "get", host],
@@ -168,6 +179,11 @@ def local_mac(host):
     slot -- it compares against the real remote MAC purely to log a line -- so
     an approximation is fine, but the real one keeps the logs honest."""
     dev = _route_field(host, "dev")
+    if dev and hostnet.is_windows():
+        try:
+            return hostnet.adapter(dev)["mac"]
+        except hostnet.NetworkError:
+            return "00:00:00:00:00:00"
     if dev:
         try:
             with open(f"/sys/class/net/{dev}/address") as fh:
@@ -253,7 +269,7 @@ def initialise(host, ssid=None, reboot=True, wait=300):
         raise ChainError("could not determine an SSID to submit; pass one")
 
     stok = login(host, FACTORY_ADMIN_HASH)
-    log(f"[1] logged in with the factory account hash, stok={stok}")
+    log("[1] logged in with the factory account hash")
     res = api(host, stok, "api/xqsystem/router_init",
               {"wifi24Ssid": ssid, "wifi50Ssid": ssid})
     # setSPwd()/setInited() run even when `code` reports a validation error on
@@ -409,7 +425,7 @@ def admin_session(host, ident=b"ota0001", timeout=20.0):
     h256, cfg = leak_web_passwd256(host, ident, timeout)
     log(f"[2] leaked web_passwd256 = {h256[:16]}...")
     stok = login(host, h256)
-    log(f"[2] admin session minted: stok={stok}")
+    log("[2] admin session minted")
     return stok, cfg
 
 

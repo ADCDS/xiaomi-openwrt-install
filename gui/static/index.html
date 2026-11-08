@@ -15,7 +15,7 @@
         <div class="brand-title" data-i18n="brand.title"></div>
         <div class="brand-sub" data-i18n="brand.sub"></div>
       </div>
-      <button class="btn ghost lang" id="lang-switch" type="button" data-i18n="lang.switch"></button>
+      <button class="btn ghost lang" id="lang-switch" type="button"></button>
     </div>
     <ol class="steps" id="steps">
       <li data-step="mode" data-i18n="step.mode"></li>
@@ -113,6 +113,12 @@
         <label class="check"><input type="checkbox" id="keep-settings" checked>
           <span data-i18n="field.keep"></span></label>
         <small data-i18n="field.keep.help"></small>
+      </div>
+
+      <div class="field" data-when="update" hidden>
+        <label for="config-backup" data-i18n="field.config_backup"></label>
+        <input id="config-backup" type="text" autocomplete="off" data-i18n-placeholder="field.config_backup.placeholder">
+        <small data-i18n="field.config_backup.help"></small>
       </div>
 
       <div class="note bad" id="config-error" hidden></div>
