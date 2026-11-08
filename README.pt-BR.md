@@ -129,8 +129,10 @@ interativas de `--configure`, e `--attacker ENDEREÇO` fixa o endereço de callb
 quando a escolha automática pegaria o errado em um host com várias interfaces.
 
 Para automação, os segredos podem vir por `RD03V2_ROOT_PASSWORD` e
-`RD03V2_WIFI_KEY`, para não aparecerem na lista de argumentos do processo: as
-variáveis são consumidas na inicialização, e é por isso que o assistente web as usa.
+`RD03V2_WIFI_KEY`, para não aparecerem na lista de argumentos do processo. A
+variável é consumida na inicialização quando o argumento correspondente não foi
+dado; com os dois presentes o argumento vence e a variável permanece no ambiente.
+É assim que o assistente web os passa.
 
 ## 3. Reset e conexão
 
@@ -210,9 +212,10 @@ manualmente às novas redes.
 No final deve aparecer `[+] O OpenWrt está instalado na NAND.`
 
 Se a execução for interrompida depois da pré-verificação, o instalador imprime o
-comando para continuar; antes disso ele não imprime, porque o gatilho de uso único
-pode ainda não ter sido usado. Não comece de novo em nenhum dos casos: o gatilho da
-vulnerabilidade só funciona uma vez por reset de fábrica. Depois de perder o link, o roteador pode levar até 30 minutos para se
+comando para continuar. Antes disso ele não imprime: nenhum firmware foi gravado
+ainda, então recomeçar é seguro se o gatilho de uso único não foi gasto. O log
+sozinho não diz qual dos casos é; se o gatilho já foi gasto, o exploit recusa e só
+um reset de fábrica o recupera. Depois de perder o link, o roteador pode levar até 30 minutos para se
 conectar de novo.
 
 Depois das mensagens `flash-started` ou “não desligue a alimentação”, **não desligue a alimentação, não resete o roteador e não execute a etapa de gravação novamente**.
@@ -327,8 +330,9 @@ acesso somente por chaves (`PasswordAuth off`) será recusado antes do início d
 gravação. No Windows funciona como no Linux, mas nunca houve uma atualização a partir
 do Windows contra um roteador real; o que ainda não foi verificado está na tabela acima.
 
-Opções úteis: `--verify-interface INTERFACE` escolhe a interface da verificação final
-e é obrigatório com `--no-keep-settings`, que deixa o Wi-Fi desligado; `--wifi-ssid
+Opções úteis: `--verify-interface INTERFACE` escolhe a interface da verificação final e só é
+obrigatório com `--no-keep-settings` quando essa verificação for por Wi-Fi (uma
+atualização por cabo usa a interface voltada ao roteador); `--wifi-ssid
 NOME` indica a rede para reconectar quando a execução continua a partir do instalador
 em RAM; `--offline` usa apenas o cache verificado; `--yes` responde às confirmações
 antecipadamente; `--device`, `--images` e `--outdir` escolhem o perfil, o cache de
@@ -349,7 +353,8 @@ python3 gui/app.py
 ```
 
 Um assistente local passo a passo em inglês, russo, chinês simplificado e português do
-Brasil: simulação, acompanhamento de etapas e log em tempo real. Veja
+Brasil: simulação, acompanhamento de etapas e log em tempo real. Como o
+`updater.py`, roda tanto no Windows 10/11 quanto no Linux. Veja
 [gui/README.md](gui/README.md).
 
 ## Retorno ao firmware de fábrica
@@ -392,6 +397,7 @@ gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (vej
 | `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspecionar um dump UBI offline. |
 | `python3 selftest.py` | Verificações sem roteador (Linux). No Windows: `py -3 -m unittest test_hostnet test_windows test_i18n`. |
 | `python3 updater.py --dry-run` | Baixar e verificar as imagens de uma atualização sem contatar o roteador. |
+| `python3 -m unittest test_hostnet test_windows test_i18n` | Verificações de Windows e de idioma; precisa de `requirements-windows.txt`. |
 
 O `probe.py` não foi testado no Windows; a reconexão automática ao Wi-Fi dele só
 funciona no Linux. Execuções interrompidas, etapas individuais e recuperação estão

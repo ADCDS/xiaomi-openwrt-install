@@ -46,11 +46,13 @@ sudo apt install sshpass openssl        # or your distro's equivalent
 ```
 
 `sshpass` is not optional. `install.py`, `updater.py` and `revert.py` check for
-it, with `ssh`, `scp` and `ip`, before they contact the router, and refuse with
-the missing name rather than a confusing failure later. The lower-level
-`restore.py` has not been given that check and still degrades to a bare `ssh`
-call. `openssl` is needed only to hash a root password. `ping` with IPv6 support
-(`ping6` is used when present) is used opportunistically.
+it, with `ssh`, `scp` and `ip`, before a real run contacts the router, and refuse
+with the missing name rather than a confusing failure later. Two exceptions:
+`revert.py --dry-run` skips the check yet still logs in to read the router's
+state, and the lower-level `restore.py` was never given the check, so it degrades
+to a bare `ssh` call. `openssl` is needed only to hash a root password. `ping`
+with IPv6 support (`ping6`, or `ping -6`) is required for link-local discovery:
+without it the discovery step aborts rather than guessing.
 
 **The laptop needs an address on the router's stock setup network.** Stock
 serves DHCP there; the OpenWrt RAM system is reached by IPv6 link-local, so its
@@ -157,7 +159,7 @@ disabled, pass a wired `--verify-interface` and connect that link when asked.
 | `updater.py` | OpenWrt → newer OpenWrt over SSH, through the same RAM pivot, keeping or replacing the configuration |
 | `hostnet.py` | host networking: adapters, routes, neighbours, and the Windows PowerShell equivalents |
 | `winssh.py` | password SSH and legacy SCP for Windows, including Dropbear without an SFTP subsystem |
-| `i18n.py` | the message catalogues (`en`, `ru`, `zh-CN`, `pt-BR`) and `--lang` selection |
+| `i18n.py` | message catalogues for `ru`, `zh-CN` and `pt-BR` (English is the key set and the fallback) and `--lang` selection |
 | `gui/` | the local web wizard: an HTTP server, an argv builder, prerequisite checks and a single-page UI |
 | `install.cmd` | Windows entry point that re-invokes `install.py` under the Windows interpreter |
 | `requirements-windows.txt` | `paramiko` and `passlib`, the Windows equivalents of `sshpass` and `openssl` |
@@ -187,8 +189,8 @@ XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
 
 ## Interrupted runs
 
-Each `install.py` or `updater.py` run writes a `resume.json` inside its output
-directory, mode `0600` in a mode-`0700` directory on POSIX and inheriting the
+Each real (non-dry) `install.py` or `updater.py` run writes a `resume.json` in
+its output directory; a dry run returns before writing anything, mode `0600` in a mode-`0700` directory on POSIX and inheriting the
 folder's ACLs on Windows. `revert.py`, `restore.py` and `probe.py` write none.
 It records the device profile, release, flavor, transport, exact image hashes,
 configuration archive, callback address, permanent SSID and callback token. The
@@ -206,14 +208,16 @@ python3 install.py --resume-manifest OUTDIR/resume.json --stage flash
 ```
 
 `--stage flash` requires a manifest; `--standalone-flash` is the exception, for
-a RAM system booted and validated separately. `--openwrt-host` points straight
-at the RAM system, or at the installed one for `--verify-only`, when discovery
-would pick the wrong peer; `--skip-exploit` reuses a root channel that is
-already up; `--config-tar` supplies the first-boot archive for the flash stage;
-`--images` and `--outdir` relocate the cache and the output directory. When a manual stage is needed, use the
-continuation command printed by `install.py`; the flash stage refuses selection
-drift. `attach.py` likewise requires the bind address and token from this
-manifest.
+a RAM system booted and validated separately. When a manifest is given it is the
+authority: `--config-tar`, `--images` and `--flavour` are re-read from it, so
+passing them yourself does not override what the run recorded. `--openwrt-host`
+points straight at the RAM system, or at the installed one for `--verify-only`,
+when discovery would pick the wrong peer — except that `--verify-only` prefers a
+`verify_interface` recorded in the manifest, which overrides it. `--skip-exploit`
+reuses a root channel that is already up and requires the recorded callback
+address. `--outdir` relocates the output directory. The flash stage also refuses
+selection drift. `attach.py` likewise requires the bind address and token from
+the manifest.
 
 New installations and stock-revert RAM images default to the firmware
 repository's latest published full release. `release.resolve` selects its
@@ -385,18 +389,19 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
 
 ## Safety properties
 
-- **No NAND write happens until every gate passes.** Model, `flash_type`
-  against the release's own declaration, partition map, which slot is live
-  cross-checked between `/proc/cmdline` and two nvram flags, and a hard
+- **No firmware-slot write happens until every gate passes.** Model,
+  `flash_type` against the release's own declaration, partition map, which slot
+  is live cross-checked between `/proc/cmdline` and two nvram flags, and a hard
   interlock that refuses to target a partition with a UBI attached to it.
-  Earlier stages do change stock state: `chain.initialise` completes the setup
-  wizard, `chain.plant` writes the `encryption` fields, and `chain.trigger`
-  fires the one-shot `cap_init`. Those are configuration and mesh-state
-  changes, and they are what the pre-flight gates are checked after.
+  Earlier stages do write: `chain.initialise` completes the setup wizard,
+  `chain.plant` writes the `encryption` fields, and `chain.trigger` fires the
+  one-shot `cap_init`, which changes NVRAM and the stock UCI overlay — both on
+  NAND. Those are configuration and mesh-state writes that leave the firmware
+  slots untouched, and the pre-flight gates are checked after them.
 - **Every pivot and restore write is verified by read-back.** The kernel volume
   is compared against the image — an MD5 over a prefix plus `0xff` padding,
-  because the volume is dynamic and reads back LEB-aligned — and the fastboot
-  restore compares every volume it wrote. The final `sysupgrade` is launched
+  because the volume is dynamic and reads back LEB-aligned — and the stock
+  restore md5s every volume it wrote back through `ubiformat`. The final `sysupgrade` is launched
   detached and is **not** read back: it is proven by the installed system
   booting, matching the profile's partition sizes, and reporting the release's
   own revision from `/etc/openwrt_version`.

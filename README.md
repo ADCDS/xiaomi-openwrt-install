@@ -80,10 +80,10 @@ Keep the run output somewhere private. Backups, configuration archives and
 the folder's NTFS permissions rather than getting POSIX modes.
 
 If a run stops partway it prints the command that continues it, once it has
-passed pre-flight. A failure before that prints no continuation: the one-shot
-trigger may or may not have been spent, so nothing general can be said. Do not
-restart from the beginning either way — the exploit's trigger works only once
-per factory reset.
+passed pre-flight. A failure before that prints none: no firmware has been
+written yet, so restarting is safe if the one-shot trigger was not spent. The
+tool cannot tell you which from the log alone; if the trigger was already spent,
+the exploit refuses and only a factory reset brings it back.
 
 In a virtual machine, give Windows a bridged or macvtap network card. USB
 passthrough of an RTL8153 adapter froze on sustained sends in testing, and the
@@ -92,7 +92,7 @@ exploit's download needs those to work.
 **How far this has been tested** on a real RD03v2. The port is by
 [alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install).
 
-| From Windows | Result |
+| Scenario | Result |
 |---|---|
 | Wi-Fi, stock 2.0.28 to v1.14 standard, on Windows 10 | Installed on 2026-10-11 (alexsys87), on older code |
 | Cable, stock 2.0.28 to v2.1.2 with a root password, on Windows 11 25H2 in a VM | Installed on 2026-11-07, on this code, including continuing an interrupted run |
@@ -133,8 +133,10 @@ interface, so before doing anything to the router the installer requires the
 SSID, passphrase, and country code for the permanent system. An interactive run
 prompts for missing values; automation must pass `--wifi-ssid`, `--wifi-key`,
 and `--wifi-country`. Secrets may also arrive through `RD03V2_ROOT_PASSWORD` and
-`RD03V2_WIFI_KEY`, so that they never appear in a process argument list; the
-variables are consumed on startup, and the web wizard uses them for that reason. After `sysupgrade` makes the temporary network disappear,
+`RD03V2_WIFI_KEY`, so that they never appear in a process argument list. A
+variable is consumed on startup when the matching flag is absent — with both set,
+the flag wins and the variable stays in the environment. The web wizard passes
+them this way for exactly that reason. After `sysupgrade` makes the temporary network disappear,
 join that permanent SSID. The installer never prints its passphrase.
 
 To keep permanent Wi-Fi disabled, select an Ethernet interface for the final
@@ -180,6 +182,10 @@ Offline installs require an explicit tag and its verified cached images:
 ```sh
 python3 install.py --release v2.0.0 --dry-run
 python3 install.py --release v2.0.0 --offline
+
+# a Wi-Fi install caches a different image set
+python3 install.py --release v2.0.0 --transport wifi --dry-run
+python3 install.py --release v2.0.0 --transport wifi --offline
 ```
 
 If GitHub is unavailable, an explicitly selected tag can also use its verified
@@ -215,7 +221,8 @@ through the RAM installer, as
 does. It saves a config backup in a private `update-*` folder before writing.
 
 Useful flags: `--verify-interface IFACE` chooses the interface for the final
-check, and is required with `--no-keep-settings`, which leaves Wi-Fi off;
+check and is required with `--no-keep-settings` only when that check would run
+over Wi-Fi — a wired update defaults it to the router-facing interface;
 `--wifi-ssid NAME` names the network to rejoin when continuing a run that stopped
 in the RAM installer, whose own wireless config is the installer's; `--offline`
 uses only the verified cache; `--yes` answers the confirmations up front;

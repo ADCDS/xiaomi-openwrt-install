@@ -47,15 +47,16 @@ connection back to the installer, so prefer a real Linux computer.
 
 | Mode | Fields |
 |---|---|
-| Install | interface (or automatic), release, and an optional block for the installed system: Wi-Fi SSID, key and country, plus its root password |
+| Install | interface (or automatic), release, and a block for the installed system: its root password, plus Wi-Fi SSID, key and country — required when the final check runs over Wi-Fi, optional over a cable |
 | Update | interface, release, the installed system's current root password, the keep-settings switch, and — to continue a run that stopped in the RAM installer — the saved config archive |
 | Return to stock | interface, release, and the path to an approved stock image |
-| Every mode | a dry-run switch at the end; a real run needs the typed `FLASH` confirmation |
+| Every mode | a dry-run switch at the end; a real run needs the confirmation word typed, which is translated (`FLASH` in English and Chinese and Portuguese, `ПРОШИТЬ` in Russian) |
 
-Values are checked before anything runs: interface and release names are
-restricted to a safe character set, a leading dash is refused where a value could
-be read as a flag, and an update refuses a clean install over Wi-Fi because the
-new system would come back with its radios off. Secrets travel to the child
+Values are checked before anything runs: release names are restricted to a safe
+character set, interface names get that check on Linux but only reject a leading
+dash and control characters on Windows, where adapter names legitimately contain
+spaces and non-Latin text, and an update refuses a clean install over Wi-Fi
+because the new system would come back with its radios off. Secrets travel to the child
 process in its environment, never on its command line.
 
 ## What protects what

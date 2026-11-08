@@ -85,7 +85,7 @@ py -3 install.py --release vX.Y.Z --transport wifi --offline --dry-run
 
 `--root-password 密码` 可在不使用 `--configure` 交互提问的情况下设置新系统的 root 密码；`--attacker 地址` 用于在多网卡主机上自动选择会挑错回调地址时手动指定。
 
-自动化时可以把机密通过 `RD03V2_ROOT_PASSWORD` 和 `RD03V2_WIFI_KEY` 传入，这样它们不会出现在进程参数列表中：变量在启动时被读取并消费，网页向导正是为此使用的。
+自动化时可以把机密通过 `RD03V2_ROOT_PASSWORD` 和 `RD03V2_WIFI_KEY` 传入，这样它们不会出现在进程参数列表中。仅当对应参数未给出时，变量才会在启动时被消费：两者都给出时以参数为准，变量仍留在环境中。网页向导正是这样传递的。
 
 ## 3. 复位与连接
 
@@ -145,7 +145,7 @@ python3 install.py --transport wifi --interface WIFI_INTERFACE \
 
 最后应出现 `[+] OpenWrt 已安装到 NAND。`
 
-如果运行在预检之后被中断，安装器会输出用于继续的命令；在此之前的失败不会输出，因为一次性触发器可能尚未生效。无论哪种情况都不要从头开始：漏洞触发器在每次恢复出厂设置之后只会生效一次。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
+如果运行在预检之后被中断，安装器会输出用于继续的命令。在此之前的失败不会输出：此时尚未写入固件，只要一次性触发器未被消耗，从头开始是安全的。仅凭日志无法判断它是否已被消耗；如果已经消耗，漏洞利用会被拒绝，只有恢复出厂设置才能重新获得。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
 
 看到 `flash-started` 或「不要断开电源」之类的提示之后，**不要断开电源，不要复位路由器，也不要重新执行固件写入阶段**。
 
@@ -219,7 +219,7 @@ python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 
 这里没有 A/B 冗余：出现故障时的保障是 UART。如果运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上与 Linux 一样可用，但尚未从 Windows 对真实路由器执行过更新；哪些场景尚未验证见上表。
 
-常用参数：`--verify-interface 接口` 选择最终检查所用的接口，与 `--no-keep-settings` 一起使用时必须提供（该选项会关闭 Wi-Fi）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
+常用参数：`--verify-interface 接口` 选择最终检查所用的接口；只有在最终检查走 Wi-Fi 时，与 `--no-keep-settings` 一起使用才必须提供（有线更新会默认使用面向路由器的接口）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
 
 到目前为止，更新在真实路由器上只运行过**一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录——工具会事先提示，结果改用 SSH 密钥验证。仍允许密码登录的路由器尚未执行过更新。请在手边备好 UART 适配器，并反馈结果。
 
@@ -229,7 +229,7 @@ python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 python3 gui/app.py
 ```
 
-一个本地分步向导，支持英语、俄语、简体中文和巴西葡萄牙语，提供试运行、阶段跟踪和实时日志。参见 [gui/README.md](gui/README.md)。
+一个本地分步向导，支持英语、俄语、简体中文和巴西葡萄牙语，提供试运行、阶段跟踪和实时日志。与 `updater.py` 一样，它同时支持 Windows 10/11 和 Linux。参见 [gui/README.md](gui/README.md)。
 
 ## 恢复原厂固件
 
@@ -261,6 +261,7 @@ python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface 
 | `python3 ubiparse.py /path/to/ubi-dump.bin` | 离线解析 UBI 转储。 |
 | `python3 selftest.py` | 无需路由器的检查（Linux）。在 Windows 中：`py -3 -m unittest test_hostnet test_windows test_i18n`。 |
 | `python3 updater.py --dry-run` | 下载并校验更新的镜像，不接触路由器。 |
+| `python3 -m unittest test_hostnet test_windows test_i18n` | Windows 与语言检查；需要 `requirements-windows.txt`。 |
 
 `probe.py` 未在 Windows 上验证；它的自动 Wi-Fi 重连只在 Linux 上有效。被中断的运行、各个阶段以及恢复流程在[技术文档](docs/technical.md)中有说明（英文）。
 
