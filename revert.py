@@ -134,6 +134,31 @@ def read_back_kernel(host, k, want_md5):
     return dev
 
 
+def check_stale_readback(host, want_md5):
+    """Refuse to detach a device 9 that does not hold the image we would write.
+
+    Device 9 on ubi_kernel is only accepted as this tool's own read-back when a
+    pivot ran here, but "a pivot ran" does not prove *this* attachment is its
+    read-back. Content does: the read-back attached the image it had just
+    written, so its kernel volume carries this run's md5. A different content is
+    either another program's device or a read-back from a different release --
+    both are refused, and the message says how to get out. Nothing is written.
+    """
+    _rc, vols = install.ssh(host, "ubinfo -a -d 9", check=False)
+    vid = kernel_volume_id(vols)
+    got = ""
+    if vid is not None:
+        _rc, out = install.ssh(host, f"md5sum /dev/ubi9_{vid}", check=False)
+        got = out.split()[0] if out else ""
+    if got != want_md5:
+        raise restore.RestoreError(
+            f"device 9 on ubi_kernel holds md5 {got or 'unknown'}, not the "
+            f"{want_md5} this image would write, so it cannot be shown to be "
+            "this tool's read-back. Inspect it; if you know what it is, detach "
+            "it on the router (ubidetach -d 9) and re-run. Nothing has been "
+            "written by this run.")
+
+
 def pivot_advice(error):
     """What to add after a pivot failure, or None when there is nothing to add.
 
@@ -291,6 +316,7 @@ def _pivot_to_ram(host, ubi_path, itb_path, iface, dry_run, fallback,
 
     if stale_scratch:
         # Only now, so that a dry run really is read-only.
+        check_stale_readback(host, want_md5)
         rc, out = install.ssh(host, "ubidetach -d 9", check=False)
         if rc != 0:
             # Device 9 sits on ubi_kernel, so an earlier read-back ran -- and

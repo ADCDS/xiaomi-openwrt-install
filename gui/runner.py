@@ -117,6 +117,13 @@ def build_argv(mode, opts):
         argv = py + ["updater.py", "--release", tag(), "--transport", transport]
         if opts.get("verify_interface"):
             argv += ["--verify-interface", iface("verify_interface")]
+        # Continuing an interrupted update needs the archive the earlier run
+        # saved: from the RAM installer there is no owner config to read.
+        backup = (opts.get("config_backup") or "").strip()
+        if backup:
+            if any(ch in backup for ch in "\x00\r\n") or backup.startswith("-"):
+                raise ValueError(f"bad config backup path: {backup!r}")
+            argv += ["--config-backup", backup]
         # Keep settings like sysupgrade by default; a clean install is opt-in.
         if opts.get("keep_settings") is False:
             argv += ["--no-keep-settings"]

@@ -3006,10 +3006,13 @@ def test_pivot_stage_tagging():
              "rootfs": {"index": 10, "size": 8192}}
 
     def scripted(*, job_state="status= pid= active=0 lock=0", poll="fail:1",
-                 md5=None, discover=None, launch="rc=0"):
+                 md5=None, discover=None, launch="rc=0", attached="ubi0 10\n",
+                 stale_md5=None):
+        seen = {"detached": False}
+
         def ssh(host, command, **kwargs):
             if command.startswith("for u in /sys/class/ubi/ubi"):
-                return 0, "ubi0 10\n"
+                return 0, attached
             if command.startswith("s=$(cat /tmp/pv.status"):
                 return 0, job_state
             if command.startswith("md5sum /tmp/ini.ubi"):
@@ -3023,7 +3026,13 @@ def test_pivot_stage_tagging():
             if command.startswith("ubinfo"):
                 return 0, "Volume ID:   1 (on ubi9)\nName:          kernel\n"
             if command.startswith("md5sum /dev/ubi9_"):
+                # Before we drop device 9, report what the stale one holds.
+                if stale_md5 and not seen["detached"]:
+                    return 0, stale_md5 + "\n4096"
                 return 0, md5 + "\n4096"
+            if command.strip() == "ubidetach -d 9":
+                seen["detached"] = True
+                return 0, ""
             return 0, ""
         return ssh
 
@@ -3055,6 +3064,16 @@ def test_pivot_stage_tagging():
                 for patch in reversed(patches):
                     patch.stop()
         return None
+
+    # Device 9 on ubi_kernel after a pivot is only ours if it carries this
+    # image: a different md5 is either another program's device or a read-back
+    # from another release, and detaching it is not ours to do.
+    error = run(job_state="status=done pid=1 active=0 lock=0",
+                attached="ubi0 10\nubi9 9\n", poll="done",
+                stale_md5="deadbeefdeadbeefdeadbeefdeadbeef")
+    check("a stale device 9 holding another image is refused",
+          isinstance(error, revert.restore.RestoreError)
+          and "cannot be shown to be" in str(error), str(error))
 
     error = run(job_state="status=fail:1 pid= active=0 lock=1")
     check("a failed prior pivot is tagged as an unconfirmed write",

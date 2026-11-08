@@ -229,6 +229,7 @@ $("#config-next").addEventListener("click", () => {
   if (STATE.mode === "update") {
     o.root_password = $("#current-password").value;
     o.keep_settings = $("#keep-settings").checked;
+    o.config_backup = $("#config-backup").value.trim();
   }
   const problem = validate(o);
   setNote($("#config-error"), problem ? t(problem) : null);
@@ -261,6 +262,7 @@ function renderReview() {
     rows.push(["review.settings",
       t(o.keep_settings === false ? "review.settings.clean" : "review.settings.keep")]);
     rows.push(["review.current_password", t(o.root_password ? "review.set" : "review.unset")]);
+    if (o.config_backup) rows.push(["review.config_backup", o.config_backup]);
   }
   if (STATE.mode === "install") {
     if (o.wifi_ssid) rows.push(["review.wifi_ssid", o.wifi_ssid]);
