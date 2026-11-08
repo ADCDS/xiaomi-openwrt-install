@@ -12,6 +12,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ['3.9', '3.13']
+        # ubuntu-latest moved to 26.04, which no longer provides 3.9; keep the
+        # oldest supported interpreter on the last image that ships it.
+        include:
+          - os: ubuntu-22.04
+            python: '3.9'
+        exclude:
+          - os: ubuntu-latest
+            python: '3.9'
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -30,6 +38,10 @@ jobs:
       - name: Exercise the other real Windows networking queries
         if: runner.os == 'Windows'
         shell: python
+        # `shell: python` runs the script from a temporary file, so the
+        # workspace is not on sys.path and `import hostnet` would fail.
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           import hostnet
           print("default routes:", hostnet.default_routes())
