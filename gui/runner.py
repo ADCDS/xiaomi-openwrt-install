@@ -41,6 +41,8 @@ _VERIFY_LINE_RE = re.compile(r"for permanent OpenWrt|wait for stock", re.I)
 
 _WIFI_RE = re.compile(r"join .*?['\"]([^'\"]+)['\"].*?(?:key|with key) ['\"]([^'\"]+)['\"]", re.I)
 _RESUME_RE = re.compile(r"(\S*resume\S*\.json)\b")
+# updater.py's pre-flight names its route; an in-place update has no pivot.
+_ROUTE_RE = re.compile(r"^\[1\] installed release \S+, target \S+: in-place sysupgrade$")
 _OUTPUT_RE = re.compile(r"output -> (.+)$")
 
 STAGES = ["preflight", "backup", "pivot", "flash", "verify"]
@@ -231,6 +233,8 @@ class Run:
         m = _RESUME_RE.search(line)
         if m:
             self._emit({"type": "resume", "path": m.group(1)})
+        if _ROUTE_RE.match(line.strip()):
+            self._emit({"type": "route", "route": "in-place"})
         if "sysupgrade launched" in line or "flash-started" in line:
             self.cancellable = False
         if "CERTIFICATE_VERIFY_FAILED" in line or "SSL: CERTIFICATE" in line:

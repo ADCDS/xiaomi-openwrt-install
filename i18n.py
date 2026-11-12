@@ -130,8 +130,16 @@ RU = {
     # ---- updater.py ---------------------------------------------------------
     "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
         "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Роутеры с входом только по ключам (PasswordAuth off) не поддерживаются: ничего не записано.",
-    "only {available} KiB of memory is available and the RAM image needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
-        "доступно только {available} КиБ памяти, а образу RAM нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
+    "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
+        "доступно только {available} КиБ памяти, а для {image} нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
+    "\n=== stage 3: flash (sysupgrade from the installed system) ===":
+        "\n=== этап 3: прошивка (sysupgrade из установленной системы) ===",
+    "update {host} in place to {tag} with {image}?":
+        "Обновить {host} на месте до {tag} образом {image}?",
+    "[3] the running release refuses an in-place sysupgrade, as v2.0.0 to v2.1.2 do. That is its only objection to this image, so this update passes -F.":
+        "[3] запущенный релиз отказывается выполнять sysupgrade на месте, как v2.0.0–v2.1.2. Других возражений к этому образу у него нет, поэтому обновление идёт с -F.",
+    "[3] sysupgrade writes the new release in place and reboots":
+        "[3] sysupgrade записывает новый релиз на месте и перезагружает роутер",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "после чистой установки Wi-Fi выключен, поэтому проверить её по Wi-Fi нельзя. Подключите кабель и укажите --verify-interface либо сохраните настройки.",
     "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":
@@ -284,8 +292,16 @@ ZH_CN = {
     # ---- updater.py ---------------------------------------------------------
     "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
         "{host} 拒绝了所给的 root 密码。请用 --root-password 传入当前密码。不支持仅允许 SSH 密钥登录（PasswordAuth off）的路由器：未写入任何内容。",
-    "only {available} KiB of memory is available and the RAM image needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
-        "当前仅剩 {available} KiB 内存，而 RAM 镜像需要 {needed} KiB。请先释放一些内存（例如停止可以暂时停用的服务），然后重新运行。",
+    "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
+        "当前仅剩 {available} KiB 内存，而 {image} 需要 {needed} KiB。请先释放一些内存（例如停止可以暂时停用的服务），然后重新运行。",
+    "\n=== stage 3: flash (sysupgrade from the installed system) ===":
+        "\n=== 阶段 3：刷机（从已安装的系统执行 sysupgrade）===",
+    "update {host} in place to {tag} with {image}?":
+        "要用 {image} 将 {host} 就地更新到 {tag} 吗？",
+    "[3] the running release refuses an in-place sysupgrade, as v2.0.0 to v2.1.2 do. That is its only objection to this image, so this update passes -F.":
+        "[3] 当前运行的版本拒绝就地 sysupgrade（v2.0.0 至 v2.1.2 均如此）。这是它对该镜像唯一的异议，因此本次更新使用 -F。",
+    "[3] sysupgrade writes the new release in place and reboots":
+        "[3] sysupgrade 将就地写入新版本并重启",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "全新安装会关闭 Wi-Fi，因此无法通过 Wi-Fi 验证。请连接网线并指定 --verify-interface，或保留原有设置。",
     "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":
@@ -438,8 +454,16 @@ PT_BR = {
     # ---- updater.py ---------------------------------------------------------
     "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
         "{host} recusou a senha de root informada. Passe a atual com --root-password. Um roteador configurado para apenas chaves SSH (PasswordAuth off) não é suportado: nada foi gravado.",
-    "only {available} KiB of memory is available and the RAM image needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
-        "só há {available} KiB de memória disponível e a imagem em RAM precisa de {needed} KiB. Libere um pouco primeiro, por exemplo parando serviços dispensáveis, e execute isto de novo.",
+    "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
+        "só há {available} KiB de memória disponível e {image} precisa de {needed} KiB. Libere um pouco primeiro, por exemplo parando serviços dispensáveis, e execute isto de novo.",
+    "\n=== stage 3: flash (sysupgrade from the installed system) ===":
+        "\n=== etapa 3: gravação (sysupgrade a partir do sistema instalado) ===",
+    "update {host} in place to {tag} with {image}?":
+        "atualizar {host} no lugar para {tag} com {image}?",
+    "[3] the running release refuses an in-place sysupgrade, as v2.0.0 to v2.1.2 do. That is its only objection to this image, so this update passes -F.":
+        "[3] a versão em execução recusa um sysupgrade no lugar, como as v2.0.0 a v2.1.2. Essa é a única objeção dela a esta imagem, então esta atualização passa -F.",
+    "[3] sysupgrade writes the new release in place and reboots":
+        "[3] o sysupgrade grava a nova versão no lugar e reinicia",
     "a clean install leaves Wi-Fi disabled, so it cannot be verified over Wi-Fi. Connect a cable and pass --verify-interface, or keep the settings.":
         "uma instalação limpa deixa o Wi-Fi desativado, então não é possível verificá-la por Wi-Fi. Conecte um cabo e passe --verify-interface, ou mantenha as configurações.",
     "the router is in the RAM installer, whose wireless config is the installer's, not yours. Pass --wifi-ssid, or --config-backup with the archive the earlier run saved.":

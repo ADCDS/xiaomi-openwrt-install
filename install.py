@@ -1188,13 +1188,17 @@ def require_expected_revision(host, expected):
 
 def verify_permanent_system(profile, interface=None, fallback=None, host=None,
                             deadline_s=600, router_mac=None,
-                            expected_revision=""):
+                            expected_revision="", host_iface=None):
     """Rediscover and prove the permanent system without writing anything.
 
     These checks log in with the configured root password. The router's DHCP
     makes `fallback` this host's gateway on the cable, and that is accepted
     only where it cannot leak the password: none is configured, or the address
-    still answers from the MAC the RAM stage recorded (router_mac)."""
+    still answers from the MAC the RAM stage recorded (router_mac).
+
+    host_iface: a pinned `host` that is reached on the cable the router serves
+    DHCP on (an in-place update keeps the router's address). It is accepted as
+    this host's gateway on the same terms as `fallback`."""
     if not interface and not host:
         raise Abort("permanent verification needs --verify-interface or an "
                     "explicit OpenWrt host")
@@ -1205,6 +1209,8 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
     gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
     mac = router_mac if secret else None
     router_iface = interface if gateway_ok else None
+    if host and not interface and host_iface and (router_mac or not secret):
+        router_iface = host_iface
     if fallback and not gateway_ok:
         log(f"[3] no RAM-stage MAC recorded: {fallback} is not offered the "
             "root password while it is this host's gateway")
@@ -1247,6 +1253,20 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
         log(f"[3] system is reachable but not the permanent target yet: {last}")
         time.sleep(10)
     raise Abort(f"permanent OpenWrt was not verified on {where}: {last}")
+
+
+def require_new_boot(host, boot_id_before):
+    """Abort unless `host` booted again since boot_id_before was read."""
+    if not boot_id_before:
+        return
+    rc, now = ssh(host, "cat /proc/sys/kernel/random/boot_id", check=False)
+    if rc != 0 or not now.strip():
+        raise Abort(f"cannot read {host}'s boot id to prove it rebooted: {now!r}")
+    if now.strip() == boot_id_before.strip():
+        raise Abort(f"{host} has the same boot id as before sysupgrade was "
+                    "launched: it has not rebooted, so the new release is not "
+                    "running")
+    log("[3] the router rebooted since sysupgrade was launched")
 
 
 def rerun_command(*arguments):
@@ -1306,6 +1326,73 @@ def build_sysupgrade_launcher(opts):
             f"exec /sbin/sysupgrade {opts or '-n '}/tmp/fw.bin\n")
 
 
+def launch_sysupgrade(host, opts, manifest_path, verify_interface, run_ssh,
+                      run_scp, where="the router"):
+    """Start sysupgrade on `host`, detached, and prove that it started.
+
+    Detached, deliberately: a dropped session must not be able to tear the NAND
+    write. The launcher waits for an acknowledgement before it execs sysupgrade,
+    and the acknowledgement is only sent once the manifest records
+    "flash-started", so a run that dies in between leaves a launcher that times
+    out without writing. `opts` is passed to sysupgrade as is; an empty one
+    means -n (see build_sysupgrade_launcher).
+    """
+    import tempfile
+    script_body = build_sysupgrade_launcher(opts)
+    with tempfile.TemporaryDirectory() as tmp:
+        launcher = os.path.join(tmp, "run-sysupgrade.sh")
+        with open(launcher, "w", encoding="utf-8", newline="\n") as output:
+            output.write(script_body)
+        run_scp(host, launcher, "/tmp/run-sysupgrade.sh")
+    # The probe has to tell "nothing is running" from "I cannot tell". A bare
+    # `pgrep ... | head -1` takes head's status, so a BusyBox without pgrep
+    # prints "not found" to stderr, leaves the output empty, and reads as idle.
+    _rc, probe = run_ssh(
+        host,
+        "if command -v pgrep >/dev/null 2>&1; then "
+        "p=$(pgrep -f '[s]ysupgrade' | head -1); echo \"probe=pgrep busy=${p:-none}\"; "
+        "elif command -v ps >/dev/null 2>&1; then "
+        "p=$(ps w 2>/dev/null | grep '[s]ysupgrade' | grep -v grep | head -1); "
+        "echo \"probe=ps busy=${p:-none}\"; "
+        "else echo \"probe=none busy=unknown\"; fi",
+        check=False)
+    if "busy=" not in probe or "busy=unknown" in probe:
+        raise Abort(f"cannot tell whether sysupgrade is already running on {where} "
+                    f"({probe!r}); refusing to start a second writer")
+    if "busy=none" not in probe:
+        raise Abort(f"sysupgrade is already running ({probe.strip()})")
+    run_ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
+                  "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
+            check=True)
+    rc, out = run_ssh(
+        host,
+        "start-stop-daemon -S -b -x /tmp/run-sysupgrade.sh; rc=$?; "
+        "i=0; while [ $i -lt 10 ]; do "
+        "s=$(cat /tmp/xiaomi-sysupgrade.status 2>/dev/null); "
+        "[ -n \"$s\" ] && break; i=$((i+1)); sleep 1; done; "
+        "printf 'rc=%s status=%s\\n' \"$rc\" \"$s\"",
+        timeout=30, check=False)
+    log(f"[3] launch: {out.strip() or 'no output'}")
+    if "rc=0" not in out or "status=started" not in out:
+        raise Abort(
+            "sysupgrade start marker was not observed. Do not power-cycle; "
+            f"inspect {where} before retrying.")
+    log("[3] durable sysupgrade start marker observed")
+    if not manifest_path:
+        raise Abort("no resume manifest is available to record that sysupgrade "
+                    "was launched; the device has not been acknowledged and "
+                    "will time out without writing")
+    update_resume_phase(manifest_path, "flash-started")
+    log(f"[3] resume phase -> flash-started ({manifest_path})")
+    rc, ack = run_ssh(host, "touch /tmp/xiaomi-sysupgrade.ack && echo ack-sent",
+                      timeout=10, check=False)
+    if rc != 0 or "ack-sent" not in ack:
+        raise Abort("could not acknowledge sysupgrade start. Its outcome is "
+                    "uncertain; do not launch sysupgrade again. Use the "
+                    "verification-only continuation after the router settles: "
+                    f"{verification_command(manifest_path, verify_interface)}")
+
+
 def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           manifest_path=None, transport="wired", verify_interface=None,
           permanent_wifi_ssid=None, verify_fallback=None,
@@ -1344,8 +1431,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         raise Abort(f"board_name is {board!r}, expected {profile.openwrt_board}")
     if rtype.strip() != "tmpfs":
         raise Abort(f"rootfs_type is {rtype!r}, not tmpfs -- this is not the RAM "
-                    "system, and an in-place sysupgrade is exactly what bricks "
-                    "this board")
+                    "system this stage writes from")
     mtd = parse_mtd(mtdtext)
     if not mtd:
         raise Abort("/proc/mtd is empty on the RAM system: the kernel did not "
@@ -1412,64 +1498,10 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
         log(f"[3] first-boot config uploaded: {out.strip()}")
         opts = "-f /tmp/cfg.tar.gz "
 
-    # Detached, deliberately: a NAND write torn by a dropped session leaves a
-    # kernel UBI the stock bootloader cannot attach.
     # -f wins over -n in sysupgrade (it forces SAVE_CONFIG=1 and uses the given
     # archive), so the two are not combined.
-    import tempfile
-    script_body = build_sysupgrade_launcher(opts)
-    with tempfile.TemporaryDirectory() as tmp:
-        launcher = os.path.join(tmp, "run-sysupgrade.sh")
-        with open(launcher, "w", encoding="utf-8", newline="\n") as output:
-            output.write(script_body)
-        ram_scp(host, launcher, "/tmp/run-sysupgrade.sh")
-    # The probe has to tell "nothing is running" from "I cannot tell". A bare
-    # `pgrep ... | head -1` takes head's status, so a BusyBox without pgrep
-    # prints "not found" to stderr, leaves the output empty, and reads as idle.
-    _rc, probe = ram_ssh(
-        host,
-        "if command -v pgrep >/dev/null 2>&1; then "
-        "p=$(pgrep -f '[s]ysupgrade' | head -1); echo \"probe=pgrep busy=${p:-none}\"; "
-        "elif command -v ps >/dev/null 2>&1; then "
-        "p=$(ps w 2>/dev/null | grep '[s]ysupgrade' | grep -v grep | head -1); "
-        "echo \"probe=ps busy=${p:-none}\"; "
-        "else echo \"probe=none busy=unknown\"; fi",
-        check=False)
-    if "busy=" not in probe or "busy=unknown" in probe:
-        raise Abort("cannot tell whether sysupgrade is already running on the "
-                    f"RAM system ({probe!r}); refusing to start a second writer")
-    if "busy=none" not in probe:
-        raise Abort(f"sysupgrade is already running ({probe.strip()})")
-    ram_ssh(host, "chmod 700 /tmp/run-sysupgrade.sh; "
-                  "rm -f /tmp/xiaomi-sysupgrade.status /tmp/xiaomi-sysupgrade.ack",
-            check=True)
-    rc, out = ram_ssh(
-        host,
-        "start-stop-daemon -S -b -x /tmp/run-sysupgrade.sh; rc=$?; "
-        "i=0; while [ $i -lt 10 ]; do "
-        "s=$(cat /tmp/xiaomi-sysupgrade.status 2>/dev/null); "
-        "[ -n \"$s\" ] && break; i=$((i+1)); sleep 1; done; "
-        "printf 'rc=%s status=%s\\n' \"$rc\" \"$s\"",
-        timeout=30, check=False)
-    log(f"[3] launch: {out.strip() or 'no output'}")
-    if "rc=0" not in out or "status=started" not in out:
-        raise Abort(
-            "sysupgrade start marker was not observed. Do not power-cycle; "
-            "inspect the RAM system before retrying.")
-    log("[3] durable sysupgrade start marker observed")
-    if not manifest_path:
-        raise Abort("no resume manifest is available to record that sysupgrade "
-                    "was launched; the device has not been acknowledged and "
-                    "will time out without writing")
-    update_resume_phase(manifest_path, "flash-started")
-    log(f"[3] resume phase -> flash-started ({manifest_path})")
-    rc, ack = ram_ssh(host, "touch /tmp/xiaomi-sysupgrade.ack && echo ack-sent",
-                      timeout=10, check=False)
-    if rc != 0 or "ack-sent" not in ack:
-        raise Abort("could not acknowledge sysupgrade start. Its outcome is "
-                    "uncertain; do not launch sysupgrade again. Use the "
-                    "verification-only continuation after the router settles: "
-                    f"{verification_command(manifest_path, verify_interface)}")
+    launch_sysupgrade(host, opts, manifest_path, verify_interface,
+                      ram_ssh, ram_scp, where="the RAM system")
     log(t("[3] do not touch the power"))
     log(t("[3] it reformats both UBIs, writes kernel+rootfs, sets the boot flags "
           "and reboots"))
@@ -1990,6 +2022,8 @@ def main(argv=None):
     # Captured before the profile default fills it in, so flash_stage_host can
     # tell an address the operator typed from the fallback.
     explicit_openwrt_host = args.openwrt_host
+    # An interface typed on this run overrides a host an in-place update pinned.
+    explicit_verify_interface = args.verify_interface
     if args.resume_manifest:
         args.resume_manifest = os.path.abspath(args.resume_manifest)
     resume = load_resume_manifest(args.resume_manifest) if args.resume_manifest else None
@@ -2073,6 +2107,17 @@ def main(argv=None):
         phase = resume.get("phase")
         if phase not in ("pivot-complete", "flash-started", "flash-complete"):
             raise Abort(f"resume phase {phase!r} has not reached the RAM pivot")
+        pinned = resume.get("verify_host")
+        if pinned and not explicit_verify_interface:
+            # An in-place update kept the router's address: go back to that
+            # host, never rediscover a different router on the interface.
+            found = verify_permanent_system(
+                profile, host=pinned, host_iface=resume.get("verify_host_iface"),
+                router_mac=resume.get("router_mac"),
+                expected_revision=resume.get("expected_revision", ""))
+            require_new_boot(found, resume.get("boot_id"))
+            update_resume_phase(args.resume_manifest, "flash-complete")
+            return 0
         if args.verify_interface != resume.get("verify_interface"):
             resume = update_resume_fields(
                 args.resume_manifest, verify_interface=args.verify_interface)
@@ -2088,10 +2133,12 @@ def main(argv=None):
                 "will not start a write")
         fallback = (profile.openwrt_host
                     if verify_transport == "wired" else None)
-        verify_permanent_system(
+        found = verify_permanent_system(
             profile, interface=args.verify_interface, fallback=fallback,
             host=args.openwrt_host if not args.verify_interface else None,
-            router_mac=resume.get("router_mac"))
+            router_mac=resume.get("router_mac"),
+            expected_revision=resume.get("expected_revision", ""))
+        require_new_boot(found, resume.get("boot_id"))
         update_resume_phase(args.resume_manifest, "flash-complete")
         return 0
 
