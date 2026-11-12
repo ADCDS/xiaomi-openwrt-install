@@ -1,26 +1,40 @@
 #!/usr/bin/env python3
 """Update an installed OpenWrt to another release of the port, without UART.
 
-An in-place `sysupgrade` is what bricks this board: the kernel lives in its own
-UBI, and only the RAM installer may reformat it. So an update takes the route
-revert.py and install.py already take on real hardware, and reuses their code:
+Between v2 releases the update is a plain in-place `sysupgrade` from the
+installed system, settings kept, as on any other OpenWrt device:
 
     1. pre-flight  prove this is the board on its permanent system, that the
                    target release can drive this unit's NAND, and that the
-                   image fits. Nothing is written.
+                   image fits in memory. Nothing is written.
     2. backup      `sysupgrade -b`, copied off the box and checked.
+    3. flash       upload and verify the image, check it with `sysupgrade -T`,
+                   start sysupgrade detached, and verify the permanent system
+                   on the new release.
+
+v2.0.0 to v2.1.2 refuse an in-place sysupgrade (a mistake, since corrected).
+When that refusal is the only objection `sysupgrade -T` raises, the update
+passes -F, once. Anything else it objects to stops the update.
+
+From v1.x, going back to v1.x, or with --via-ram-installer, the update goes
+through the RAM installer instead, the route revert.py and install.py take on
+real hardware, and reuses their code:
+
+    1. pre-flight  as above, and the RAM installer fits in ubi_kernel.
+    2. backup      as above.
     3. pivot       revert.pivot_to_ram: write the RAM installer over `ubi_kernel`,
                    read it back, reboot. Then wait until tmpfs is what answers.
     4. flash       install.flash: re-checks board, tmpfs and NAND, verifies the
                    upload, proves the detached sysupgrade started, records a
                    resume manifest, and verifies the permanent system.
 
-The manual form is docs/no-uart-reflash.md in the firmware repository,
+The manual forms are docs/no-uart-reflash.md in the firmware repository,
 https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2.
 
-Unlike installing from stock there is no A/B fallback. `ubi_kernel` *is* the
-installed kernel, so from step 3 on the way out is forward: run this again, and
-it continues from the RAM system. The recovery net for a torn write is UART.
+Neither route has an A/B fallback: there is one installed kernel. On the RAM
+route `ubi_kernel` is overwritten at step 3, so from there the way out is
+forward: run this again, and it continues from the RAM system. A torn write on
+either route needs the stock TFTP recovery or UART.
 
 It logs in by password, like the rest of this tool. A router configured for
 SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
@@ -57,6 +71,15 @@ MEMORY_MARGIN_KB = 8 * 1024
 
 # How long the box gets to come up in the RAM installer after the pivot.
 RAM_DEADLINE_S = 420
+
+# An in-place update runs sysupgrade's second stage on the same memory the
+# uploaded image sits in, so it keeps more headroom than the RAM upload does.
+IN_PLACE_MARGIN_KB = 12 * 1024
+
+# What v2.0.0 to v2.1.2 print when they refuse an in-place sysupgrade, and the
+# lines sysupgrade -T may print around it. Anything else is a real objection.
+IN_PLACE_REFUSAL = "Boot the initramfs image and run sysupgrade from there."
+_T_HARMLESS = ("Image check failed.", "verifying sysupgrade tar file integrity")
 
 ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
@@ -110,6 +133,54 @@ def turns_off_password_login(path):
                for line in text.splitlines())
 
 
+def installed_release(host):
+    """The release tag the installed system was built as, or '' if it has none.
+
+    Only a stamp that is plainly absent means ''. A read that fails is an
+    error, not a reason to pick the RAM route without saying so.
+    """
+    rc, out = install.ssh(
+        host, "if [ -e /etc/rd03v2-release ]; then cat /etc/rd03v2-release; "
+              "else echo RD03V2_NO_STAMP; fi", check=False)
+    if rc != 0:
+        raise Abort(f"cannot read /etc/rd03v2-release on {host}: {out!r}; "
+                    "nothing was written")
+    if out.strip() == "RD03V2_NO_STAMP":
+        return ""
+    for line in out.splitlines():
+        if line.startswith("RD03V2_TAG="):
+            return line.split("=", 1)[1].strip().strip("'\"")
+    return ""
+
+
+def is_v2_release(tag):
+    """A published v2.x tag; DEV builds and v1.x are not."""
+    parts = (tag or "").split(".")
+    return len(parts) >= 2 and parts[0] == "v2" and parts[1].isdigit()
+
+
+def carries_the_refusal(tag):
+    """v2.0.0 to v2.1.2 are the releases that refuse an in-place sysupgrade."""
+    try:
+        version = tuple(int(part) for part in tag.lstrip("v").split("."))
+    except ValueError:
+        return False
+    return (2, 0, 0) <= version <= (2, 1, 2)
+
+
+def only_the_in_place_refusal(output):
+    """Whether sysupgrade -T objected to nothing but running in place."""
+    lines = []
+    for line in output.splitlines():
+        line = line.strip()
+        if " upgrade: " in line:            # "Wed Nov 11 ... 2026 upgrade: ..."
+            line = line.split(" upgrade: ", 1)[1].strip()
+        if line:
+            lines.append(line)
+    return (IN_PLACE_REFUSAL in lines
+            and all(line in (IN_PLACE_REFUSAL,) + _T_HARMLESS for line in lines))
+
+
 def available_memory_kb(host):
     rc, out = install.ssh(host, "grep MemAvailable /proc/meminfo", check=False)
     values = [token for token in out.split() if token.isdigit()]
@@ -134,11 +205,14 @@ def require_idle_kernel_partition(host, mtd):
                     "attached; reboot the router before updating")
 
 
-def preflight(host, profile, rel, images, images_dir, router_iface=None):
+def preflight(host, profile, rel, images, images_dir, router_iface=None,
+              allow_in_place=True):
     """Everything that must hold before a byte is written.
 
-    Returns the rootfs type: 'overlay' for the installed system, or 'tmpfs' when
-    an earlier run already reached the RAM installer.
+    Returns (rootfs type, route, installed release). The rootfs type is 'overlay' for the installed
+    system, or 'tmpfs' when an earlier run already reached the RAM installer.
+    The route is 'in-place' for an installed v2 release going to a v2 release,
+    and 'ram' otherwise.
     """
     log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
     # Refuses this host's own gateway; see install.gateway_conflict.
@@ -158,7 +232,7 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     why = revert.require_nand_support(host, rel, profile, images_dir)
     log(f"[1] NAND gate: PASS -- {why}")
     if rootfs == "tmpfs":
-        return rootfs
+        return rootfs, "ram", ""
     if rootfs != "overlay":
         raise Abort(f"rootfs_type is {rootfs!r}: neither the installed system "
                     "nor the RAM installer, so nothing here applies")
@@ -170,20 +244,29 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None):
     mtd = install.parse_mtd(mtd_text)
     require_idle_kernel_partition(host, mtd)
 
-    ubi = images["initramfs_ubi"]
-    size = os.path.getsize(ubi["path"])
-    if size > mtd["ubi_kernel"]["size"]:
-        raise Abort(f"{ubi['name']} is {size} B, ubi_kernel holds "
-                    f"{mtd['ubi_kernel']['size']} B")
+    installed = installed_release(host)
+    in_place = (allow_in_place and is_v2_release(installed)
+                and is_v2_release(rel.tag))
+    log(f"[1] installed release {installed or 'unknown'}, target {rel.tag}: "
+        + ("in-place sysupgrade" if in_place else "through the RAM installer"))
+    if in_place:
+        image = images["sysupgrade"]
+        needed = os.path.getsize(image["path"]) // 1024 + IN_PLACE_MARGIN_KB
+    else:
+        image = images["initramfs_ubi"]
+        size = os.path.getsize(image["path"])
+        if size > mtd["ubi_kernel"]["size"]:
+            raise Abort(f"{image['name']} is {size} B, ubi_kernel holds "
+                        f"{mtd['ubi_kernel']['size']} B")
+        needed = size // 1024 + MEMORY_MARGIN_KB
     available = available_memory_kb(host)
-    needed = size // 1024 + MEMORY_MARGIN_KB
-    log(f"[1] {available} KiB available, the upload needs {needed} KiB")
+    log(f"[1] {available} KiB available, {image['name']} needs {needed} KiB")
     if available < needed:
-        raise Abort(t("only {available} KiB of memory is available and the RAM "
-                      "image needs {needed} KiB. Free some first, for example by "
+        raise Abort(t("only {available} KiB of memory is available and {image} "
+                      "needs {needed} KiB. Free some first, for example by "
                       "stopping services you can spare, then run this again.",
-                      available=available, needed=needed))
-    return rootfs
+                      available=available, image=image["name"], needed=needed))
+    return rootfs, ("in-place" if in_place else "ram"), installed
 
 
 def permanent_ssid(host, args, verify_transport, rootfs, profile):
@@ -303,6 +386,117 @@ def retry_hint(config_tar):
              keep=_keep_flag(config_tar))
 
 
+def _remove_upload(host):
+    """Free the router's RAM after an update that was not launched.
+
+    Best effort: it runs while another error is on its way out, which must not
+    be replaced by a second one from a router that has stopped answering.
+    """
+    try:
+        install.ssh(host, "rm -f /tmp/fw.bin /tmp/cfg.tar.gz /tmp/run-sysupgrade.sh",
+                    timeout=30, check=False)
+    except Exception:                   # noqa: BLE001 -- the first error matters
+        pass
+
+
+def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
+                   installed):
+    """Update the installed system with sysupgrade from itself, and verify it."""
+    log(t("\n=== stage 3: flash (sysupgrade from the installed system) ==="))
+    image = images["sysupgrade"]
+    install.confirm(t("update {host} in place to {tag} with {image}?",
+                      host=host, tag=rel.tag, image=image["name"]), args.yes)
+
+    # Read while the router, often this host's way out, still answers.
+    expected_revision = release.revision(rel, args.images)
+    _rc, boot_id = install.ssh(host, "cat /proc/sys/kernel/random/boot_id",
+                               check=False)
+    boot_id = boot_id.strip()
+    if not boot_id:
+        raise Abort(f"cannot read {host}'s boot id; nothing was written")
+    # A kept configuration keeps the router's address, so verification goes
+    # back to this host. A clean one comes up on the profile's default address.
+    same_host = bool(args.config_backup or args.keep_settings)
+    verify_interface = None if same_host else args.verify_interface
+    # On a cable, the router may be this host's gateway (its own DHCP):
+    # pre-flight accepted that, and verification has to as well.
+    gateway_iface = args.discover if args.transport == "wired" else None
+    router_mac = install.neighbour_mac(host, gateway_iface) if gateway_iface else None
+
+    try:
+        install.scp_to(host, image["path"], "/tmp/fw.bin")
+        _rc, out = install.ssh(host, "sha256sum /tmp/fw.bin", timeout=300)
+        if image["sha256"] not in out:
+            raise Abort(f"uploaded image sha256 mismatch: {out!r}")
+        log(f"[3] uploaded and verified: {image['sha256'][:16]}...")
+
+        rc, out = install.ssh(host, "sysupgrade -T /tmp/fw.bin", timeout=300,
+                              check=False)
+        force = False
+        if rc != 0:
+            if not (only_the_in_place_refusal(out) and carries_the_refusal(installed)):
+                raise Abort(f"sysupgrade -T rejected {image['name']}; nothing was "
+                            f"written:\n{out}")
+            rc, forced = install.ssh(host, "sysupgrade -T -F /tmp/fw.bin",
+                                     timeout=300, check=False)
+            if rc != 0:
+                raise Abort(f"sysupgrade -T -F rejected {image['name']}; nothing "
+                            f"was written:\n{forced}")
+            force = True
+            log(f"[3] sysupgrade -T said: {out.strip()}")
+            log(t("[3] the running release refuses an in-place sysupgrade, as v2.0.0 "
+                  "to v2.1.2 do. That is its only objection to this image, so this "
+                  "update passes -F."))
+        else:
+            log("[3] sysupgrade -T accepted the image")
+
+        if args.config_backup:
+            install.scp_to(host, args.config_backup, "/tmp/cfg.tar.gz")
+            rc, out = install.ssh(host, "gzip -t /tmp/cfg.tar.gz && tar tzf "
+                                  "/tmp/cfg.tar.gz", timeout=60, check=False)
+            if rc != 0:
+                raise Abort(f"the config tarball did not survive the upload: {out}")
+            opts = "-f /tmp/cfg.tar.gz "
+        elif args.keep_settings:
+            # sysupgrade keeps the configuration by default. The launcher reads an
+            # empty option list as -n, so name a harmless option instead.
+            opts = "-v "
+        else:
+            opts = "-n "
+        if force:
+            opts = "-F " + opts
+        install.update_resume_fields(
+            manifest, verify_host=host if same_host else None,
+            verify_host_iface=gateway_iface, router_mac=router_mac,
+            expected_revision=expected_revision, boot_id=boot_id)
+    except BaseException:
+        # Anything before the launch, a timeout or Ctrl-C included: nothing was
+        # written, so take the 16 MB back from a router that is short of RAM.
+        _remove_upload(host)
+        raise
+
+    install.launch_sysupgrade(host, opts, manifest, verify_interface,
+                              install.ssh, install.scp_to, where=host)
+    log(t("[3] do not touch the power"))
+    log(t("[3] sysupgrade writes the new release in place and reboots"))
+    time.sleep(60)
+    try:
+        found = install.verify_permanent_system(
+            profile, interface=verify_interface,
+            fallback=(profile.openwrt_host
+                      if not same_host and verify_transport == "wired" else None),
+            host=host if same_host else None,
+            router_mac=router_mac, host_iface=gateway_iface if same_host else None,
+            expected_revision=expected_revision)
+        install.require_new_boot(found, boot_id)
+    except Abort:
+        log(t("[!] sysupgrade was launched; do not run the flash stage again"))
+        log(t("[!] verification-only continuation:"))
+        log("    " + install.verification_command(manifest, verify_interface))
+        raise
+    install.update_resume_phase(manifest, "flash-complete")
+
+
 def run(args):
     os.umask(0o077)
     i18n.set_language(args.lang)
@@ -376,8 +570,9 @@ def run(args):
         args.discover, deadline_s=120, fallback=fallback,
         router_gateway_ok=gateway_ok)
 
-    rootfs = preflight(host, profile, rel, images, args.images,
-                       router_iface=args.discover if gateway_ok else None)
+    rootfs, route, installed = preflight(host, profile, rel, images, args.images,
+                              router_iface=args.discover if gateway_ok else None,
+                              allow_in_place=not args.via_ram_installer)
     verify_transport = install.detect_transport(args.verify_interface)
     args.wifi_ssid = permanent_ssid(host, args, verify_transport, rootfs,
                                     profile)
@@ -413,6 +608,13 @@ def run(args):
     manifest = os.path.join(outdir, "resume.json")
     install.write_resume_manifest(manifest, args, profile, rel, images,
                                   secrets.token_hex(16), config_tar)
+
+    if route == "in-place":
+        flash_in_place(host, rel, images, args, profile, manifest,
+                       verify_transport, installed)
+        log(t("[+] update complete: your settings were restored." if config_tar
+              else "[+] update complete: the new release is running with default settings."))
+        return 0
 
     if rootfs != "tmpfs":
         log(t("\n=== stage 2: pivot into the RAM installer ==="))
@@ -506,6 +708,9 @@ def parse_args(argv=None):
                     help="use the verified image cache; needs an explicit tag")
     ap.add_argument("--flavour", choices=("default", "nss"), default="default",
                     help="image flavour for v1.x releases (v2 ships one image)")
+    ap.add_argument("--via-ram-installer", action="store_true",
+                    help="update through the RAM installer, which reformats both "
+                         "UBI partitions (always used from v1.x)")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),

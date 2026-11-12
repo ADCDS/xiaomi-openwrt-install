@@ -27,8 +27,9 @@ assim fica mais fácil anexá-lo a um relato de erro.
 | Linux, firmwares de fábrica 2.0.28 e 2.0.12 | Cenário principal, verificado em roteador real |
 | Windows 10, Wi-Fi, firmware de fábrica 2.0.28, release v1.14 `standard` | Verificado em roteador real em 11 de outubro de 2026 ([alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)), em uma versão anterior do código |
 | Windows 11 25H2 em máquina virtual, cabo, firmware de fábrica 2.0.28, release v2.1.2, com senha de root | Verificado em roteador real em 7 de novembro de 2026 nesta versão do código, incluindo a retomada de uma execução interrompida |
-| `updater.py` no Linux, restaurando uma configuração salva | Executado uma vez em 7 de novembro de 2026. Todas as etapas de gravação funcionaram; o login final por senha não completou, porque a configuração restaurada o desativa |
-| `updater.py` a partir do Windows, ou contra um roteador que mantém login por senha | Testes automatizados; **ainda não verificado em roteador real** |
+| `updater.py` no Linux, no lugar, por Wi-Fi, mantendo as configurações: v2.1.3 para v2.1.2 e depois v2.1.2 para v2.1.3 (em que passa `-F` sozinho) | Executado em 12 de novembro de 2026, com este código, com `--host`. As duas atualizações inicializaram e foram verificadas na revisão do novo release. Ainda não executado em hardware: no lugar por cabo, com `--no-keep-settings` ou `--config-backup`, ou encontrando o roteador sem `--host` |
+| `updater.py` no Linux pelo instalador em RAM, restaurando uma configuração salva | Executado uma vez em 7 de novembro de 2026. Todas as etapas de gravação funcionaram; o login final por senha não completou, porque a configuração restaurada o desativa |
+| `updater.py` a partir do Windows, ou pelo instalador em RAM contra um roteador que mantém login por senha | Testes automatizados; **ainda não verificado em roteador real** |
 | Windows, Wi-Fi nesta versão do código | Testes automatizados; **ainda não verificado em roteador real** |
 | Windows, retorno ao firmware de fábrica (`revert.py`) | Testes automatizados; **ainda não verificado em roteador real** |
 
@@ -319,16 +320,24 @@ python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 Atualiza um OpenWrt instalado para o último release do port, mantendo as
 configurações, como o `sysupgrade`. `--release TAG` escolhe um release específico,
 `--no-keep-settings` faz uma instalação limpa, e `--dry-run` apenas baixa e
-verifica as imagens. Um `sysupgrade` comum transforma esta placa em tijolo, por
-isso a atualização passa pelo instalador em RAM. Antes da gravação, uma cópia de
-segurança das configurações é salva em uma pasta privada `update-*`.
+verifica as imagens. Entre releases v2 é um `sysupgrade` comum, no lugar, a partir do
+sistema instalado, como em qualquer outro aparelho com OpenWrt. As v2.0.0 a v2.1.2
+recusam isso (por engano); quando essa recusa é a única objeção do `sysupgrade -T`, o
+atualizador passa `-F`, e qualquer outra objeção interrompe a atualização. A partir da
+v1.x, na volta para a v1.x ou com `--via-ram-installer`, a atualização passa pelo
+instalador em RAM, como no [procedimento manual do firmware](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md).
+Antes da gravação, uma cópia de segurança das configurações é salva em uma pasta
+privada `update-*`.
 
-Aqui não há reserva A/B: o seguro para o caso de falha é o UART. Se a execução for
-interrompida, conecte-se ao instalador em RAM e repita o comando com
-`--config-backup` e a cópia salva. O login é feito por senha, então um roteador com
-acesso somente por chaves (`PasswordAuth off`) será recusado antes do início da
-gravação. No Windows funciona como no Linux, mas nunca houve uma atualização a partir
-do Windows contra um roteador real; o que ainda não foi verificado está na tabela acima.
+Aqui não há reserva A/B: existe um único kernel instalado, e a atualização o
+substitui. O seguro para uma gravação interrompida é o UART ou a recuperação TFTP de
+fábrica. No caminho pelo instalador em RAM, o kernel instalado é sobrescrito na
+entrada da RAM: se essa execução for interrompida depois disso, conecte-se ao
+instalador em RAM e repita o comando com `--config-backup` e a cópia salva. O login é
+feito por senha, então um roteador com acesso somente por chaves (`PasswordAuth off`)
+será recusado antes do início da gravação. No Windows funciona como no Linux, mas
+nunca houve uma atualização a partir do Windows contra um roteador real; o que ainda
+não foi verificado está na tabela acima.
 
 Opções úteis: `--verify-interface INTERFACE` escolhe a interface da verificação final e só é
 obrigatório com `--no-keep-settings` quando essa verificação for por Wi-Fi (uma
@@ -336,15 +345,19 @@ atualização por cabo usa a interface voltada ao roteador); `--wifi-ssid
 NOME` indica a rede para reconectar quando a execução continua a partir do instalador
 em RAM; `--offline` usa apenas o cache verificado; `--yes` responde às confirmações
 antecipadamente; `--device`, `--images` e `--outdir` escolhem o perfil, o cache de
-imagens e a pasta de saída; `--recover-stale-lock` limpa um estado de transição
+imagens e a pasta de saída; `--via-ram-installer` usa o instalador em RAM também
+entre releases v2, o que reformata as duas partições UBI; `--recover-stale-lock` limpa um estado de transição
 interrompido depois que você o inspecionar.
 
-Em roteador real, a atualização foi executada **uma única vez** (a partir do Linux,
-por cabo, v2.1.2, em 7 de novembro de 2026). Todas as etapas de gravação funcionaram;
-o login final por senha não completou, porque a configuração restaurada o desativa — a
-ferramenta avisa disso antes, e o resultado foi verificado com uma chave SSH. Uma
-atualização de um roteador que mantém login por senha ainda não foi feita. Mantenha um
-adaptador UART à mão e relate o resultado.
+Em roteador real, a atualização rodou **duas vezes no lugar**, a partir do Linux por
+Wi-Fi em 12 de novembro de 2026: v2.1.3 para v2.1.2 e depois v2.1.2 para v2.1.3, em
+que passou `-F` sozinha. As duas mantiveram as configurações e foram verificadas na
+revisão do novo release. **Pelo instalador em RAM, uma vez** (a partir do Linux, por
+cabo, v2.1.2, em 7 de novembro de 2026): todas as etapas de gravação funcionaram; o
+login final por senha não completou, porque a configuração restaurada o desativa — a
+ferramenta avisa disso antes, e o resultado foi verificado com uma chave SSH. Nenhuma
+atualização a partir do Windows foi feita. Mantenha um adaptador UART à mão e relate
+o resultado.
 
 ## Assistente web
 

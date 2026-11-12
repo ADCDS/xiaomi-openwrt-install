@@ -96,8 +96,9 @@ exploit's download needs those to work.
 |---|---|
 | Wi-Fi, stock 2.0.28 to v1.14 standard, on Windows 10 | Installed on 2026-10-11 (alexsys87), on older code |
 | Cable, stock 2.0.28 to v2.1.2 with a root password, on Windows 11 25H2 in a VM | Installed on 2026-11-07, on this code, including continuing an interrupted run |
-| `updater.py` on Linux, restoring a saved config | Ran once on 2026-11-07. Every write stage worked; the final password login could not complete, because the restored config disables it |
-| `updater.py` from Windows, or against a router that keeps password login | Automated tests only, not yet run against a real router |
+| `updater.py` on Linux, in place, over Wi-Fi, keeping settings: v2.1.3 to v2.1.2, then v2.1.2 to v2.1.3 (which passes `-F` by itself) | Ran on 2026-11-12, on this code, with `--host` given. Both updates booted and were verified on the new release's revision. Not yet run on hardware: in place over a cable, with `--no-keep-settings` or `--config-backup`, or finding the router without `--host` |
+| `updater.py` on Linux through the RAM installer, restoring a saved config | Ran once on 2026-11-07. Every write stage worked; the final password login could not complete, because the restored config disables it |
+| `updater.py` from Windows, or through the RAM installer against a router that keeps password login | Automated tests only, not yet run against a real router |
 | Wi-Fi with this code, and `revert.py` | Automated tests only, not yet run against a real router |
 
 Keep a Linux machine or a UART adapter within reach, and please report how it went.
@@ -215,9 +216,12 @@ python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 This updates an installed OpenWrt to the latest release of the port, keeping its
 settings like `sysupgrade` does. Use `--release TAG` for a specific one,
 `--no-keep-settings` for a clean install, and `--dry-run` to only download and
-verify the images. An in-place `sysupgrade` bricks this board, so the update goes
-through the RAM installer, as
-[the firmware's manual procedure](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)
+verify the images. Between v2 releases it is a plain in-place `sysupgrade` from the
+installed system, as on any other OpenWrt device. v2.0.0 to v2.1.2 refuse that (by
+mistake); when that refusal is the only objection `sysupgrade -T` raises, the
+updater passes `-F`, and anything else it objects to stops the update. From v1.x,
+going back to v1.x, or with `--via-ram-installer`, it goes through the RAM installer
+instead, as [the firmware's manual procedure](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)
 does. It saves a config backup in a private `update-*` folder before writing.
 
 Useful flags: `--verify-interface IFACE` chooses the interface for the final
@@ -227,22 +231,26 @@ over Wi-Fi — a wired update defaults it to the router-facing interface;
 in the RAM installer, whose own wireless config is the installer's; `--offline`
 uses only the verified cache; `--yes` answers the confirmations up front;
 `--device`, `--images` and `--outdir` pick a profile, an image cache and an output
-directory; `--recover-stale-lock` clears an interrupted pivot state once you have
+directory; `--via-ram-installer` takes the RAM installer route between v2 releases
+too, which reformats both UBI partitions; `--recover-stale-lock` clears an interrupted pivot state once you have
 inspected it.
 
-There is no A/B fallback here: the installed kernel is overwritten on the way into
-RAM, and the recovery net for a torn write is UART. If the run is interrupted after
-that point, reach the RAM installer and run the command again with
-`--config-backup` and the backup it saved. It logs in by password, so a router set
-to SSH keys only (`PasswordAuth off`) is refused before anything is written.
+There is no A/B fallback here: there is one installed kernel, and the update
+replaces it. The recovery net for a torn write is UART or the stock TFTP recovery.
+On the RAM installer route the installed kernel is overwritten on the way into RAM:
+if that run is interrupted after that point, reach the RAM installer and run the
+command again with `--config-backup` and the backup it saved. It logs in by
+password, so a router set to SSH keys only (`PasswordAuth off`) is refused before
+anything is written.
 
-So far this has run on a real router **once**: from Linux over a cable, v2.1.2 with
-`--config-backup`, on 2026-11-07. Every write stage worked; the final password
-login could not complete, because the restored config turns password login off.
-The tool warns about this in advance, and the result was verified with an SSH key
-instead. A plain update of a router that keeps password login, and any update from
-Windows, have not been run at all. Keep a UART adapter within reach, and please
-report how it went.
+On a real router it has run **in place twice**, from Linux over Wi-Fi on
+2026-11-12: v2.1.3 to v2.1.2, then v2.1.2 to v2.1.3, where it passed `-F` by itself.
+Both kept the settings and were verified on the new release's revision. **Through
+the RAM installer once**: from Linux over a cable, v2.1.2 with `--config-backup`, on
+2026-11-07. Every write stage worked; the final password login could not complete,
+because the restored config turns password login off. The tool warns about this in
+advance, and the result was verified with an SSH key instead. No update has been run
+from Windows. Keep a UART adapter within reach, and please report how it went.
 
 ## Web wizard
 

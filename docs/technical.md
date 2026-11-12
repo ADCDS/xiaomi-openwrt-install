@@ -156,7 +156,7 @@ disabled, pass a wired `--verify-interface` and connect that link when asked.
 | `ubiparse.py` | offline UBI parser — turns a raw MTD dump into a volume table |
 | `probe.py` | fact-finding run used to establish the layout below; avoids raw firmware-partition writes but changes stock configuration and mesh state |
 | `attach.py` | re-attach to a stager still dialling in, after a driver crash — the trigger is one-shot, so this saves a factory reset |
-| `updater.py` | OpenWrt → newer OpenWrt over SSH, through the same RAM pivot, keeping or replacing the configuration |
+| `updater.py` | OpenWrt → newer OpenWrt over SSH, keeping or replacing the configuration: an in-place `sysupgrade` between v2 releases (with `-F` once when v2.0.0-v2.1.2 refuse it), the same RAM pivot from v1.x or with `--via-ram-installer` |
 | `hostnet.py` | host networking: adapters, routes, neighbours, and the Windows PowerShell equivalents |
 | `winssh.py` | password SSH and legacy SCP for Windows, including Dropbear without an SFTP subsystem |
 | `i18n.py` | message catalogues for `ru`, `zh-CN` and `pt-BR` (English is the key set and the fallback) and `--lang` selection |

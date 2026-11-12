@@ -17,8 +17,9 @@
 | Linux，原厂固件 2.0.28 和 2.0.12 | 主要场景，已在真实路由器上验证 |
 | Windows 10、Wi-Fi、原厂固件 2.0.28、发布版 v1.14 `standard` | 已于 2026 年 10 月 11 日在真实路由器上验证（[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)），基于较早版本的代码 |
 | 虚拟机中的 Windows 11 25H2、网线、原厂固件 2.0.28、发布版 v2.1.2、设置了 root 密码 | 已于 2026 年 11 月 7 日在此版本代码上于真实路由器验证，包括继续被中断的运行 |
-| `updater.py`，从 Linux 恢复已保存的配置 | 于 2026 年 11 月 7 日运行过一次。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录 |
-| 从 Windows 运行 `updater.py`，以及更新仍允许密码登录的路由器 | 自动化测试；**尚未在真实路由器上验证** |
+| `updater.py`，从 Linux 通过 Wi-Fi 就地更新并保留设置：v2.1.3 到 v2.1.2，再从 v2.1.2 到 v2.1.3（工具自行传入 `-F`） | 于 2026 年 11 月 12 日用当前代码运行，指定了 `--host`。两次更新均启动成功，并在新版本的修订号上通过验证。尚未在硬件上运行：通过网线就地更新、使用 `--no-keep-settings` 或 `--config-backup`，以及不指定 `--host` 自动寻找路由器 |
+| `updater.py`，从 Linux 通过 RAM 安装器恢复已保存的配置 | 于 2026 年 11 月 7 日运行过一次。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录 |
+| 从 Windows 运行 `updater.py`，以及通过 RAM 安装器更新仍允许密码登录的路由器 | 自动化测试；**尚未在真实路由器上验证** |
 | Windows、Wi-Fi，此版本代码 | 自动化测试；**尚未在真实路由器上验证** |
 | Windows，恢复原厂固件（`revert.py`） | 自动化测试；**尚未在真实路由器上验证** |
 
@@ -215,13 +216,13 @@ py -3 install.py --verify-only ".\install-DATE-TIME\resume.json" --verify-interf
 python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
 ```
 
-把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release TAG` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在这块板子上，常规的 `sysupgrade` 会导致变砖，因此更新通过 RAM 安装器进行。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
+把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release TAG` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在 v2 版本之间，这就是在已安装系统上就地执行的普通 `sysupgrade`，与其他 OpenWrt 设备一样。v2.0.0 至 v2.1.2 会（错误地）拒绝就地升级；如果这是 `sysupgrade -T` 唯一的异议，更新程序会传入 `-F`，其他任何异议都会中止更新。从 v1.x 更新、退回 v1.x，或使用 `--via-ram-installer` 时，更新改为通过 RAM 安装器进行，与[固件的手动步骤](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)相同。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
 
-这里没有 A/B 冗余：出现故障时的保障是 UART。如果运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上与 Linux 一样可用，但尚未从 Windows 对真实路由器执行过更新；哪些场景尚未验证见上表。
+这里没有 A/B 冗余：已安装的内核只有一份，更新会替换它。写入中断时的保障是 UART 或原厂 TFTP 恢复。走 RAM 安装器路线时，已安装的内核会在进入 RAM 时被覆盖：如果之后运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上与 Linux 一样可用，但尚未从 Windows 对真实路由器执行过更新；哪些场景尚未验证见上表。
 
-常用参数：`--verify-interface 接口` 选择最终检查所用的接口；只有在最终检查走 Wi-Fi 时，与 `--no-keep-settings` 一起使用才必须提供（有线更新会默认使用面向路由器的接口）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
+常用参数：`--verify-interface 接口` 选择最终检查所用的接口；只有在最终检查走 Wi-Fi 时，与 `--no-keep-settings` 一起使用才必须提供（有线更新会默认使用面向路由器的接口）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--via-ram-installer` 让 v2 版本之间的更新也走 RAM 安装器，这会重新格式化两个 UBI 分区；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
 
-到目前为止，更新在真实路由器上只运行过**一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录——工具会事先提示，结果改用 SSH 密钥验证。仍允许密码登录的路由器尚未执行过更新。请在手边备好 UART 适配器，并反馈结果。
+到目前为止，更新在真实路由器上**就地运行过两次**（2026 年 11 月 12 日，从 Linux 通过 Wi-Fi）：先从 v2.1.3 到 v2.1.2，再从 v2.1.2 到 v2.1.3，后者由工具自行传入 `-F`；两次都保留了设置，并在新版本的修订号上通过验证。**通过 RAM 安装器运行过一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）：所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录——工具会事先提示，结果改用 SSH 密钥验证。尚未从 Windows 执行过任何更新。请在手边备好 UART 适配器，并反馈结果。
 
 ## 网页向导
 

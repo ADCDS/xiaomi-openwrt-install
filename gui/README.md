@@ -69,12 +69,14 @@ reads the router's state, but writes nothing.
   stays intact in its own slot, and the bootloader returns to it if the RAM system
   does not come up. That `sysupgrade` is the point of no return.
 - **Update** and **return to stock** start from OpenWrt, where the A/B pair no
-  longer exists ([NOTICE](../NOTICE) §3). The way into the RAM installer overwrites
-  the installed kernel. Both verify that write by read-back before rebooting, and
-  the recovery net for a torn write is UART or TFTP. Leave the power alone.
+  longer exists ([NOTICE](../NOTICE) §3). Between v2 releases an update is an
+  in-place `sysupgrade` from the installed system; from v1.x it, like a return to
+  stock, goes through the RAM installer, and the way in overwrites the installed
+  kernel, a write verified by read-back before rebooting. Either way the recovery
+  net for a torn write is UART or TFTP. Leave the power alone.
 
-The update has run on a real router only once so far (see the README), and the
-wizard says so.
+The update has run on a real router only a few times so far (see the README), and
+the wizard says so.
 
 ## Adding text
 

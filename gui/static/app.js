@@ -317,7 +317,7 @@ async function launch(dry) {
       return;
     }
     Object.assign(STATE, {
-      runId: data.run_id, dry, stage: null, result: null, hint: false, message: null,
+      runId: data.run_id, dry, stage: null, route: null, result: null, hint: false, message: null,
     });
     $("#log").replaceChildren();
     $("#term-head").classList.add("running");
@@ -349,8 +349,10 @@ function renderRun() {
   if (STATE.dry) {
     tracker.replaceChildren(el("div", "trk-dry", t("run.dry_tracker")));
   } else {
-    const at = STAGES.indexOf(STATE.stage);
-    tracker.replaceChildren(...STAGES.map((stage, index) => {
+    // An in-place update never goes through the RAM installer.
+    const stages = STATE.route === "in-place" ? STAGES.filter((s) => s !== "pivot") : STAGES;
+    const at = stages.indexOf(STATE.stage);
+    tracker.replaceChildren(...stages.map((stage, index) => {
       const state = at < 0 ? "" : index < at ? "done" : index === at ? "active" : "";
       const node = el("div", `trk ${state}`.trim());
       node.append(el("span", "dot"), document.createTextNode(t(`stage.${stage}`)));
@@ -390,6 +392,9 @@ function stream(runId) {
       log.scrollTop = log.scrollHeight;
     } else if (ev.type === "stage") {
       STATE.stage = ev.stage;
+      renderRun();
+    } else if (ev.type === "route") {
+      STATE.route = ev.route;
       renderRun();
     } else if (ev.type === "wifi") {
       $("#wifi-ssid-out").textContent = ev.ssid;

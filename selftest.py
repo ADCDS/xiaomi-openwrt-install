@@ -1985,8 +1985,16 @@ class _UpdateBox:
 
     def __init__(self, password="", rootfs="overlay", board=None, board_rc=0,
                  mtd=MTD, attached="19", lingers=0, lands_in="tmpfs",
-                 memory=90000, ssid="Home", bad_copy=False):
+                 memory=90000, ssid="Home", bad_copy=False, installed=None,
+                 t_result="refuses", stamp_rc=0, reboots=True, bad_image=False,
+                 t_force_rc=0):
         self.password, self.rootfs = password, rootfs
+        # In-place route: the release stamp, what sysupgrade -T says, and
+        # whether the detached sysupgrade was started.
+        self.installed, self.t_result = installed, t_result
+        self.launched, self.forced_checks = False, 0
+        self.stamp_rc, self.reboots, self.bad_image = stamp_rc, reboots, bad_image
+        self.t_force_rc, self.boot, self.cleaned = t_force_rc, "boot-1", False
         self.board = devices.RD03V2.openwrt_board if board is None else board
         self.board_rc, self.mtd, self.attached = board_rc, mtd, attached
         self.lingers, self.lands_in, self.pivoted = lingers, lands_in, False
@@ -2030,19 +2038,60 @@ class _UpdateBox:
             return 0, "11"
         if "uci -q get wireless" in cmd:
             return (0, self.ssid) if self.ssid else (1, "")
+        if "rd03v2-release" in cmd:
+            if self.stamp_rc:
+                return self.stamp_rc, "Connection reset by peer"
+            return ((0, f"RD03V2_TAG='{self.installed}'\nRD03V2_BASE='x'\n")
+                    if self.installed else (0, "RD03V2_NO_STAMP"))
+        if "random/boot_id" in cmd:
+            return 0, self.boot
+        if cmd.startswith("rm -f /tmp/fw.bin"):
+            self.cleaned = True
+            return 0, ""
+        if cmd.startswith("sysupgrade -T -F"):
+            self.forced_checks += 1
+            if self.t_force_rc:
+                return self.t_force_rc, "Image metadata not present"
+            return 0, "Image check failed but --force given - will update anyway!"
+        if cmd.startswith("sysupgrade -T"):
+            stamp = "Wed Nov 11 21:18:50 BRT 2026 upgrade: "
+            return {
+                "refuses": (1, stamp + "Boot the initramfs image and run sysupgrade "
+                               "from there.\nImage check failed."),
+                "accepts": (0, "verifying sysupgrade tar file integrity"),
+                "objects": (1, stamp + "Boot the initramfs image and run sysupgrade "
+                               "from there.\n" + stamp + "Image metadata not "
+                               "present\ninvalid sysupgrade file\nImage check failed."),
+            }[self.t_result]
+        if "sha256sum /tmp/fw.bin" in cmd:
+            return 0, ("0" * 64 if self.bad_image else "x") + "  /tmp/fw.bin"
+        if "gzip -t /tmp/cfg.tar.gz" in cmd:
+            return 0, "etc/config/system"
+        if "busy=" in cmd:
+            return 0, "probe=pgrep busy=none"
+        if cmd.startswith("start-stop-daemon -S -b -x /tmp/run-sysupgrade.sh"):
+            self.launched = True
+            if self.reboots:
+                self.boot = "boot-2"
+            return 0, "rc=0 status=started"
+        if cmd.startswith("touch /tmp/xiaomi-sysupgrade.ack"):
+            return 0, "ack-sent"
         if "sha256sum" in cmd:
             return 0, "0" * 64 if self.bad_copy else release.sha256(self.backup)
         return 0, "up" if "echo up" in cmd else ""
 
 
 def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(True, "ok"),
-                backup=None, deadline=None, pivot_error=None, pivot_stage=None):
+                backup=None, deadline=None, pivot_error=None, pivot_stage=None,
+                tag="v2.1.1", verify_fails=False):
     """updater.main() against `box`; returns what it did and how it ended."""
     import contextlib
     import types
     import updater
     outcome = types.SimpleNamespace(flash=None, pivots=0, error=None, wifi=[],
-                                    rootfs_at_flash=None, output="", manifest=None)
+                                    rootfs_at_flash=None, output="", manifest=None,
+                                    uploads=[], launcher=None, verified=None,
+                                    final_phase=None, final_manifest=None)
     with tempfile.TemporaryDirectory() as tmp:
         images = {}
         for kind in ("initramfs_ubi", "initramfs_itb", "sysupgrade"):
@@ -2090,6 +2139,23 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
             with open(args[7]) as fh:
                 outcome.manifest = json.load(fh)
 
+        def fake_scp_to(host, local, remote, passwords=None):
+            outcome.uploads.append(remote)
+            if remote == "/tmp/run-sysupgrade.sh":
+                with open(local, encoding="utf-8") as fh:
+                    outcome.launcher = fh.read()
+
+        def fake_verify(profile, interface=None, fallback=None, host=None,
+                        deadline_s=600, router_mac=None, expected_revision="",
+                        host_iface=None):
+            outcome.verified = {"host": host, "interface": interface,
+                                "fallback": fallback, "revision": expected_revision,
+                                "host_iface": host_iface, "router_mac": router_mac}
+            if verify_fails:
+                raise install.Abort("permanent OpenWrt was not verified on "
+                                    f"{host or interface}: no answer")
+            return host or "fe80::1%eth0"
+
         def fake_get_images(rel, destdir, flavour, kinds, wifi=False):
             outcome.wifi.append(wifi)
             return images
@@ -2097,7 +2163,7 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         saved_passwords = install.SSH_PASSWORDS[:], restore.SSH_PASSWORDS[:]
         umask = os.umask(0o022)
         stdout = io.StringIO()
-        rel = types.SimpleNamespace(tag="v2.1.1", published="today",
+        rel = types.SimpleNamespace(tag=tag, published="today",
                                     assets=["x-wifi.ubi"], profile=devices.RD03V2)
         transports = transports or {}
         patches = [
@@ -2116,6 +2182,10 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
             mock.patch.object(install, "expected_volume", return_value=(b"x", "md5")),
             mock.patch.object(updater.revert, "pivot_to_ram", fake_pivot),
             mock.patch.object(install, "flash", fake_flash),
+            mock.patch.object(install, "scp_to", fake_scp_to),
+            mock.patch.object(install, "verify_permanent_system", fake_verify),
+            mock.patch.object(release, "revision", return_value="r0+new"),
+            mock.patch.object(install, "neighbour_mac", return_value="aa:bb:cc:dd:ee:ff"),
             mock.patch.object(updater, "scp_from", fake_scp_from),
             mock.patch.object(updater.time, "sleep"),
         ]
@@ -2132,6 +2202,11 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         except (install.Abort, restore.RestoreError) as exc:
             outcome.error = str(exc)
         finally:
+            resume = os.path.join(tmp, "out", "resume.json")
+            if os.path.exists(resume):
+                with open(resume, encoding="utf-8") as fh:
+                    outcome.final_manifest = json.load(fh)
+                outcome.final_phase = outcome.final_manifest.get("phase")
             for patch in reversed(patches):
                 patch.stop()
             chain.set_log_sink(None)
@@ -2140,6 +2215,244 @@ def _run_update(box, argv, *, transports=None, route="eth0", routes=(), nand=(Tr
         outcome.output = stdout.getvalue()
         outcome.good_backup = good
     return outcome
+
+
+def _sysupgrade_command(launcher):
+    """The sysupgrade line the launcher would exec, or None."""
+    for line in (launcher or "").splitlines():
+        if line.startswith("exec /sbin/sysupgrade"):
+            return line
+    return None
+
+
+def test_updater_in_place():
+    import contextlib
+    print("\n[updater: v2 to v2 is an in-place sysupgrade]")
+    wired = ["--interface", "eth0"]
+
+    box = _UpdateBox(installed="v2.1.2", t_result="refuses")
+    r = _run_update(box, wired)
+    line = _sysupgrade_command(r.launcher) or ""
+    check("an installed v2 release updates in place, not through the RAM installer",
+          r.error is None and r.pivots == 0 and r.flash is None and box.launched,
+          r.error or "")
+    check("v2.1.2's refusal, and nothing else, gets -F once",
+          box.forced_checks == 1 and " -F " in line, line)
+    check("settings are kept: no -n, and no stale archive pushed with -f",
+          " -n " not in line and "-f " not in line and "/tmp/cfg.tar.gz" not in r.uploads,
+          line)
+    check("a kept configuration is verified on the same host, on the new revision",
+          r.verified == {"host": "fe80::1%eth0", "interface": None, "fallback": None,
+                         "revision": "r0+new", "host_iface": "eth0",
+                         "router_mac": "aa:bb:cc:dd:ee:ff"}, str(r.verified))
+    check("the manifest pins the host, the revision and the boot before launch",
+          all((r.final_manifest or {}).get(k) == v for k, v in (
+              ("verify_host", "fe80::1%eth0"), ("expected_revision", "r0+new"),
+              ("boot_id", "boot-1"), ("router_mac", "aa:bb:cc:dd:ee:ff"))),
+          str({k: (r.final_manifest or {}).get(k) for k in
+               ("verify_host", "expected_revision", "boot_id", "router_mac")}))
+    check("the run's manifest ends at flash-complete",
+          r.final_phase == "flash-complete", str(r.final_phase))
+
+    box = _UpdateBox(installed="v2.1.3", t_result="accepts")
+    r = _run_update(box, wired)
+    line = _sysupgrade_command(r.launcher) or ""
+    check("a release that allows it gets a plain sysupgrade, without -F",
+          r.error is None and box.launched and box.forced_checks == 0
+          and " -F " not in line, line)
+
+    box = _UpdateBox(installed="v2.1.2", t_result="objects")
+    r = _run_update(box, wired)
+    check("any other objection from sysupgrade -T stops before the launch",
+          not box.launched and box.forced_checks == 0
+          and "rejected" in (r.error or ""), r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2")
+    r = _run_update(box, wired + ["--no-keep-settings"])
+    line = _sysupgrade_command(r.launcher) or ""
+    check("a clean in-place update passes -n and verifies on the interface",
+          r.error is None and " -n " in line and (r.verified or {}).get("host") is None
+          and (r.verified or {}).get("interface") == "eth0"
+          and (r.verified or {}).get("fallback") == devices.RD03V2.openwrt_host,
+          f"{line} {r.verified}")
+
+    box = _UpdateBox(installed="v2.1.2")
+    r = _run_update(box, wired + ["--config-backup", "GOOD_BACKUP"])
+    line = _sysupgrade_command(r.launcher) or ""
+    check("--config-backup is restored with -f on the in-place route",
+          r.error is None and "-f /tmp/cfg.tar.gz" in line
+          and "/tmp/cfg.tar.gz" in r.uploads, line)
+
+    print("\n[updater: everything else still goes through the RAM installer]")
+    for installed, why in (("v1.14", "an installed v1.x"),
+                           (None, "a system without a release stamp"),
+                           ("DEV-test-b1", "a development build")):
+        box = _UpdateBox(installed=installed)
+        r = _run_update(box, wired)
+        check(f"{why} takes the RAM installer", r.pivots == 1 and not box.launched,
+              r.error or "")
+    box = _UpdateBox(installed="v2.1.3")
+    r = _run_update(box, wired, tag="v1.14")
+    check("going back to v1.x takes the RAM installer",
+          r.pivots == 1 and not box.launched, r.error or "")
+    box = _UpdateBox(installed="v2.1.3")
+    r = _run_update(box, wired + ["--via-ram-installer"])
+    check("--via-ram-installer forces the RAM installer",
+          r.pivots == 1 and not box.launched, r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2", memory=1000)
+    r = _run_update(box, wired)
+    check("too little memory for an in-place update is refused before any write",
+          _wrote_nothing(box, r) and not box.launched and "memory" in (r.error or ""),
+          r.error or "")
+
+    print("\n[updater: in-place failure paths]")
+    box = _UpdateBox(installed="v2.1.2", stamp_rc=255)
+    r = _run_update(box, wired)
+    check("an unreadable release stamp stops pre-flight instead of picking a route",
+          _wrote_nothing(box, r) and r.pivots == 0 and "rd03v2-release" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2", bad_image=True)
+    r = _run_update(box, wired)
+    check("a damaged upload stops before the launch and is removed",
+          not box.launched and box.cleaned and "sha256" in (r.error or ""), r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2", t_force_rc=1)
+    r = _run_update(box, wired)
+    check("a -T -F rejection stops before the launch and is removed",
+          not box.launched and box.cleaned and "-T -F rejected" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2", t_result="objects")
+    r = _run_update(box, wired)
+    check("a real -T objection leaves nothing in the router's RAM", box.cleaned)
+
+    box = _UpdateBox(installed="v2.1.2")
+    real_answer = box.answer
+    def slow_answer(cmd):
+        if cmd.startswith("sysupgrade -T"):
+            raise subprocess.TimeoutExpired(cmd, 300)
+        return real_answer(cmd)
+    box.answer = slow_answer
+    try:
+        r = _run_update(box, wired)
+        escaped = None
+    except subprocess.TimeoutExpired as exc:
+        escaped = exc
+    check("a timeout before the launch still frees the router's RAM",
+          box.cleaned and not box.launched and escaped is not None, repr(escaped))
+
+    box = _UpdateBox(installed="v2.1.3", t_result="refuses")
+    r = _run_update(box, wired)
+    check("only v2.0.0 to v2.1.2 may be forced: a newer release's refusal stops",
+          not box.launched and box.forced_checks == 0 and "rejected" in (r.error or ""),
+          r.error or "")
+
+    box = _UpdateBox(installed="v2.1.2")
+    r = _run_update(box, wired, verify_fails=True)
+    check("a failed check after launch says how to continue, and does not clean up",
+          box.launched and not box.cleaned and r.final_phase == "flash-started"
+          and "verification-only continuation" in r.output
+          and "--verify-interface" not in r.output.split("verification-only continuation")[-1],
+          r.output[-400:])
+
+    box = _UpdateBox(installed="v2.1.2", reboots=False)
+    r = _run_update(box, wired)
+    check("an update that never rebooted is not reported as done",
+          box.launched and "same boot id" in (r.error or "")
+          and r.final_phase == "flash-started", r.error or "")
+
+    print("\n[install --verify-only: an in-place run goes back to its host]")
+    box = _UpdateBox(installed="v2.1.2", password="pw")
+    r = _run_update(box, wired + ["--root-password", "pw"], verify_fails=True)
+    manifest = dict(r.final_manifest or {})
+    seen = {}
+    def record_verify(profile, interface=None, fallback=None, host=None,
+                      deadline_s=600, router_mac=None, expected_revision="",
+                      host_iface=None):
+        seen.update(host=host, interface=interface, revision=expected_revision,
+                    host_iface=host_iface, router_mac=router_mac)
+        return host
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "resume.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh)
+        os.chmod(path, 0o600)
+        saved = install.SSH_PASSWORDS[:]
+        try:
+            with mock.patch.object(install, "verify_permanent_system", record_verify), \
+                    mock.patch.object(install, "require_new_boot",
+                                      lambda h, b: seen.update(boot=b)), \
+                    mock.patch.object(install, "require_host_tools"), \
+                    mock.patch.object(install, "detect_transport", return_value="wired"), \
+                    mock.patch.object(install.chain, "local_interface", return_value="eth0"), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                install.main(["--verify-only", path, "--root-password", "pw"])
+            error = None
+        except (install.Abort, SystemExit) as exc:
+            error = str(exc)
+        finally:
+            install.SSH_PASSWORDS[:] = saved
+            chain.set_log_sink(None)
+    check("the pinned host, revision and boot are checked, not the interface",
+          error is None and seen.get("host") == "fe80::1%eth0"
+          and seen.get("interface") is None and seen.get("revision") == "r0+new"
+          and seen.get("boot") == "boot-1" and seen.get("host_iface") == "eth0",
+          f"{error} {seen}")
+
+    print("\n[verify_permanent_system: a pinned host on the router's cable]")
+    calls = []
+    def record_check(host, router_iface=None, router_mac=None):
+        calls.append(router_iface)
+    def answer(host, cmd, timeout=120, check=True, passwords=None):
+        if "board_name" in cmd:
+            return 0, devices.RD03V2.openwrt_board
+        if "rootfs_type" in cmd:
+            return 0, "overlay"
+        return 0, _UpdateBox.MTD
+    saved = install.SSH_PASSWORDS[:]
+    try:
+        with mock.patch.object(install, "check_is_openwrt_ram", record_check), \
+                mock.patch.object(install, "ssh", answer), \
+                mock.patch.object(install, "permanent_system_matches", return_value=True), \
+                mock.patch.object(install, "require_expected_revision"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            install.SSH_PASSWORDS[:] = [""]
+            install.verify_permanent_system(devices.RD03V2, host="192.168.1.1",
+                                            host_iface="eth0", deadline_s=5)
+            install.SSH_PASSWORDS[:] = ["", "secret"]
+            install.verify_permanent_system(devices.RD03V2, host="192.168.1.1",
+                                            host_iface="eth0", deadline_s=5)
+            install.verify_permanent_system(devices.RD03V2, host="192.168.1.1",
+                                            host_iface="eth0", deadline_s=5,
+                                            router_mac="aa:bb:cc:dd:ee:ff")
+    finally:
+        install.SSH_PASSWORDS[:] = saved
+    check("without a password the gateway on the router's cable is accepted",
+          calls[:1] == ["eth0"], str(calls))
+    check("with a password it needs the router's MAC",
+          calls[1:3] == [None, "eth0"], str(calls))
+
+    import updater as _updater
+    check("only v2.0.0 to v2.1.2 carry the refusal",
+          _updater.carries_the_refusal("v2.0.0") and _updater.carries_the_refusal("v2.1.2")
+          and not _updater.carries_the_refusal("v2.1.3")
+          and not _updater.carries_the_refusal("v1.14")
+          and not _updater.carries_the_refusal("DEV-x"))
+    refused = ("Wed Nov 11 21:18:50 BRT 2026 upgrade: Boot the initramfs image and "
+               "run sysupgrade from there.\nImage check failed.")
+    check("the refusal alone is recognised", _updater.only_the_in_place_refusal(refused))
+    check("an empty -T answer is not taken for the refusal",
+          not _updater.only_the_in_place_refusal(""))
+    check("a refusal next to a board mismatch is not",
+          not _updater.only_the_in_place_refusal(
+              refused + "\nDevice xiaomi,other not supported by this image"))
+    check("v2 tags are recognised and DEV builds are not",
+          _updater.is_v2_release("v2.1.2") and _updater.is_v2_release("v2.0.0")
+          and not _updater.is_v2_release("v1.14")
+          and not _updater.is_v2_release("DEV-inplace-b1")
+          and not _updater.is_v2_release(""))
 
 
 def test_install_failure_hint():
@@ -2454,6 +2767,14 @@ def test_gui_runner():
     run._interpret("[2] Wi-Fi-only: when the stock network disappears, join 'A' with key 'b'")
     check("the Wi-Fi join banner is recognised",
           any(e["type"] == "wifi" and e["ssid"] == "A" and e["key"] == "b" for e in run.events))
+    run = runner.Run("update", {})
+    run._interpret("[1] installed release v2.1.2, target v2.1.3: in-place sysupgrade")
+    check("an in-place update is announced to the page",
+          any(e["type"] == "route" and e.get("route") == "in-place" for e in run.events))
+    run = runner.Run("update", {})
+    run._interpret("[1] installed release v1.14, target v2.1.3: through the RAM installer")
+    check("the RAM route is not mistaken for in-place",
+          not any(e["type"] == "route" for e in run.events))
     run = runner.Run("install", {})
     run._interpret("[*] output -> /home/me/my runs/install-1/")
     check("an output path with spaces survives",
@@ -3137,6 +3458,7 @@ def main():
     test_expected_volume()
     test_install_failure_hint()
     test_updater()
+    test_updater_in_place()
     test_default_routes_fail_closed()
     test_update_verification()
     test_ubi9_reservation()
