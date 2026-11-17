@@ -17,6 +17,13 @@ class DtbError(ValueError):
 
 def parse(blob):
     """{node path: {property name: raw value}} for every node."""
+    try:
+        return _parse(blob)
+    except (struct.error, IndexError, UnicodeError) as exc:
+        raise DtbError(f"malformed device tree: {exc}")
+
+
+def _parse(blob):
     if len(blob) < 40:
         raise DtbError("too short for a device tree")
     (magic, total, off_struct, off_strings, _rsv, version, _last,
@@ -26,6 +33,8 @@ def parse(blob):
     if total > len(blob):
         raise DtbError("device tree is truncated")
     end = off_struct + size_struct if version >= 17 else total
+    if not (40 <= off_struct <= end <= total and off_strings + size_strings <= total):
+        raise DtbError("device tree blocks lie outside it")
     strings = blob[off_strings:off_strings + size_strings]
     nodes, stack, pos = {}, [], off_struct
     while pos + 4 <= end:

@@ -258,41 +258,84 @@ def require_installable_nand(geometry, rel, images, allow_8bit, facts):
             "run it with 8-bit too, but no unit like this has installed a "
             "release yet. If its bootloader cannot read what OpenWrt writes, "
             "the router will not boot, and only Xiaomi's TFTP recovery or a "
-            "UART adapter brings it back. To go ahead anyway, run the "
-            f"installer again with {ECC_OPT_IN}. Nothing has been written to "
-            f"the firmware slots. See {ISSUE7}")
+            f"UART adapter brings it back. To go ahead anyway, pass "
+            f"{ECC_OPT_IN}. Nothing has been written to the firmware slots. "
+            f"See {ISSUE7}")
     log(f"[1] NAND ECC: 8-bit unit, and {tag} follows the chip. Going ahead "
         f"because of {ECC_OPT_IN}: no unit like this has installed a release "
         "before.")
 
 
-def require_flashable_nand(geometry, rel, allow_8bit, manifest_path=None):
+def opt_in_continuation(manifest_path):
+    """How to continue a run that stopped in pre-flight for want of ECC_OPT_IN.
+
+    The trigger is one-shot and pre-flight runs over the root shell it gave,
+    so a new run would need a factory reset first; resuming this one with
+    --skip-exploit reuses that shell (the manifest records its callback).
+    """
+    return rerun_command("--resume-manifest", manifest_path, "--skip-exploit",
+                         ECC_OPT_IN)
+
+
+def remember_opt_in(resume, manifest_path, allow_8bit):
+    """Keep an opt-in given on a resumed run, so a later stage keeps it too."""
+    if resume and allow_8bit and not resume.get("allow_untested_8bit_nand"):
+        return update_resume_fields(manifest_path, allow_untested_8bit_nand=True)
+    return resume
+
+
+def require_flashable_nand(geometry, rel, images, allow_8bit, manifest_path=None):
     """Flash stage: the same rule, read from the RAM system, which is the
-    release's own kernel. A spare area of 80 bytes or more means an 8-bit
-    unit whatever strength this kernel picked; unreadable sysfs fails closed,
-    since sysupgrade comes next."""
+    release's own kernel, plus the device tree of the image sysupgrade is about
+    to write (a separately booted RAM system may come from another release).
+    A spare area of 80 bytes or more means an 8-bit unit whatever strength this
+    kernel picked. Missing values fail closed, since sysupgrade comes next."""
     tag = getattr(rel, "tag", "this release")
-    need8 = nand_needs_8bit(geometry)
-    if need8 is None:
-        raise Abort("could not read the NAND's ECC strength and spare area "
-                    "from the RAM system (/sys/class/mtd/mtd0) -- refusing "
-                    "before sysupgrade")
     strength, oob = geometry.get("ecc_strength"), geometry.get("oobsize")
+    if strength is None or oob is None:
+        raise Abort("could not read the NAND's ECC strength and spare area "
+                    f"from the RAM system (/sys/class/mtd/mtd0: {geometry}) -- "
+                    "refusing before sysupgrade")
     log(f"[3] NAND ECC: the RAM system runs {strength}-bit ECC "
         f"(page {geometry.get('writesize', '?')}+{oob} B)")
-    if not need8:
+    if not nand_needs_8bit(geometry):
         return
     if strength != 8:
         raise NandUnreadable(
             f"{_nand_8bit_unit(geometry)}, but the RAM system reads it with "
             f"{strength}-bit: {tag} cannot read this unit's flash, and "
             "sysupgrade would write a layout its bootloader cannot read. "
-            "Refusing before sysupgrade; this unit needs a release whose ECC "
+            "Refusing before sysupgrade. Write nothing from this RAM system. "
+            "If it was reached from stock, power-cycling it should return the "
+            "router to stock after about six boots (never observed on "
+            "hardware); then start a new run with a release whose ECC follows "
+            f"the chip (v2.1.4 or later). See {ISSUE7}")
+    try:
+        if "sysupgrade" not in images:
+            raise dtbread.DtbError("no sysupgrade image selected")
+        forced = dtbread.release_nand_ecc({"sysupgrade": images["sysupgrade"]})
+    except (dtbread.DtbError, OSError) as exc:
+        raise NandUnreadable(
+            f"{_nand_8bit_unit(geometry)}, and the device tree of the image "
+            f"sysupgrade would write cannot be read ({exc}). Refusing before "
+            f"sysupgrade. See {ISSUE7}")
+    if forced is not None and forced != 8:
+        raise NandUnreadable(
+            f"{_nand_8bit_unit(geometry)}, and the RAM system runs it with "
+            f"8-bit, but the image sysupgrade would write ({tag}) forces "
+            f"{forced}-bit ECC: its bootloader could not read the kernel it "
+            "installs. Refusing before sysupgrade; flash a release whose ECC "
             f"follows the chip (v2.1.4 or later). See {ISSUE7}")
     if not allow_8bit:
+        try:
+            resumable = (manifest_path and
+                         load_resume_manifest(manifest_path).get("phase")
+                         == "pivot-complete")
+        except Abort:
+            resumable = False
         how = (rerun_command("--stage", "flash", "--resume-manifest",
                              manifest_path, ECC_OPT_IN)
-               if manifest_path else f"run the flash stage again with {ECC_OPT_IN}")
+               if resumable else f"run the same command again with {ECC_OPT_IN}")
         raise NeedsOptIn(
             f"{_nand_8bit_unit(geometry)}, and the RAM system runs it with "
             "8-bit, as stock does. No unit like this has installed a release "
@@ -1658,7 +1701,7 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
 
     require_flashable_nand(
         nand_geometry(lambda cmd: ram_ssh(host, cmd, check=False)),
-        rel, allow_8bit_nand, manifest_path)
+        rel, images, allow_8bit_nand, manifest_path)
     raw_ft = openwrt_flash_type(lambda cmd: ram_ssh(host, cmd, check=False))
     # A manifest from before this was recorded, or from updater.py, which has
     # no stock pre-flight, has none to compare with.
@@ -2458,6 +2501,7 @@ def main(argv=None):
         args.resume_manifest or os.path.join(outdir, "resume.json"))
     global _ACTIVE_MANIFEST
     _ACTIVE_MANIFEST = manifest_path
+    resume = remember_opt_in(resume, manifest_path, args.allow_untested_8bit_nand)
     attacker = None
     if not args.dry_run and args.stage != "flash":
         attacker = callback_address(args.host, args.discover, args.attacker)
@@ -2551,8 +2595,14 @@ def main(argv=None):
         time.sleep(args.settle)
         ch.run("echo settled", quiet=True)
 
-    facts = preflight(ch, rel, images, args.yes, profile, args.images,
-                      allow_8bit_nand=args.allow_untested_8bit_nand)
+    try:
+        facts = preflight(ch, rel, images, args.yes, profile, args.images,
+                          allow_8bit_nand=args.allow_untested_8bit_nand)
+    except NeedsOptIn as exc:
+        raise NeedsOptIn(
+            f"{exc}\n    Continue this run, which reuses its root shell (a new "
+            "run would need a factory reset first):\n    "
+            + opt_in_continuation(manifest_path)) from exc
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
     # flash_type goes into the manifest so that the flash stage, perhaps in a

@@ -1515,7 +1515,8 @@ def test_installer_preflight():
         _f, err = _preflight(_ReplayShell(nand=eight), images=imgs_chip)
         check("an 8-bit unit needs the opt-in with a release that follows the chip",
               isinstance(err, install.NeedsOptIn) and install.ECC_OPT_IN in str(err)
-              and "TFTP" in str(err), str(err)[:90])
+              and "TFTP" in str(err) and "run the installer again" not in str(err),
+              str(err)[:90])
         facts, err = _preflight(_ReplayShell(nand=eight), images=imgs_chip,
                                 allow_8bit=True)
         check("with the opt-in, an 8-bit unit goes ahead on a chip-following release",
@@ -1525,8 +1526,9 @@ def test_installer_preflight():
               isinstance(err, install.NeedsOptIn), str(err)[:90])
         mixed = _ecc_images(os.path.join(d, "f4"), None, 4)
         _f, err = _preflight(_ReplayShell(nand=eight), images=mixed, allow_8bit=True)
-        check("an installed kernel forcing 4-bit is caught even if the RAM image follows the chip",
-              isinstance(err, install.NandUnreadable), str(err)[:90])
+        check("a release whose RAM image and installed kernel disagree is refused",
+              isinstance(err, install.NandUnreadable) and "disagree" in str(err),
+              str(err)[:90])
         garbled = dict(imgs_chip)
         garbled["initramfs_itb"] = {"name": "x.itb", "path": imgs_chip["initramfs_ubi"]["path"]}
         _f, err = _preflight(_ReplayShell(nand=eight), images=garbled, allow_8bit=True)
@@ -2739,7 +2741,7 @@ def test_boot_env_gate():
     check("a manifest without flash_type is not held against the run",
           msg == "gate reached", msg[:90])
 
-    def flash_nand(sysfs, allow=False):
+    def flash_nand(sysfs, allow=False, images=None, phase="pivot-complete"):
         def fake_ssh(_host, cmd, timeout=120, check=True, passwords=None):
             if "board_name" in cmd:
                 return 0, devices.RD03V2.openwrt_board
@@ -2754,14 +2756,15 @@ def test_boot_env_gate():
             return 0, ""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "resume.json")
-            install._write_resume_data(path, {"version": 1, "phase": "pivot-complete"})
+            install._write_resume_data(path, {"version": 1, "phase": phase})
             with mock.patch.object(install, "wait_for_openwrt", return_value=True), \
                     mock.patch.object(install, "ssh", side_effect=fake_ssh), \
                     mock.patch.object(install, "neighbour_mac", return_value=None), \
                     mock.patch.object(install, "require_permanent_nand_support",
                                       side_effect=install.Abort("gate reached")):
                 try:
-                    install.flash("h", _fake_release("v2.1.3"), {}, True, devices.RD03V2,
+                    install.flash("h", _fake_release("v2.1.3"), images or {}, True,
+                                  devices.RD03V2,
                                   "images", manifest_path=path, transport="wired",
                                   verify_interface="eth0", router_iface="eth0",
                                   allow_8bit_nand=allow)
@@ -2769,25 +2772,63 @@ def test_boot_env_gate():
                 except install.Abort as e:
                     return e
 
-    e = flash_nand("ecc_strength 4\noobsize 128\nwritesize 2048\n", allow=True)
-    check("flash stage: an 8-bit unit read with 4-bit is refused, opt-in or not",
-          isinstance(e, install.NandUnreadable) and "4-bit" in str(e)
-          and install.continuation_hint(error=e) is None, str(e)[:90])
-    e = flash_nand("ecc_strength 8\noobsize 128\nwritesize 2048\n")
-    check("flash stage: an 8-bit unit read with 8-bit still needs the opt-in",
-          isinstance(e, install.NeedsOptIn)
-          and "--stage flash --resume-manifest" in str(e)
-          and install.ECC_OPT_IN in str(e), str(e)[:90])
-    e = flash_nand("ecc_strength 8\noobsize 128\nwritesize 2048\n", allow=True)
-    check("flash stage: with the opt-in it goes on to the NAND gate",
-          str(e) == "gate reached", str(e)[:90])
+    ram8 = "ecc_strength 8\noobsize 128\nwritesize 2048\n"
+    with tempfile.TemporaryDirectory() as d:
+        chip = _ecc_images(d, None)
+        e = flash_nand("ecc_strength 4\noobsize 128\nwritesize 2048\n", allow=True,
+                       images=chip)
+        check("flash stage: an 8-bit unit read with 4-bit is refused, opt-in or not",
+              isinstance(e, install.NandUnreadable) and "4-bit" in str(e)
+              and "power-cycling" in str(e)
+              and install.continuation_hint(error=e) is None, str(e)[:90])
+        e = flash_nand(ram8, images=chip)
+        check("flash stage: an 8-bit unit read with 8-bit still needs the opt-in",
+              isinstance(e, install.NeedsOptIn)
+              and "--stage flash --resume-manifest" in str(e)
+              and install.ECC_OPT_IN in str(e), str(e)[:90])
+        e = flash_nand(ram8, images=chip, phase="prepared")
+        check("flash stage: a standalone flash is told to rerun, not to resume",
+              isinstance(e, install.NeedsOptIn) and "--resume-manifest" not in str(e)
+              and "run the same command again" in str(e), str(e)[:90])
+        e = flash_nand(ram8, allow=True, images=chip)
+        check("flash stage: with the opt-in it goes on to the NAND gate",
+              str(e) == "gate reached", str(e)[:90])
+        forcing = os.path.join(d, "f4")
+        os.mkdir(forcing)
+        e = flash_nand(ram8, allow=True, images=_ecc_images(forcing, None, 4))
+        check("flash stage: a sysupgrade image forcing 4-bit is refused on an 8-bit "
+              "unit even under an 8-bit RAM system",
+              isinstance(e, install.NandUnreadable) and "forces 4-bit" in str(e),
+              str(e)[:90])
+        e = flash_nand(ram8, allow=True, images={})
+        check("flash stage: no sysupgrade image to check fails closed on an 8-bit unit",
+              isinstance(e, install.NandUnreadable), str(e)[:90])
     e = flash_nand(NAND_4BIT)
-    check("flash stage: a 4-bit unit goes on without any opt-in",
+    check("flash stage: a 4-bit unit goes on without any opt-in or image check",
           str(e) == "gate reached", str(e)[:90])
     e = flash_nand("ecc_strength \noobsize \nwritesize \n")
     check("flash stage: unreadable NAND geometry fails closed before sysupgrade",
           isinstance(e, install.Abort) and "could not read the NAND" in str(e),
           str(e)[:90])
+    e = flash_nand("ecc_strength 4\noobsize \nwritesize 2048\n")
+    check("flash stage: a partial NAND reading fails closed too",
+          isinstance(e, install.Abort) and "could not read the NAND" in str(e),
+          str(e)[:90])
+
+    # A run that stops in pre-flight for want of the opt-in continues itself.
+    cont = install.opt_in_continuation("/x/resume.json")
+    check("pre-flight opt-in refusal: the continuation reuses the run's shell",
+          "--resume-manifest /x/resume.json" in cont and "--skip-exploit" in cont
+          and install.ECC_OPT_IN in cont, cont)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "resume.json")
+        install._write_resume_data(path, {"version": 1, "phase": "pivot-complete"})
+        kept = install.remember_opt_in(install.load_resume_manifest(path), path, True)
+        check("an opt-in given on a resumed run is kept for later stages",
+              kept["allow_untested_8bit_nand"] is True
+              and install.load_resume_manifest(path)["allow_untested_8bit_nand"] is True)
+        check("no opt-in, nothing written",
+              install.remember_opt_in({"phase": "x"}, path, False) == {"phase": "x"})
 
     def revert_ssh(_host, cmd, timeout=120, check=True, passwords=None):
         if "fw_printenv" in cmd:
@@ -2807,6 +2848,7 @@ def test_boot_env_gate():
 def test_dtbread():
     print("\n[dtbread: what a release's device tree says about NAND ECC]")
     import dtbread
+    import re
     check("a forced strength is read from the spi-nand node",
           dtbread.spi_nand_ecc(_nand_dtb(4)) == 4)
     check("no strength means the driver follows the chip",
@@ -2833,6 +2875,24 @@ def test_dtbread():
             check("images that disagree are refused", False)
         except dtbread.DtbError:
             check("images that disagree are refused", True)
+    import random
+    rng = random.Random(7)
+    seeds = [_nand_dtb(4), _nand_dtb(None), _fit(_nand_dtb(4))]
+    escaped = []
+    for i in range(3000):
+        blob = bytearray(rng.choice(seeds))
+        for _ in range(rng.randint(1, 4)):
+            blob[rng.randrange(len(blob))] = rng.randrange(256)
+        if rng.random() < 0.2:
+            del blob[rng.randrange(len(blob)):]
+        try:
+            dtbread.spi_nand_ecc(bytes(blob)) if i % 2 else dtbread.fit_dtbs(bytes(blob))
+        except dtbread.DtbError:
+            pass
+        except Exception as exc:                                  # noqa: BLE001
+            escaped.append(f"{type(exc).__name__}: {exc}")
+    check("3000 corrupted device trees raise DtbError or parse, nothing else",
+          not escaped, "; ".join(escaped[:3]))
     # The real release assets, when a checkout has them next to it.
     dirs = [x for x in os.environ.get("RD03V2_RELEASE_DIRS", "").split(os.pathsep) if x]
     if not dirs:
@@ -2843,8 +2903,10 @@ def test_dtbread():
                 "sysupgrade": {"path": os.path.join(d, prefix + "squashfs-sysupgrade.bin")}}
         with open(os.path.join(d, "version.buildinfo")) as fh:
             revision = fh.read().strip()
-        check(f"real release {os.path.basename(d)} ({revision}) reads",
-              dtbread.release_nand_ecc(imgs) in (4, None),
+        m = re.search(r"v(\d+)\.(\d+)\.(\d+)", os.path.basename(d))
+        want = 4 if m and tuple(map(int, m.groups())) <= (2, 1, 3) else None
+        check(f"real release {os.path.basename(d)} ({revision}) forces {want}",
+              m is not None and dtbread.release_nand_ecc(imgs) == want,
               str(dtbread.release_nand_ecc(imgs)))
         print(f"    {os.path.basename(d)}: forces {dtbread.release_nand_ecc(imgs)}")
 

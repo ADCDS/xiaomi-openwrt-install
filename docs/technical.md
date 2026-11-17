@@ -424,8 +424,16 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   - A release that leaves the strength to the driver follows the chip (v2.1.4
     on). No 8-bit unit has installed one yet, so it also takes
     `--allow-untested-8bit-nand`.
-  - The flash stage applies the same rule to the RAM system's own reading
-    before sysupgrade, and fails closed if it cannot read it.
+  - The flash stage applies the same rule to the RAM system's own reading,
+    and on an 8-bit unit also checks the device tree of the image sysupgrade is
+    about to write, since a separately booted RAM system may come from another
+    release. It fails closed if it cannot read either.
+  - A run refused in pre-flight for want of the opt-in prints the command that
+    continues it (`--resume-manifest … --skip-exploit
+    --allow-untested-8bit-nand`), which reuses its root shell. A new run would
+    need a factory reset first.
+  - Not covered yet: `updater.py` and `revert.py` given an explicit older tag
+    on an 8-bit unit that already runs a release which follows the chip.
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and
