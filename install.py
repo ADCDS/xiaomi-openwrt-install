@@ -266,15 +266,16 @@ def require_installable_nand(geometry, rel, images, allow_8bit, facts):
         "before.")
 
 
-def opt_in_continuation(manifest_path):
+def opt_in_continuation(manifest_path, stage="all"):
     """How to continue a run that stopped in pre-flight for want of ECC_OPT_IN.
 
     The trigger is one-shot and pre-flight runs over the root shell it gave,
     so a new run would need a factory reset first; resuming this one with
     --skip-exploit reuses that shell (the manifest records its callback).
     """
-    return rerun_command("--resume-manifest", manifest_path, "--skip-exploit",
-                         ECC_OPT_IN)
+    stage_args = ("--stage", stage) if stage and stage != "all" else ()
+    return rerun_command("--resume-manifest", manifest_path, *stage_args,
+                         "--skip-exploit", ECC_OPT_IN)
 
 
 def remember_opt_in(resume, manifest_path, allow_8bit):
@@ -2501,7 +2502,8 @@ def main(argv=None):
         args.resume_manifest or os.path.join(outdir, "resume.json"))
     global _ACTIVE_MANIFEST
     _ACTIVE_MANIFEST = manifest_path
-    resume = remember_opt_in(resume, manifest_path, args.allow_untested_8bit_nand)
+    if not args.dry_run:
+        resume = remember_opt_in(resume, manifest_path, args.allow_untested_8bit_nand)
     attacker = None
     if not args.dry_run and args.stage != "flash":
         attacker = callback_address(args.host, args.discover, args.attacker)
@@ -2602,7 +2604,7 @@ def main(argv=None):
         raise NeedsOptIn(
             f"{exc}\n    Continue this run, which reuses its root shell (a new "
             "run would need a factory reset first):\n    "
-            + opt_in_continuation(manifest_path)) from exc
+            + opt_in_continuation(manifest_path, args.stage)) from exc
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
     # flash_type goes into the manifest so that the flash stage, perhaps in a

@@ -2819,7 +2819,10 @@ def test_boot_env_gate():
     cont = install.opt_in_continuation("/x/resume.json")
     check("pre-flight opt-in refusal: the continuation reuses the run's shell",
           "--resume-manifest /x/resume.json" in cont and "--skip-exploit" in cont
-          and install.ECC_OPT_IN in cont, cont)
+          and install.ECC_OPT_IN in cont and "--stage" not in cont, cont)
+    cont = install.opt_in_continuation("/x/resume.json", "preflight")
+    check("a pre-flight-only run is continued as a pre-flight-only run",
+          "--stage preflight" in cont and "--skip-exploit" in cont, cont)
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "resume.json")
         install._write_resume_data(path, {"version": 1, "phase": "pivot-complete"})
