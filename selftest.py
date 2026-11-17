@@ -213,6 +213,14 @@ def test_resume_manifest_and_flash_guards():
         data = install.write_resume_manifest(
             path, args, devices.RD03V2, rel, images, "token", None)
         check("resume manifest is private", (os.stat(path).st_mode & 0o777) == 0o600)
+        check("the 8-bit NAND opt-in is off unless asked for",
+              data["allow_untested_8bit_nand"] is False)
+        opted = install.parse_args(["nss", "--transport", "wired", install.ECC_OPT_IN])
+        opted.images, opted.discover, opted.root_password = root, "eth0", None
+        check("the 8-bit NAND opt-in is recorded for a resumed flash stage",
+              install.write_resume_manifest(
+                  os.path.join(root, "opted.json"), opted, devices.RD03V2, rel,
+                  images, "token", None)["allow_untested_8bit_nand"] is True)
         check("resume manifest records the prepared phase",
               data["phase"] == "prepared")
         check("latest selection records a concrete release and image hashes",
@@ -481,6 +489,8 @@ def test_router_gateway():
         if "/proc/mtd" in cmd:
             return 0, ('mtd18: 02400000 00020000 "ubi_kernel"\n'
                        'mtd19: 05180000 00020000 "rootfs"\n')
+        if "/sys/class/mtd/mtd0/" in cmd:
+            return 0, NAND_4BIT
         return 0, ""
     with mock.patch.object(install, "wait_for_openwrt",
                            return_value=True) as wfo, \
@@ -1359,6 +1369,87 @@ def _fake_release(tag="v1.6"):
                             "assets": []})
 
 
+NAND_4BIT = "ecc_strength 4\noobsize 64\nwritesize 2048\n"
+
+
+def _fdt_blob(nodes):
+    """A flattened device tree from {path: {property: bytes}}."""
+    import struct as st
+    children = {}
+    for path in nodes:
+        if path != "/":
+            children.setdefault(path.rsplit("/", 1)[0] or "/", []).append(path)
+    strings, offsets, body = bytearray(), {}, bytearray()
+
+    def pad(b):
+        b += b"\0" * (-len(b) % 4)
+
+    def emit(path):
+        name = "" if path == "/" else path.rsplit("/", 1)[1]
+        body.extend(st.pack(">I", 1))
+        body.extend(name.encode() + b"\0")
+        pad(body)
+        for key, value in nodes[path].items():
+            if key not in offsets:
+                offsets[key] = len(strings)
+                strings.extend(key.encode() + b"\0")
+            body.extend(st.pack(">III", 3, len(value), offsets[key]))
+            body.extend(value)
+            pad(body)
+        for child in children.get(path, []):
+            emit(child)
+        body.extend(st.pack(">I", 2))
+    emit("/")
+    body.extend(st.pack(">I", 9))
+    off_struct = 40 + 16
+    off_strings = off_struct + len(body)
+    total = off_strings + len(strings)
+    header = st.pack(">10I", 0xd00dfeed, total, off_struct, off_strings, 40,
+                     17, 16, 0, len(strings), len(body))
+    return header + b"\0" * 16 + bytes(body) + bytes(strings)
+
+
+def _nand_dtb(strength):
+    """A board device tree whose spi-nand node forces `strength`, or not."""
+    import struct as st
+    nand = {"compatible": b"spi-nand\0", "reg": st.pack(">I", 0),
+            "nand-ecc-engine": st.pack(">I", 1)}
+    if strength is not None:
+        nand["nand-ecc-step-size"] = st.pack(">I", 512)
+        nand["nand-ecc-strength"] = st.pack(">I", strength)
+    return _fdt_blob({"/": {}, "/soc@0": {}, "/soc@0/spi@79b0000": {},
+                      "/soc@0/spi@79b0000/nand@0": nand})
+
+
+def _fit(dtb, compression=b"none\0"):
+    return _fdt_blob({"/": {}, "/images": {},
+                      "/images/kernel-1": {"type": b"kernel\0", "data": b"k" * 64},
+                      "/images/fdt-1": {"type": b"flat_dt\0",
+                                        "compression": compression, "data": dtb}})
+
+
+def _ecc_images(d, itb_strength, sysupgrade_strength="same"):
+    """The release images pre-flight sees, with device trees forcing a strength."""
+    if sysupgrade_strength == "same":
+        sysupgrade_strength = itb_strength
+    ubi = os.path.join(d, "initramfs-factory.ubi")
+    with open(ubi, "wb") as fh:
+        fh.truncate(14680064)
+    imgs = {"initramfs_ubi": {"name": "initramfs-factory.ubi", "path": ubi}}
+    itb = os.path.join(d, "initramfs-uImage.itb")
+    with open(itb, "wb") as fh:
+        fh.write(_fit(_nand_dtb(itb_strength)))
+    up = os.path.join(d, "sysupgrade.bin")
+    kernel = _fit(_nand_dtb(sysupgrade_strength))
+    with tarfile.open(up, "w") as tar:
+        info = tarfile.TarInfo("sysupgrade-xiaomi_mi-router-ax3000t-v2/kernel")
+        info.size = len(kernel)
+        tar.addfile(info, io.BytesIO(kernel))
+    imgs["initramfs_itb"] = {"name": "initramfs-uImage.itb", "path": itb}
+    imgs["sysupgrade"] = {"name": "sysupgrade.bin", "path": up}
+    return imgs
+
+
 def _fake_images(size=14680064):
     d = tempfile.mkdtemp(prefix="rd03v2-img-")
     p = os.path.join(d, "initramfs-factory.ubi")
@@ -1367,12 +1458,13 @@ def _fake_images(size=14680064):
     return {"initramfs_ubi": {"name": "initramfs-factory.ubi", "path": p}}, d
 
 
-def _preflight(shell, rel=None, images=None, profile=None):
+def _preflight(shell, rel=None, images=None, profile=None, allow_8bit=False):
     import install
     imgs, d = (images, None) if images else _fake_images()
     try:
         return install.preflight(shell, rel or _fake_release(), imgs, True,
-                                 profile or devices.RD03V2), None
+                                 profile or devices.RD03V2,
+                                 allow_8bit_nand=allow_8bit), None
     except Exception as e:                                       # noqa: BLE001
         return None, e
     finally:
@@ -1403,25 +1495,47 @@ def test_installer_preflight():
     check("a stock kernel that reports no NAND geometry still passes",
           facts is not None and facts["nand_ecc_strength"] is None,
           str(facts and facts.get("nand_ecc_strength")))
-    facts, err = _preflight(_ReplayShell(
-        nand={"ecc_strength": 4, "oobsize": 64, "writesize": 2048}))
-    check("4-bit ECC under stock passes, and is recorded",
-          err is None and facts["nand_ecc_strength"] == 4
-          and facts["nand_oobsize"] == 64, str(err)[:80])
-    facts, err = _preflight(_ReplayShell(
-        nand={"ecc_strength": 8, "oobsize": 128, "writesize": 2048}))
-    check("issue #7: 8-bit ECC under stock is refused before any write",
-          isinstance(err, install.Abort) and "8-bit ECC" in str(err)
-          and "issues/7" in str(err), str(err)[:80])
-    facts, err = _preflight(_ReplayShell(nand={"ecc_strength": 1}))
-    check("an ECC strength never seen is logged, not refused",
-          err is None and facts["nand_ecc_strength"] == 1, str(err)[:80])
-    import dataclasses
-    reads_8 = dataclasses.replace(devices.RD03V2, nand_ecc_strengths=(4, 8))
-    facts, err = _preflight(_ReplayShell(
-        nand={"ecc_strength": 8, "oobsize": 128, "writesize": 2048}), profile=reads_8)
-    check("8-bit ECC passes once the profile says the releases read it",
-          err is None, str(err)[:80])
+    eight = {"ecc_strength": 8, "oobsize": 128, "writesize": 2048}
+    with tempfile.TemporaryDirectory() as d:
+        forcing, following = os.path.join(d, "f4"), os.path.join(d, "fc")
+        os.mkdir(forcing)
+        os.mkdir(following)
+        imgs4 = _ecc_images(forcing, 4)
+        imgs_chip = _ecc_images(following, None)
+        facts, err = _preflight(_ReplayShell(
+            nand={"ecc_strength": 4, "oobsize": 64, "writesize": 2048}), images=imgs4)
+        check("a 4-bit unit passes with a release that forces 4-bit",
+              err is None and facts["nand_ecc_strength"] == 4
+              and facts["nand_oobsize"] == 64, str(err)[:80])
+        _f, err = _preflight(_ReplayShell(nand=eight), images=imgs4, allow_8bit=True)
+        check("issue #7: an 8-bit unit is refused with a 4-bit release, opt-in or not",
+              isinstance(err, install.NandUnreadable)
+              and "forces 4-bit" in str(err) and install.ECC_OPT_IN in str(err)
+              and install.continuation_hint(error=err) is None, str(err)[:90])
+        _f, err = _preflight(_ReplayShell(nand=eight), images=imgs_chip)
+        check("an 8-bit unit needs the opt-in with a release that follows the chip",
+              isinstance(err, install.NeedsOptIn) and install.ECC_OPT_IN in str(err)
+              and "TFTP" in str(err), str(err)[:90])
+        facts, err = _preflight(_ReplayShell(nand=eight), images=imgs_chip,
+                                allow_8bit=True)
+        check("with the opt-in, an 8-bit unit goes ahead on a chip-following release",
+              err is None and facts["release_nand_ecc"] is None, str(err)[:90])
+        _f, err = _preflight(_ReplayShell(nand={"oobsize": 128}), images=imgs_chip)
+        check("a 128-byte spare area alone marks an 8-bit unit",
+              isinstance(err, install.NeedsOptIn), str(err)[:90])
+        mixed = _ecc_images(os.path.join(d, "f4"), None, 4)
+        _f, err = _preflight(_ReplayShell(nand=eight), images=mixed, allow_8bit=True)
+        check("an installed kernel forcing 4-bit is caught even if the RAM image follows the chip",
+              isinstance(err, install.NandUnreadable), str(err)[:90])
+        garbled = dict(imgs_chip)
+        garbled["initramfs_itb"] = {"name": "x.itb", "path": imgs_chip["initramfs_ubi"]["path"]}
+        _f, err = _preflight(_ReplayShell(nand=eight), images=garbled, allow_8bit=True)
+        check("an 8-bit unit is refused when the release's device tree can't be read",
+              isinstance(err, install.NandUnreadable) and "cannot be read" in str(err),
+              str(err)[:90])
+        _f, err = _preflight(_ReplayShell(nand={"ecc_strength": 1}), images=imgs4)
+        check("an ECC strength never seen on a small spare area is logged, not refused",
+              err is None, str(err)[:80])
 
     class _Garbled(_ReplayShell):
         def run(self, cmd, timeout=0, retries=0, quiet=False):
@@ -2074,6 +2188,8 @@ class _UpdateBox:
             return 0, f"MemAvailable:   {self.memory} kB"
         if "flash_type" in cmd:
             return 0, "flash_type=11\nfw_rc=0"
+        if "/sys/class/mtd/mtd0/" in cmd:
+            return 0, NAND_4BIT
         if "uci -q get wireless" in cmd:
             return (0, self.ssid) if self.ssid else (1, "")
         if "rd03v2-release" in cmd:
@@ -2587,6 +2703,8 @@ def test_boot_env_gate():
                 return 0, mtd
             if "fw_printenv" in cmd:
                 return 0, f"flash_type={ram_ft}\nfw_rc=0"
+            if "/sys/class/mtd/mtd0/" in cmd:
+                return 0, NAND_4BIT
             return 0, ""
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "resume.json")
@@ -2621,6 +2739,56 @@ def test_boot_env_gate():
     check("a manifest without flash_type is not held against the run",
           msg == "gate reached", msg[:90])
 
+    def flash_nand(sysfs, allow=False):
+        def fake_ssh(_host, cmd, timeout=120, check=True, passwords=None):
+            if "board_name" in cmd:
+                return 0, devices.RD03V2.openwrt_board
+            if "rootfs_type" in cmd:
+                return 0, "tmpfs"
+            if "/proc/mtd" in cmd:
+                return 0, mtd
+            if "/sys/class/mtd/mtd0/" in cmd:
+                return 0, sysfs
+            if "fw_printenv" in cmd:
+                return 0, "flash_type=11\nfw_rc=0"
+            return 0, ""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "resume.json")
+            install._write_resume_data(path, {"version": 1, "phase": "pivot-complete"})
+            with mock.patch.object(install, "wait_for_openwrt", return_value=True), \
+                    mock.patch.object(install, "ssh", side_effect=fake_ssh), \
+                    mock.patch.object(install, "neighbour_mac", return_value=None), \
+                    mock.patch.object(install, "require_permanent_nand_support",
+                                      side_effect=install.Abort("gate reached")):
+                try:
+                    install.flash("h", _fake_release("v2.1.3"), {}, True, devices.RD03V2,
+                                  "images", manifest_path=path, transport="wired",
+                                  verify_interface="eth0", router_iface="eth0",
+                                  allow_8bit_nand=allow)
+                    return None
+                except install.Abort as e:
+                    return e
+
+    e = flash_nand("ecc_strength 4\noobsize 128\nwritesize 2048\n", allow=True)
+    check("flash stage: an 8-bit unit read with 4-bit is refused, opt-in or not",
+          isinstance(e, install.NandUnreadable) and "4-bit" in str(e)
+          and install.continuation_hint(error=e) is None, str(e)[:90])
+    e = flash_nand("ecc_strength 8\noobsize 128\nwritesize 2048\n")
+    check("flash stage: an 8-bit unit read with 8-bit still needs the opt-in",
+          isinstance(e, install.NeedsOptIn)
+          and "--stage flash --resume-manifest" in str(e)
+          and install.ECC_OPT_IN in str(e), str(e)[:90])
+    e = flash_nand("ecc_strength 8\noobsize 128\nwritesize 2048\n", allow=True)
+    check("flash stage: with the opt-in it goes on to the NAND gate",
+          str(e) == "gate reached", str(e)[:90])
+    e = flash_nand(NAND_4BIT)
+    check("flash stage: a 4-bit unit goes on without any opt-in",
+          str(e) == "gate reached", str(e)[:90])
+    e = flash_nand("ecc_strength \noobsize \nwritesize \n")
+    check("flash stage: unreadable NAND geometry fails closed before sysupgrade",
+          isinstance(e, install.Abort) and "could not read the NAND" in str(e),
+          str(e)[:90])
+
     def revert_ssh(_host, cmd, timeout=120, check=True, passwords=None):
         if "fw_printenv" in cmd:
             return 0, reporter
@@ -2634,6 +2802,51 @@ def test_boot_env_gate():
         except install.BootEnvUnreadable:
             check("revert refuses a unit whose environment OpenWrt cannot "
                   "read", not gate.called)
+
+
+def test_dtbread():
+    print("\n[dtbread: what a release's device tree says about NAND ECC]")
+    import dtbread
+    check("a forced strength is read from the spi-nand node",
+          dtbread.spi_nand_ecc(_nand_dtb(4)) == 4)
+    check("no strength means the driver follows the chip",
+          dtbread.spi_nand_ecc(_nand_dtb(None)) is None)
+    check("a FIT's embedded device tree is found",
+          dtbread.fit_dtbs(_fit(_nand_dtb(4))) == [_nand_dtb(4)])
+    for name, blob in (("garbage", b"\x00" * 64), ("truncated", _nand_dtb(4)[:50]),
+                       ("compressed dtb", _fit(_nand_dtb(4), b"gzip\0")),
+                       ("no spi-nand node", _fdt_blob({"/": {}}))):
+        try:
+            if name in ("compressed dtb",):
+                dtbread.fit_dtbs(blob)
+            else:
+                dtbread.spi_nand_ecc(blob)
+            check(f"{name} is refused, not guessed", False)
+        except dtbread.DtbError:
+            check(f"{name} is refused, not guessed", True)
+    with tempfile.TemporaryDirectory() as d:
+        check("a release whose images agree reports their strength",
+              dtbread.release_nand_ecc(_ecc_images(d, None)) is None
+              and dtbread.release_nand_ecc(_ecc_images(d, 4)) == 4)
+        try:
+            dtbread.release_nand_ecc(_ecc_images(d, None, 4))
+            check("images that disagree are refused", False)
+        except dtbread.DtbError:
+            check("images that disagree are refused", True)
+    # The real release assets, when a checkout has them next to it.
+    dirs = [x for x in os.environ.get("RD03V2_RELEASE_DIRS", "").split(os.pathsep) if x]
+    if not dirs:
+        print("  [skip] real release images -- set RD03V2_RELEASE_DIRS=dir[:dir]")
+    prefix = "openwrt-qualcommax-ipq50xx-xiaomi_mi-router-ax3000t-v2-"
+    for d in dirs:
+        imgs = {"initramfs_itb": {"path": os.path.join(d, prefix + "initramfs-uImage.itb")},
+                "sysupgrade": {"path": os.path.join(d, prefix + "squashfs-sysupgrade.bin")}}
+        with open(os.path.join(d, "version.buildinfo")) as fh:
+            revision = fh.read().strip()
+        check(f"real release {os.path.basename(d)} ({revision}) reads",
+              dtbread.release_nand_ecc(imgs) in (4, None),
+              str(dtbread.release_nand_ecc(imgs)))
+        print(f"    {os.path.basename(d)}: forces {dtbread.release_nand_ecc(imgs)}")
 
 
 def _wrote_nothing(box, outcome):
@@ -3617,6 +3830,7 @@ def main():
     test_expected_volume()
     test_install_failure_hint()
     test_boot_env_gate()
+    test_dtbread()
     test_updater()
     test_updater_in_place()
     test_default_routes_fail_closed()

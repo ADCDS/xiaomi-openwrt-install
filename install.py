@@ -76,6 +76,7 @@ import time
 import chain
 import channel
 import devices
+import dtbread
 import hostnet
 import i18n
 import release
@@ -154,13 +155,29 @@ def nvram_get(ch, key):
     return out.strip() if rc == 0 else ""
 
 
-def stock_nand_geometry(ch):
-    """The boot NAND's ECC strength, OOB size and page size, as stock's kernel
-    reports them in sysfs. A value it does not report is left out."""
-    _rc, out = ch.run(
-        "for f in ecc_strength oobsize writesize; do "
-        "printf '%s %s\\n' \"$f\" \"$(cat /sys/class/mtd/mtd0/$f 2>/dev/null)\"; done",
-        quiet=True)
+ISSUE7 = "https://github.com/ADCDS/xiaomi-openwrt-install/issues/7"
+# The opt-in for a unit whose NAND runs 8-bit ECC (issue #7). Kept explicit
+# until one such unit has installed a release and booted it.
+ECC_OPT_IN = "--allow-untested-8bit-nand"
+NAND_GEOMETRY_QUERY = (
+    "for f in ecc_strength oobsize writesize; do "
+    "printf '%s %s\\n' \"$f\" \"$(cat /sys/class/mtd/mtd0/$f 2>/dev/null)\"; done")
+
+
+class NandUnreadable(Abort):
+    """The release cannot read this unit's NAND; no rerun or flag changes that."""
+
+
+class NeedsOptIn(Abort):
+    """An untested case the operator has to ask for explicitly; the message
+    says how, so no generic continuation is printed after it."""
+
+
+def nand_geometry(run):
+    """The boot NAND's ECC strength, OOB size and page size, as the running
+    kernel reports them in sysfs. `run(cmd) -> (rc, output)`. A value it does
+    not report is left out."""
+    _rc, out = run(NAND_GEOMETRY_QUERY)
     values = {}
     for line in out.splitlines():
         parts = line.split()
@@ -170,38 +187,125 @@ def stock_nand_geometry(ch):
     return values
 
 
-def require_readable_nand_ecc(geometry, profile, facts):
-    """Refuse a unit whose flash stock writes with an ECC the releases cannot read.
+def stock_nand_geometry(ch):
+    return nand_geometry(lambda cmd: ch.run(cmd, quiet=True))
 
-    Stock's bootloader and kernel pick the ECC per chip: 8-bit on the parts
-    with a 128-byte spare area. Such a unit has everything written that way,
-    from SBL1 to the U-Boot environment, and a release that reads it with
-    4-bit gets uncorrectable errors on every written page (issue #7). The
-    flash_type checked above does not show this. Only 8 is refused: no other
-    value has been seen on a unit known to be good or bad, and a mismatch the
-    gate lets through still stops at the flash stage's environment check,
-    before anything permanent is written.
+
+def nand_needs_8bit(geometry):
+    """Whether stock runs this chip with 8-bit ECC, or None when unknown.
+
+    The stock bootloader takes the ECC from its own chip table, and in it the
+    8-bit parts are exactly those with a 128-byte spare area (4-bit: 64). So a
+    spare area of 80 bytes or more, the least an 8-bit layout needs, means
+    8-bit whoever reports it, and a kernel that runs 8-bit says so directly.
     """
-    strength = geometry.get("ecc_strength")
-    facts["nand_ecc_strength"] = strength
+    oob, strength = geometry.get("oobsize"), geometry.get("ecc_strength")
+    if oob is None and strength is None:
+        return None
+    return (oob is not None and oob >= 80) or strength == 8
+
+
+def _nand_8bit_unit(geometry):
+    oob = geometry.get("oobsize")
+    return (f"this unit's NAND has a {oob}-byte spare area, which stock runs "
+            "with 8-bit ECC" if oob else "stock runs this unit's NAND with 8-bit ECC")
+
+
+def require_installable_nand(geometry, rel, images, allow_8bit, facts):
+    """Pre-flight: refuse a unit whose NAND stock runs with 8-bit ECC, unless
+    the release reads it and the operator opted in (issue #7).
+
+    Stock writes such a unit's whole flash with 8-bit codewords. A release
+    whose device tree forces 4-bit gets an uncorrectable error on every
+    written page, and the kernel it installs is in a layout the unit's own
+    bootloader cannot read; no flag lets that through. A release that leaves
+    the strength to the driver follows the chip, but no 8-bit unit has
+    installed one yet, so that takes ECC_OPT_IN. The flash_type checked above
+    does not show any of this. When stock reports nothing, the flash stage
+    decides from the RAM system's own reading.
+    """
+    facts["nand_ecc_strength"] = geometry.get("ecc_strength")
     facts["nand_oobsize"] = geometry.get("oobsize")
-    if strength is None:
-        log("[1] NAND ECC: stock does not report its ECC strength; the flash "
-            "stage will check that OpenWrt reads the environment")
+    need8 = nand_needs_8bit(geometry)
+    if need8 is None:
+        log("[1] NAND ECC: stock reports neither ECC strength nor spare area; "
+            "the flash stage will decide from the RAM system")
         return
-    log(f"[1] NAND ECC: stock runs {strength}-bit ECC "
+    log(f"[1] NAND ECC: stock runs {geometry.get('ecc_strength', '?')}-bit ECC "
         f"(page {geometry.get('writesize', '?')}+{geometry.get('oobsize', '?')} B)")
-    if strength == 8 and 8 not in profile.nand_ecc_strengths:
-        raise Abort(
-            "stock runs this unit's NAND with 8-bit ECC, and writes its whole "
-            "flash that way. The releases this installer supports read it "
-            "with 4-bit, so they could not read this unit's flash and an "
-            "installed system would not boot. Nothing has been written to the "
-            "firmware slots. See "
-            "https://github.com/ADCDS/xiaomi-openwrt-install/issues/7")
+    if not need8:
+        return
+    tag = getattr(rel, "tag", "this release")
+    try:
+        forced = dtbread.release_nand_ecc(images)
+    except (dtbread.DtbError, OSError) as exc:
+        raise NandUnreadable(
+            f"{_nand_8bit_unit(geometry)}, and {tag}'s device tree cannot be "
+            f"read to tell whether it does too ({exc}). Refusing. Nothing has "
+            f"been written to the firmware slots. See {ISSUE7}")
+    facts["release_nand_ecc"] = forced
+    if forced is not None and forced != 8:
+        raise NandUnreadable(
+            f"{_nand_8bit_unit(geometry)}. {tag}'s device tree forces "
+            f"{forced}-bit ECC, so it cannot read this unit's flash, and the "
+            f"system it installs would not boot. {ECC_OPT_IN} does not change "
+            "that: this unit needs a release whose ECC follows the chip "
+            f"(v2.1.4 or later). Nothing has been written to the firmware "
+            f"slots. See {ISSUE7}")
+    if not allow_8bit:
+        raise NeedsOptIn(
+            f"{_nand_8bit_unit(geometry)}. {tag} follows the chip and should "
+            "run it with 8-bit too, but no unit like this has installed a "
+            "release yet. If its bootloader cannot read what OpenWrt writes, "
+            "the router will not boot, and only Xiaomi's TFTP recovery or a "
+            "UART adapter brings it back. To go ahead anyway, run the "
+            f"installer again with {ECC_OPT_IN}. Nothing has been written to "
+            f"the firmware slots. See {ISSUE7}")
+    log(f"[1] NAND ECC: 8-bit unit, and {tag} follows the chip. Going ahead "
+        f"because of {ECC_OPT_IN}: no unit like this has installed a release "
+        "before.")
 
 
-def preflight(ch, rel, images, assume_yes, profile, destdir=None):
+def require_flashable_nand(geometry, rel, allow_8bit, manifest_path=None):
+    """Flash stage: the same rule, read from the RAM system, which is the
+    release's own kernel. A spare area of 80 bytes or more means an 8-bit
+    unit whatever strength this kernel picked; unreadable sysfs fails closed,
+    since sysupgrade comes next."""
+    tag = getattr(rel, "tag", "this release")
+    need8 = nand_needs_8bit(geometry)
+    if need8 is None:
+        raise Abort("could not read the NAND's ECC strength and spare area "
+                    "from the RAM system (/sys/class/mtd/mtd0) -- refusing "
+                    "before sysupgrade")
+    strength, oob = geometry.get("ecc_strength"), geometry.get("oobsize")
+    log(f"[3] NAND ECC: the RAM system runs {strength}-bit ECC "
+        f"(page {geometry.get('writesize', '?')}+{oob} B)")
+    if not need8:
+        return
+    if strength != 8:
+        raise NandUnreadable(
+            f"{_nand_8bit_unit(geometry)}, but the RAM system reads it with "
+            f"{strength}-bit: {tag} cannot read this unit's flash, and "
+            "sysupgrade would write a layout its bootloader cannot read. "
+            "Refusing before sysupgrade; this unit needs a release whose ECC "
+            f"follows the chip (v2.1.4 or later). See {ISSUE7}")
+    if not allow_8bit:
+        how = (rerun_command("--stage", "flash", "--resume-manifest",
+                             manifest_path, ECC_OPT_IN)
+               if manifest_path else f"run the flash stage again with {ECC_OPT_IN}")
+        raise NeedsOptIn(
+            f"{_nand_8bit_unit(geometry)}, and the RAM system runs it with "
+            "8-bit, as stock does. No unit like this has installed a release "
+            "yet: if its bootloader cannot read what sysupgrade writes, the "
+            "router will not boot, and only Xiaomi's TFTP recovery or a UART "
+            "adapter brings it back. Nothing has been written by this stage. "
+            f"To go ahead anyway: {how}")
+    log(f"[3] NAND ECC: 8-bit unit, the RAM system runs 8-bit; going ahead "
+        f"because of {ECC_OPT_IN}")
+
+
+def preflight(ch, rel, images, assume_yes, profile, destdir=None,
+              allow_8bit_nand=False):
     """Everything that must be true before a single byte is written."""
     facts = {}
     log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
@@ -238,7 +342,8 @@ def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     log(f"[1] NAND gate: {'PASS' if ok else 'REFUSE'} -- {why}")
     if not ok:
         raise Abort(why)
-    require_readable_nand_ecc(stock_nand_geometry(ch), profile, facts)
+    require_installable_nand(stock_nand_geometry(ch), rel, images,
+                             allow_8bit_nand, facts)
 
     # Partition map and which slot we are running from.
     rc, mtdtext = ch.run("cat /proc/mtd", quiet=True)
@@ -1382,7 +1487,7 @@ def continuation_hint(manifest_path=None, error=None):
     read-only continuation itself. A failure that a rerun would only meet again
     (`error`, when given) gets no hint either.
     """
-    if isinstance(error, BootEnvUnreadable):
+    if isinstance(error, (BootEnvUnreadable, NandUnreadable, NeedsOptIn)):
         return None
     path = manifest_path or _ACTIVE_MANIFEST
     if not path:
@@ -1492,9 +1597,11 @@ def launch_sysupgrade(host, opts, manifest_path, verify_interface, run_ssh,
 def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           manifest_path=None, transport="wired", verify_interface=None,
           permanent_wifi_ssid=None, verify_fallback=None,
-          verify_transport=None, router_iface=None, expected_revision=""):
+          verify_transport=None, router_iface=None, expected_revision="",
+          allow_8bit_nand=False):
     """router_iface: the router-facing interface on a wired install, where the
-    RAM system's own DHCP makes it this host's gateway (gateway_conflict)."""
+    RAM system's own DHCP makes it this host's gateway (gateway_conflict).
+    allow_8bit_nand: the operator's ECC_OPT_IN (see require_flashable_nand)."""
     log(t("\n=== stage 3: flash (sysupgrade from the RAM system) ==="))
 
     # Everything up to the sysupgrade launch talks to the RAM system, which is
@@ -1549,6 +1656,9 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     else:
         log(f"[3] could not read {host}'s MAC from the neighbour table")
 
+    require_flashable_nand(
+        nand_geometry(lambda cmd: ram_ssh(host, cmd, check=False)),
+        rel, allow_8bit_nand, manifest_path)
     raw_ft = openwrt_flash_type(lambda cmd: ram_ssh(host, cmd, check=False))
     # A manifest from before this was recorded, or from updater.py, which has
     # no stock pre-flight, has none to compare with.
@@ -1700,6 +1810,12 @@ def parse_args(argv=None):
     ap.add_argument("--resume-manifest", default=None, help=hidden)
     ap.add_argument("--standalone-flash", action="store_true", help=hidden)
     ap.add_argument("--recover-stale-lock", action="store_true", help=hidden)
+    ap.add_argument(
+        ECC_OPT_IN, dest="allow_untested_8bit_nand", action="store_true",
+        help="go ahead on a unit whose NAND stock runs with 8-bit ECC (a "
+             "128-byte spare area). No such unit has installed a release yet: "
+             "if its bootloader cannot read what OpenWrt writes, it will not "
+             "boot and needs TFTP or UART recovery (issue #7)")
     ap.add_argument("--config-tar", default=None, help=hidden)
     args = ap.parse_args(argv)
 
@@ -2037,6 +2153,7 @@ def write_resume_manifest(path, args, profile, rel, images, token, cfg_tar):
         # reconnect.  The passphrase stays only in the mode-0600 config archive.
         "wifi_ssid": args.wifi_ssid,
         "root_password_set": bool(args.root_password),
+        "allow_untested_8bit_nand": bool(getattr(args, "allow_untested_8bit_nand", False)),
     }
     _write_resume_data(path, data)
     return data
@@ -2149,6 +2266,8 @@ def main(argv=None):
         args.verify_interface = (args.verify_interface
                                  or resume.get("verify_interface"))
         args.wifi_ssid = resume.get("wifi_ssid") or args.wifi_ssid
+        args.allow_untested_8bit_nand = (args.allow_untested_8bit_nand
+                                         or bool(resume.get("allow_untested_8bit_nand")))
         args.configure = False
     profile = devices.get_profile(args.device)
     args.host = args.host or profile.stock_host
@@ -2376,7 +2495,8 @@ def main(argv=None):
               cfg_tar, manifest_path, args.transport, args.verify_interface,
               args.wifi_ssid, verify_fallback, verify_transport,
               router_iface=(args.discover if args.transport == "wired"
-                            else None))
+                            else None),
+              allow_8bit_nand=args.allow_untested_8bit_nand)
         return 0
 
     if not attacker:
@@ -2431,7 +2551,8 @@ def main(argv=None):
         time.sleep(args.settle)
         ch.run("echo settled", quiet=True)
 
-    facts = preflight(ch, rel, images, args.yes, profile, args.images)
+    facts = preflight(ch, rel, images, args.yes, profile, args.images,
+                      allow_8bit_nand=args.allow_untested_8bit_nand)
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
     # flash_type goes into the manifest so that the flash stage, perhaps in a
@@ -2474,7 +2595,8 @@ def main(argv=None):
               args.wifi_ssid, verify_fallback, verify_transport,
               router_iface=(args.discover if args.transport == "wired"
                             else None),
-              expected_revision=release.revision(rel, args.images))
+              expected_revision=release.revision(rel, args.images),
+              allow_8bit_nand=args.allow_untested_8bit_nand)
     else:
         log(t("\n[+] pivot done. When the RAM system is reachable, run:"))
         log("    " + rerun_command(args.image, "--stage", "flash",

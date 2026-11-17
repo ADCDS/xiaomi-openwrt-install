@@ -413,10 +413,19 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   not fail: it writes the tool's defaults back over the stock environment. A
   bad CRC therefore stops the flash, and `revert.py` refuses on the same read
   ([issue #7](https://github.com/ADCDS/xiaomi-openwrt-install/issues/7)).
-  Before that, pre-flight reads the ECC strength stock's kernel uses
-  (`/sys/class/mtd/mtd0/ecc_strength`). Stock runs 8-bit ECC on parts with a
-  128-byte spare area and writes the whole flash that way, which releases up to
-  v2.1.3 cannot read, so pre-flight refuses 8.
+- **A NAND that stock runs with 8-bit ECC needs a release that follows the chip,
+  and an explicit opt-in.** Stock's bootloader runs 8-bit ECC on the parts with a
+  128-byte spare area and writes the whole flash that way (issue #7).
+  - Pre-flight reads stock's `/sys/class/mtd/mtd0/ecc_strength` and `oobsize`,
+    and reads the release's own device trees: the RAM installer `.itb` and the
+    kernel FIT inside the sysupgrade image (`dtbread.py`).
+  - A release that forces `nand-ecc-strength` (4-bit, v2.1.3 and earlier) is
+    refused on such a unit, and no flag changes that.
+  - A release that leaves the strength to the driver follows the chip (v2.1.4
+    on). No 8-bit unit has installed one yet, so it also takes
+    `--allow-untested-8bit-nand`.
+  - The flash stage applies the same rule to the RAM system's own reading
+    before sysupgrade, and fails closed if it cannot read it.
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and

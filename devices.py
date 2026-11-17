@@ -29,9 +29,6 @@ class DeviceProfile:
     image_kinds: dict[str, str]
     nand_min_version: dict[str, tuple[int, int]]
     flash_types: dict[str, str]
-    # NAND ECC strengths (bits) the releases can read, as stock's kernel
-    # reports them in /sys/class/mtd/mtd0/ecc_strength
-    nand_ecc_strengths: tuple[int, ...]
     stock_slots: dict[str, int]
     required_stock_partitions: tuple[str, ...]
     backup_partitions: tuple[tuple[str, str], ...]
@@ -84,10 +81,6 @@ RD03V2 = DeviceProfile(
         "81": "GigaDevice GD5F1GM7REYIG",
         "be": "Winbond W25N01KW",
     },
-    # Stock runs 8-bit ECC on parts with a 128-byte spare area, and writes the
-    # whole flash that way. Releases up to v2.1.3 force 4-bit in their DTS and
-    # cannot read such a unit (issue #7); add 8 once a release reads it.
-    nand_ecc_strengths=(4,),
     stock_slots={"rootfs": 0, "rootfs_1": 1},
     required_stock_partitions=(
         "rootfs", "rootfs_1", "overlay", "0:APPSBLENV", "0:ART", "bdata",
