@@ -413,6 +413,10 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   not fail: it writes the tool's defaults back over the stock environment. A
   bad CRC therefore stops the flash, and `revert.py` refuses on the same read
   ([issue #7](https://github.com/ADCDS/xiaomi-openwrt-install/issues/7)).
+  Before that, pre-flight reads the ECC strength stock's kernel uses
+  (`/sys/class/mtd/mtd0/ecc_strength`). Stock runs 8-bit ECC on parts with a
+  128-byte spare area and writes the whole flash that way, which releases up to
+  v2.1.3 cannot read, so pre-flight refuses 8.
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and

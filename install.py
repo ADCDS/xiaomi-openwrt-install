@@ -154,6 +154,53 @@ def nvram_get(ch, key):
     return out.strip() if rc == 0 else ""
 
 
+def stock_nand_geometry(ch):
+    """The boot NAND's ECC strength, OOB size and page size, as stock's kernel
+    reports them in sysfs. A value it does not report is left out."""
+    _rc, out = ch.run(
+        "for f in ecc_strength oobsize writesize; do "
+        "printf '%s %s\\n' \"$f\" \"$(cat /sys/class/mtd/mtd0/$f 2>/dev/null)\"; done",
+        quiet=True)
+    values = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if (len(parts) == 2 and parts[0] in ("ecc_strength", "oobsize", "writesize")
+                and parts[1].isdigit()):
+            values[parts[0]] = int(parts[1])
+    return values
+
+
+def require_readable_nand_ecc(geometry, profile, facts):
+    """Refuse a unit whose flash stock writes with an ECC the releases cannot read.
+
+    Stock's bootloader and kernel pick the ECC per chip: 8-bit on the parts
+    with a 128-byte spare area. Such a unit has everything written that way,
+    from SBL1 to the U-Boot environment, and a release that reads it with
+    4-bit gets uncorrectable errors on every written page (issue #7). The
+    flash_type checked above does not show this. Only 8 is refused: no other
+    value has been seen on a unit known to be good or bad, and a mismatch the
+    gate lets through still stops at the flash stage's environment check,
+    before anything permanent is written.
+    """
+    strength = geometry.get("ecc_strength")
+    facts["nand_ecc_strength"] = strength
+    facts["nand_oobsize"] = geometry.get("oobsize")
+    if strength is None:
+        log("[1] NAND ECC: stock does not report its ECC strength; the flash "
+            "stage will check that OpenWrt reads the environment")
+        return
+    log(f"[1] NAND ECC: stock runs {strength}-bit ECC "
+        f"(page {geometry.get('writesize', '?')}+{geometry.get('oobsize', '?')} B)")
+    if strength == 8 and 8 not in profile.nand_ecc_strengths:
+        raise Abort(
+            "stock runs this unit's NAND with 8-bit ECC, and writes its whole "
+            "flash that way. The releases this installer supports read it "
+            "with 4-bit, so they could not read this unit's flash and an "
+            "installed system would not boot. Nothing has been written to the "
+            "firmware slots. See "
+            "https://github.com/ADCDS/xiaomi-openwrt-install/issues/7")
+
+
 def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     """Everything that must be true before a single byte is written."""
     facts = {}
@@ -191,6 +238,7 @@ def preflight(ch, rel, images, assume_yes, profile, destdir=None):
     log(f"[1] NAND gate: {'PASS' if ok else 'REFUSE'} -- {why}")
     if not ok:
         raise Abort(why)
+    require_readable_nand_ecc(stock_nand_geometry(ch), profile, facts)
 
     # Partition map and which slot we are running from.
     rc, mtdtext = ch.run("cat /proc/mtd", quiet=True)
@@ -2389,7 +2437,8 @@ def main(argv=None):
     # flash_type goes into the manifest so that the flash stage, perhaps in a
     # later run, can check that OpenWrt reads the same value stock did.
     resume = update_resume(manifest_path, phase="preflight-complete",
-                           flash_type=facts["flash_type"])
+                           flash_type=facts["flash_type"],
+                           nand_ecc_strength=facts.get("nand_ecc_strength"))
 
     if args.stage == "preflight":
         log(t("\n[+] pre-flight passed. Nothing was written."))

@@ -1345,6 +1345,12 @@ class _ReplayShell:
         if cmd.startswith("command -v "):
             tool = cmd.split()[2]
             return (1, "") if tool == self.v["missing_tool"] else (0, "")
+        if "/sys/class/mtd/mtd0/" in cmd:
+            # No stock reading of these is on record, so by default the kernel
+            # reports none of them.
+            geom = self.v.get("nand") or {}
+            return 0, "".join(f"{k} {geom.get(k, '')}\n"
+                              for k in ("ecc_strength", "oobsize", "writesize"))
         return 0, ""
 
 
@@ -1361,12 +1367,12 @@ def _fake_images(size=14680064):
     return {"initramfs_ubi": {"name": "initramfs-factory.ubi", "path": p}}, d
 
 
-def _preflight(shell, rel=None, images=None):
+def _preflight(shell, rel=None, images=None, profile=None):
     import install
     imgs, d = (images, None) if images else _fake_images()
     try:
         return install.preflight(shell, rel or _fake_release(), imgs, True,
-                                 devices.RD03V2), None
+                                 profile or devices.RD03V2), None
     except Exception as e:                                       # noqa: BLE001
         return None, e
     finally:
@@ -1392,6 +1398,38 @@ def test_installer_preflight():
               facts["target_slot"])
         check("NAND decoded from nvram flash_type",
               facts["nand"] == "ESMT F50D1G41LB", str(facts["nand"]))
+
+    # The ECC stock runs the NAND with (issue #7).
+    check("a stock kernel that reports no NAND geometry still passes",
+          facts is not None and facts["nand_ecc_strength"] is None,
+          str(facts and facts.get("nand_ecc_strength")))
+    facts, err = _preflight(_ReplayShell(
+        nand={"ecc_strength": 4, "oobsize": 64, "writesize": 2048}))
+    check("4-bit ECC under stock passes, and is recorded",
+          err is None and facts["nand_ecc_strength"] == 4
+          and facts["nand_oobsize"] == 64, str(err)[:80])
+    facts, err = _preflight(_ReplayShell(
+        nand={"ecc_strength": 8, "oobsize": 128, "writesize": 2048}))
+    check("issue #7: 8-bit ECC under stock is refused before any write",
+          isinstance(err, install.Abort) and "8-bit ECC" in str(err)
+          and "issues/7" in str(err), str(err)[:80])
+    facts, err = _preflight(_ReplayShell(nand={"ecc_strength": 1}))
+    check("an ECC strength never seen is logged, not refused",
+          err is None and facts["nand_ecc_strength"] == 1, str(err)[:80])
+    import dataclasses
+    reads_8 = dataclasses.replace(devices.RD03V2, nand_ecc_strengths=(4, 8))
+    facts, err = _preflight(_ReplayShell(
+        nand={"ecc_strength": 8, "oobsize": 128, "writesize": 2048}), profile=reads_8)
+    check("8-bit ECC passes once the profile says the releases read it",
+          err is None, str(err)[:80])
+
+    class _Garbled(_ReplayShell):
+        def run(self, cmd, timeout=0, retries=0, quiet=False):
+            if "/sys/class/mtd/mtd0/" in cmd:
+                return 0, "ecc_strength eight\noobsize\nnonsense 8\nwritesize 2048 x\n"
+            return super().run(cmd, timeout, retries, quiet)
+    check("unparseable geometry lines are dropped, not guessed",
+          install.stock_nand_geometry(_Garbled()) == {})
 
     facts, err = _preflight(_ReplayShell(flash_type="be"))
     check("Winbond unit refused against v1.6",
