@@ -278,7 +278,9 @@ class FlashOverWindowsTransportTests(unittest.TestCase):
         if "/proc/mtd" in command:
             return 0, self.MTD
         if "flash_type" in command:
-            return 0, "be"
+            return 0, "flash_type=be\nfw_rc=0"
+        if "/sys/class/mtd/mtd0/" in command:
+            return 0, "ecc_strength 4\noobsize 64\nwritesize 2048\n"
         if "sha256sum" in command:
             return 0, self.sha + "  /tmp/fw.bin"
         if "start-stop-daemon" in command:

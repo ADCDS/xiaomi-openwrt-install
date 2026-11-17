@@ -405,6 +405,35 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   detached and is **not** read back: it is proven by the installed system
   booting, matching the profile's partition sizes, and reporting the release's
   own revision from `/etc/openwrt_version`.
+- **No `sysupgrade` on a unit whose U-Boot environment OpenWrt cannot read.**
+  The flash stage reads `flash_type` again through `fw_printenv`, and checks
+  that it matches what stock reported in pre-flight. That read is also the
+  only proof that `/etc/fw_env.config` fits this unit. The installed system
+  writes its boot flags through that file, and on a bad CRC `fw_setenv` does
+  not fail: it writes the tool's defaults back over the stock environment. A
+  bad CRC therefore stops the flash, and `revert.py` refuses on the same read
+  ([issue #7](https://github.com/ADCDS/xiaomi-openwrt-install/issues/7)).
+- **A NAND that stock runs with 8-bit ECC needs a release that follows the chip,
+  and an explicit opt-in.** Stock's bootloader runs 8-bit ECC on the parts with a
+  128-byte spare area and writes the whole flash that way (issue #7).
+  - Pre-flight reads stock's `/sys/class/mtd/mtd0/ecc_strength` and `oobsize`,
+    and reads the release's own device trees: the RAM installer `.itb` and the
+    kernel FIT inside the sysupgrade image (`dtbread.py`).
+  - A release that forces `nand-ecc-strength` (4-bit, v2.1.3 and earlier) is
+    refused on such a unit, and no flag changes that.
+  - A release that leaves the strength to the driver follows the chip (v2.1.4
+    on). No 8-bit unit has installed one yet, so it also takes
+    `--allow-untested-8bit-nand`.
+  - The flash stage applies the same rule to the RAM system's own reading,
+    and on an 8-bit unit also checks the device tree of the image sysupgrade is
+    about to write, since a separately booted RAM system may come from another
+    release. It fails closed if it cannot read either.
+  - A run refused in pre-flight for want of the opt-in prints the command that
+    continues it (`--resume-manifest … --skip-exploit
+    --allow-untested-8bit-nand`), which reuses its root shell. A new run would
+    need a factory reset first.
+  - Not covered yet: `updater.py` and `revert.py` given an explicit older tag
+    on an 8-bit unit that already runs a release which follows the chip.
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and

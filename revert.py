@@ -415,12 +415,11 @@ def state_of(host, profile):
 
 def require_nand_support(host, rel, profile, images_dir):
     """Refuse a release whose kernel cannot probe this unit's flash."""
-    rc, raw_ft = install.ssh(
-        host, "fw_printenv -n flash_type 2>/dev/null", check=False)
-    if rc != 0 or not raw_ft.strip():
-        rc, raw_ft = install.ssh(
-            host, "fw_printenv flash_type 2>/dev/null", check=False)
-        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
+    # Also refuses a unit whose environment OpenWrt cannot read: restore.py
+    # sets the boot flags back to stock through fw_setenv, which on a bad CRC
+    # would replace that environment with defaults.
+    raw_ft = install.openwrt_flash_type(
+        lambda cmd: install.ssh(host, cmd, check=False))
     _ft, _part, why = install.require_permanent_nand_support(
         raw_ft, rel, profile, images_dir)
     return why
