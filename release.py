@@ -415,8 +415,13 @@ def nand_support(rel, destdir=None):
 
 
 def normalise_flash_type(value):
-    """`0xBE`, `be`, `b` -> `be`.  The env holds it as bare lowercase hex."""
-    return str(value).strip().lower().removeprefix("0x").zfill(2)
+    """`0xBE`, `be`, `b` -> `be`.  The env holds it as bare lowercase hex.
+
+    An empty value stays empty. Padding it invented a part code, reported as
+    "flash_type 0x00" in issue #7, where the true answer was "not read".
+    """
+    code = str(value).strip().lower().removeprefix("0x")
+    return code.zfill(2) if code else ""
 
 
 def check_nand(rel, part, destdir=None, flash_type=None):

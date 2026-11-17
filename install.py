@@ -1140,6 +1140,51 @@ def wait_for_openwrt(host, deadline_s=420, router_iface=None, passwords=None):
     return False
 
 
+class BootEnvUnreadable(Abort):
+    """OpenWrt cannot validate this unit's U-Boot environment (issue #7).
+
+    Retrying cannot change that, so no continuation is offered for it.
+    """
+
+
+# One call, so that a lost link (no fw_rc line) is told apart from
+# fw_printenv's own answer, and its stderr, where "Bad CRC" goes, is kept.
+FLASH_TYPE_QUERY = 'fw_printenv flash_type 2>&1; echo "fw_rc=$?"'
+
+
+def openwrt_flash_type(run):
+    """`flash_type` as a running OpenWrt reads it through /etc/fw_env.config.
+
+    `run(cmd) -> (rc, output)` runs a command on that system.
+
+    This is also the only check that OpenWrt can read this unit's U-Boot
+    environment at all, which matters more than the value. Everything after it
+    sets the boot flags through the same fw_env.config: sysupgrade's
+    platform.sh, the installed system's bootcount on every boot, restore.py.
+    On a bad CRC fw_setenv does not fail. It starts from the tool's built-in
+    defaults and writes those back, and the stock environment is gone.
+    """
+    _rc, out = run(FLASH_TYPE_QUERY)
+    status = re.search(r"^fw_rc=(\d+)[ \t\r]*$", out, re.M)
+    if not status:
+        raise Abort(f"could not read flash_type from OpenWrt: {out.strip()!r}")
+    if "Bad CRC" in out:
+        _rc, config = run("cat /etc/fw_env.config 2>&1")
+        raise BootEnvUnreadable(
+            "OpenWrt cannot read this unit's U-Boot environment: fw_printenv "
+            f"reports a bad CRC with /etc/fw_env.config {config.strip()!r}. "
+            "OpenWrt writes its boot flags through that file, and on a bad CRC "
+            "fw_setenv replaces the whole environment with defaults, so nothing "
+            "that sets them can run on this unit yet. Nothing has been written "
+            "by this stage, and retrying stops here again. Please report it at "
+            "https://github.com/ADCDS/xiaomi-openwrt-install/issues/7")
+    value = re.search(r"^flash_type=(\S+?)[ \t\r]*$", out, re.M)
+    if status.group(1) != "0" or not value:
+        raise Abort("OpenWrt's U-Boot environment has no flash_type "
+                    f"({out.strip()!r}); refusing rather than guessing one")
+    return value.group(1)
+
+
 def require_permanent_nand_support(raw_flash_type, rel, profile, image_cache):
     ft = release.normalise_flash_type(raw_flash_type)
     part = profile.flash_types.get(ft)
@@ -1281,13 +1326,16 @@ def rerun_command(*arguments):
 _ACTIVE_MANIFEST = None
 
 
-def continuation_hint(manifest_path=None):
+def continuation_hint(manifest_path=None, error=None):
     """How to carry on after a failure, once there is a way to.
 
     Before pre-flight the one-shot trigger may or may not be spent, so nothing
     general can be said, and once sysupgrade has started flash() prints the
-    read-only continuation itself.
+    read-only continuation itself. A failure that a rerun would only meet again
+    (`error`, when given) gets no hint either.
     """
+    if isinstance(error, BootEnvUnreadable):
+        return None
     path = manifest_path or _ACTIVE_MANIFEST
     if not path:
         return None
@@ -1453,12 +1501,17 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
     else:
         log(f"[3] could not read {host}'s MAC from the neighbour table")
 
-    rc, raw_ft = ram_ssh(host, "fw_printenv -n flash_type 2>/dev/null",
-                         check=False)
-    if rc != 0 or not raw_ft.strip():
-        rc, raw_ft = ram_ssh(host, "fw_printenv flash_type 2>/dev/null",
-                             check=False)
-        raw_ft = raw_ft.split("=", 1)[-1] if "=" in raw_ft else ""
+    raw_ft = openwrt_flash_type(lambda cmd: ram_ssh(host, cmd, check=False))
+    # A manifest from before this was recorded, or from updater.py, which has
+    # no stock pre-flight, has none to compare with.
+    recorded = (load_resume_manifest(manifest_path).get("flash_type")
+                if manifest_path and os.path.exists(manifest_path) else None)
+    if recorded and recorded != release.normalise_flash_type(raw_ft):
+        raise Abort(
+            f"OpenWrt reads flash_type 0x{release.normalise_flash_type(raw_ft)}"
+            f", but stock reported 0x{recorded} in pre-flight. Either this is "
+            "not the router that pre-flight checked, or the two read different "
+            "copies of the boot environment. Refusing to flash.")
     ft, part, why = require_permanent_nand_support(
         raw_ft, rel, profile, image_cache)
     log(f"[3] permanent-image NAND gate: PASS -- {why}")
@@ -2333,7 +2386,10 @@ def main(argv=None):
     facts = preflight(ch, rel, images, args.yes, profile, args.images)
     with open(f"{outdir}/preflight.json", "w") as fh:
         json.dump(facts, fh, indent=2, default=str)
-    resume = update_resume_phase(manifest_path, "preflight-complete")
+    # flash_type goes into the manifest so that the flash stage, perhaps in a
+    # later run, can check that OpenWrt reads the same value stock did.
+    resume = update_resume(manifest_path, phase="preflight-complete",
+                           flash_type=facts["flash_type"])
 
     if args.stage == "preflight":
         log(t("\n[+] pre-flight passed. Nothing was written."))
@@ -2386,7 +2442,7 @@ if __name__ == "__main__":
         sys.exit(main())
     except CLEAN_ERRORS as e:
         log(f"[-] {e}")
-        hint = continuation_hint()
+        hint = continuation_hint(error=e)
         if hint:
             log(hint)
         sys.exit(1)

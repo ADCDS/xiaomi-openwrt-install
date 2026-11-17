@@ -2035,7 +2035,7 @@ class _UpdateBox:
         if "MemAvailable" in cmd:
             return 0, f"MemAvailable:   {self.memory} kB"
         if "flash_type" in cmd:
-            return 0, "11"
+            return 0, "flash_type=11\nfw_rc=0"
         if "uci -q get wireless" in cmd:
             return (0, self.ssid) if self.ssid else (1, "")
         if "rd03v2-release" in cmd:
@@ -2475,6 +2475,127 @@ def test_install_failure_hint():
         check("after sysupgrade starts, flash() has said what to do",
               hint_at("flash-started") == "")
     check("no manifest, no hint", install.continuation_hint("/nonexistent/resume.json") is None)
+
+
+def test_boot_env_gate():
+    print("\n[flash stage: OpenWrt must read the boot environment (issue #7)]")
+    import revert
+    check("an empty flash_type is not padded into a part code",
+          release.normalise_flash_type("") == ""
+          and release.normalise_flash_type(" 0x ") == ""
+          and release.normalise_flash_type("0xBE") == "be")
+    ok, why = release.check_nand(None, None, None, flash_type="")
+    check("an empty flash_type is 'not identified', never 0x00",
+          not ok and "not identified" in why and "0x00" not in why, why)
+
+    def runner(answers):
+        def run(cmd):
+            for key, answer in answers.items():
+                if key in cmd:
+                    return answer
+            return 0, ""
+        return run
+
+    def outcome(answers):
+        try:
+            return install.openwrt_flash_type(runner(answers))
+        except install.Abort as e:
+            return e
+
+    check("a readable environment yields its flash_type",
+          outcome({"fw_printenv": (0, "flash_type=be\nfw_rc=0")}) == "be")
+    # What the reporter's RAM system answered, verbatim.
+    reporter = ("Warning: Bad CRC, using default environment\n"
+                '## Error: "flash_type" not defined\nfw_rc=1')
+    config = "/dev/mtd10 0x0 0x10000 0x20000"
+    e = outcome({"fw_printenv": (0, reporter), "fw_env.config": (0, config)})
+    check("issue #7: a bad CRC stops the flash stage and names the config",
+          isinstance(e, install.BootEnvUnreadable) and config in str(e)
+          and "0x00" not in str(e), str(e)[:100])
+    e = outcome({"fw_printenv": (0, "Warning: Bad CRC, using default "
+                                    "environment\nflash_type=11\nfw_rc=0"),
+                 "fw_env.config": (0, config)})
+    check("a bad CRC stops it even when the default environment has a value",
+          isinstance(e, install.BootEnvUnreadable), repr(e))
+    e = outcome({"fw_printenv": (0, '## Error: "flash_type" not defined\n'
+                                    "fw_rc=1")})
+    check("a readable environment without flash_type is refused, not guessed",
+          isinstance(e, install.Abort)
+          and not isinstance(e, install.BootEnvUnreadable)
+          and "no flash_type" in str(e), repr(e))
+    e = outcome({"fw_printenv": (255, "ssh: connect to host h: "
+                                      "Connection refused")})
+    check("a lost link is not read as an answer",
+          isinstance(e, install.Abort) and "could not read" in str(e), repr(e))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "resume.json")
+        install._write_resume_data(path, {"version": 1, "phase": "pivot-complete"})
+        check("a bad CRC offers no resume, which would stop at the same place",
+              install.continuation_hint(
+                  path, error=install.BootEnvUnreadable("x")) is None
+              and install.continuation_hint(path, error=install.Abort("x")))
+
+    mtd = ('mtd18: 02400000 00020000 "ubi_kernel"\n'
+           'mtd19: 05180000 00020000 "rootfs"\n')
+
+    def flash_with(ram_ft, recorded):
+        def fake_ssh(_host, cmd, timeout=120, check=True, passwords=None):
+            if "board_name" in cmd:
+                return 0, devices.RD03V2.openwrt_board
+            if "rootfs_type" in cmd:
+                return 0, "tmpfs"
+            if "/proc/mtd" in cmd:
+                return 0, mtd
+            if "fw_printenv" in cmd:
+                return 0, f"flash_type={ram_ft}\nfw_rc=0"
+            return 0, ""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "resume.json")
+            data = {"version": 1, "phase": "pivot-complete"}
+            if recorded:
+                data["flash_type"] = recorded
+            install._write_resume_data(path, data)
+            with mock.patch.object(install, "wait_for_openwrt",
+                                   return_value=True), \
+                    mock.patch.object(install, "ssh", side_effect=fake_ssh), \
+                    mock.patch.object(install, "neighbour_mac",
+                                      return_value=None), \
+                    mock.patch.object(install, "require_permanent_nand_support",
+                                      side_effect=install.Abort("gate reached")
+                                      ) as gate:
+                try:
+                    install.flash("h", None, {}, True, devices.RD03V2,
+                                  "images", manifest_path=path,
+                                  transport="wired", verify_interface="eth0",
+                                  router_iface="eth0")
+                    return "no abort", gate.call_args
+                except install.Abort as e:
+                    return str(e), gate.call_args
+
+    msg, gate = flash_with("be", "11")
+    check("flash refuses when OpenWrt and stock read different flash_types",
+          "stock reported 0x11" in msg and gate is None, msg[:90])
+    msg, gate = flash_with("11", "11")
+    check("a matching flash_type goes on to the NAND gate",
+          msg == "gate reached" and gate.args[0] == "11", msg[:90])
+    msg, gate = flash_with("11", None)
+    check("a manifest without flash_type is not held against the run",
+          msg == "gate reached", msg[:90])
+
+    def revert_ssh(_host, cmd, timeout=120, check=True, passwords=None):
+        if "fw_printenv" in cmd:
+            return 0, reporter
+        return 0, config
+    with mock.patch.object(install, "ssh", side_effect=revert_ssh), \
+            mock.patch.object(install, "require_permanent_nand_support") as gate:
+        try:
+            revert.require_nand_support("h", None, devices.RD03V2, "images")
+            check("revert refuses a unit whose environment OpenWrt cannot "
+                  "read", False)
+        except install.BootEnvUnreadable:
+            check("revert refuses a unit whose environment OpenWrt cannot "
+                  "read", not gate.called)
 
 
 def _wrote_nothing(box, outcome):
@@ -3457,6 +3578,7 @@ def main():
     test_stock_image()
     test_expected_volume()
     test_install_failure_hint()
+    test_boot_env_gate()
     test_updater()
     test_updater_in_place()
     test_default_routes_fail_closed()

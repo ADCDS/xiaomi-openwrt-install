@@ -405,6 +405,14 @@ refuses unless `rootfs_type` is `tmpfs`; `revert.py` does the pivot for you.
   detached and is **not** read back: it is proven by the installed system
   booting, matching the profile's partition sizes, and reporting the release's
   own revision from `/etc/openwrt_version`.
+- **No `sysupgrade` on a unit whose U-Boot environment OpenWrt cannot read.**
+  The flash stage reads `flash_type` again through `fw_printenv`, and checks
+  that it matches what stock reported in pre-flight. That read is also the
+  only proof that `/etc/fw_env.config` fits this unit. The installed system
+  writes its boot flags through that file, and on a bad CRC `fw_setenv` does
+  not fail: it writes the tool's defaults back over the stock environment. A
+  bad CRC therefore stops the flash, and `revert.py` refuses on the same read
+  ([issue #7](https://github.com/ADCDS/xiaomi-openwrt-install/issues/7)).
 - **Every detached command proves it started.** `start-stop-daemon -S` refuses
   to launch when it matches a running process, and it matches on the `-x`
   binary — pointing it at `/bin/sh` finds the command channel's own shell and
