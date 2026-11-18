@@ -1,10 +1,13 @@
 # Update or restore a router running OpenWrt
 
+**English** · [Русский](maintenance.ru.md) · [简体中文](maintenance.zh-CN.md) · [Português (Brasil)](maintenance.pt-BR.md)
+
 These steps are for the Xiaomi AX3000T RD03v2 running the
 [OpenWrt port](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2).
 See the [README](../README.md#before-starting) for host requirements and
 [hardware validation](technical.md#hardware-validation) for tested scenarios.
-On Windows, use `py -3` in place of `python3`.
+Run the commands on your computer from the repository directory. On Windows,
+use `py -3` in place of `python3`.
 
 ## Update an installed system
 

@@ -8,24 +8,13 @@
 
 > 请阅读 [NOTICE](NOTICE)。只在你自己的路由器上使用本安装器。
 
-安装器的提示和说明会跟随系统语言显示，共支持四种语言：英语、俄语、简体中文和巴西葡萄牙语。也可以用 `--lang en`、`--lang ru`、`--lang zh-CN` 或 `--lang pt-BR` 显式指定。底层诊断信息保持英文：这样更方便把它附在错误报告里。
+## 支持的设备
+
+仅支持小米 AX3000T **RD03v2**（Qualcomm IPQ5018）。已在原厂固件 **2.0.28** 和 **2.0.12** 上验证安装 OpenWrt 和恢复原厂固件。详见[设备配置](devices.py)。
 
 ## 已验证情况
 
-| 场景 | 状态 |
-|---|---|
-| Linux，原厂固件 2.0.28 和 2.0.12 | 主要场景，已在真实路由器上验证 |
-| Windows 10、Wi-Fi、原厂固件 2.0.28、发布版 v1.14 `standard` | 已于 2026 年 10 月 11 日在真实路由器上验证（[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)），基于较早版本的代码 |
-| 虚拟机中的 Windows 11 25H2、网线、原厂固件 2.0.28、发布版 v2.1.2、设置了 root 密码 | 已于 2026 年 11 月 7 日在此版本代码上于真实路由器验证，包括继续被中断的运行 |
-| `updater.py`，从 Linux 通过 Wi-Fi 就地更新并保留设置：v2.1.3 到 v2.1.2，再从 v2.1.2 到 v2.1.3（工具自行传入 `-F`） | 于 2026 年 11 月 12 日用当前代码运行，指定了 `--host`。两次更新均启动成功，并在新版本的修订号上通过验证。尚未在硬件上运行：通过网线就地更新、使用 `--no-keep-settings` 或 `--config-backup`，以及不指定 `--host` 自动寻找路由器 |
-| `updater.py`，从 Linux 通过 RAM 安装器恢复已保存的配置 | 于 2026 年 11 月 7 日运行过一次。所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录 |
-| 从 Windows 运行 `updater.py`，以及通过 RAM 安装器更新仍允许密码登录的路由器 | 自动化测试；**尚未在真实路由器上验证** |
-| Windows、Wi-Fi，此版本代码 | 自动化测试；**尚未在真实路由器上验证** |
-| Windows，恢复原厂固件（`revert.py`） | 自动化测试；**尚未在真实路由器上验证** |
-
-如果从 Windows 安装，请在手边准备一台 Linux 电脑或一个 USB-UART 适配器，以备出现故障。请把结果反馈到 [Issues](https://github.com/ADCDS/xiaomi-openwrt-install/issues)，尤其是成功的情况：这有助于更新上表。
-
-仅支持 Xiaomi AX3000T **RD03v2**（Qualcomm IPQ5018）。安装器会拒绝其他型号。请不要把本说明套用到这些型号上。
+按操作系统、连接方式和固件版本查看[实机测试结果](docs/maintenance.zh-CN.md#已验证情况)。
 
 ## 1. 准备工作
 
@@ -58,35 +47,19 @@ py -3 -m pip install -r requirements-windows.txt
 py -3 install.py --list-interfaces
 ```
 
-`--list-interfaces` 会显示每个适配器的索引、名称和类型。请在下方的命令中用自己的索引或名称替换 `12`。如果名称中包含西里尔字母或空格，用索引会更简单；适配器变动之后，索引也可能改变。
-
-无需 WSL、`sshpass`、`nmcli`，也无需单独安装 OpenSSL。不要禁用所选适配器上的 IPv6：路由器重启后的重新发现要使用 IPv6 link-local 地址。
-
-在虚拟机中，请将网卡以桥接或 macvtap 方式接入。测试时，对 RTL8153 USB 适配器做 USB 直通会在持续传输时卡死，而安装依赖这种持续传输，缺了它就无法完成。
-
-请以普通用户身份运行安装器；只有设置防火墙规则时才需要管理员权限（见[第 6 节](#回调连接未能建立windows-防火墙)）。在 Windows 中请用 `py -3` 代替 `python3`。在命令提示符（cmd）中可以用相同的参数运行 `install.cmd`；在 PowerShell 中则写作：`.\install.cmd`。
+在 Windows 中使用 `py -3` 代替 `python3`。请将示例中的 `12` 换成自己的网卡索引。保持 IPv6 启用，以便安装器在重启后重新找到路由器。
 
 ## 2. 镜像与互联网
 
-Xiaomi 原厂 Wi-Fi 网络可能无法访问互联网，因此请**提前**下载并校验镜像。该命令不会访问路由器：
+默认使用带 NSS 硬件加速的 [RD03v2 移植版](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2)的最新正式版本。最后一个不带 NSS 的 `standard` 版本是 v1.14。
+
+请在有互联网连接时使用 `--dry-run` 下载并校验镜像。使用 `--offline` 时，需用 `--release TAG` 指定版本标签，并提前缓存适合所选连接方式的镜像。详见[镜像校验说明（英文）](docs/technical.md#verifying-openwrt-releases)。
+
+以下 Windows 示例下载 Wi-Fi 所需的镜像。如果要校验有线连接使用的镜像，请将 `--transport wifi` 换为 `--transport wired`。
 
 ```powershell
 py -3 install.py --transport wifi --dry-run
 ```
-
-在 Linux 中命令相同：`python3 install.py --transport wifi --dry-run`。若通过网线安装，请去掉 `--transport wifi`。
-
-默认会选择带 NSS 硬件加速的 [RD03v2 移植版](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2)的最新发布版。输出中会出现 `selected ... from release vX.Y.Z` 这样一行：请记住这个标签。要在没有互联网的情况下工作，需要显式指定标签并使用已下载的镜像：
-
-```powershell
-py -3 install.py --release vX.Y.Z --transport wifi --offline --dry-run
-```
-
-不带 NSS 的构建只存在于 v1.x 系列的最新发布版中：`py -3 install.py standard --release v1.14`。
-
-`--root-password 密码` 可在不使用 `--configure` 交互提问的情况下设置新系统的 root 密码；`--attacker 地址` 用于在多网卡主机上自动选择会挑错回调地址时手动指定。
-
-自动化时可以把机密通过 `RD03V2_ROOT_PASSWORD` 和 `RD03V2_WIFI_KEY` 传入，这样它们不会出现在进程参数列表中。仅当对应参数未给出时，变量才会在启动时被消费：两者都给出时以参数为准，变量仍留在环境中。网页向导正是这样传递的。
 
 ## 3. 复位与连接
 
@@ -108,43 +81,15 @@ python3 install.py
 py -3 install.py --interface 12 --configure
 ```
 
-没有互联网时，请加上第 2 节中的标签：`--release vX.Y.Z --offline`。
+如果最终通过 Wi-Fi 校验，请设置永久网络的 SSID、由 8 至 63 个可打印 ASCII 字符组成的密码，以及实际使用地的国家或地区代码。若要保持 Wi-Fi 关闭，可用 `--verify-interface` 指定有线网卡进行校验。root 密码单独设置。
 
-安装器会自动判断连接方式；也可以用 `--transport wired` 或 `--transport wifi` 覆盖该判断，接口则通过 `--interface` 指定。每次进行不可逆写入之前，它都会要求确认。确认时必须用**拉丁字母**输入 `YES`。
+如需通过环境变量传递密码，请参阅[首次启动配置（英文）](docs/technical.md#first-boot-configuration)。
 
-使用 `--configure` 时会询问以下内容（通过 Wi-Fi 安装时，即使不加该参数这些也是必填项，root 密码除外）：
-
-| 问题 | 应输入的内容 |
-|---|---|
-| root 密码 | OpenWrt 新的管理员密码。最好不要留空。 |
-| Wi-Fi 网络名称（SSID） | 永久网络的名称，例如 `Xiaomi`。 |
-| Wi-Fi 密码 | 8–63 个可打印 ASCII 字符：拉丁字母、数字和普通符号。不要使用西里尔字母和表情符号。 |
-| 国家/地区代码 | 实际使用所在的国家/地区，例如 `RU`。 |
-
-输入密码时不会回显。请把它们记下来：Wi-Fi 密码与 root 密码互不相关，而且安装器不会输出 Wi-Fi 密码。
-
-如果希望永久 Wi-Fi 保持关闭，请通过网线完成最终校验：
-
-```sh
-python3 install.py --transport wifi --interface WIFI_INTERFACE \
-    --verify-interface ETHERNET_INTERFACE
-```
+提示默认使用系统语言。可用 `--lang zh-CN` 选择简体中文。底层诊断信息使用英文。
 
 ## 5. 重启：三个不同的 Wi-Fi 网络
 
-通过 Wi-Fi 安装时，不要关闭终端窗口，也不要再启动一个安装器实例。路由器会两次更换网络，并且需要手动连接到新网络。
-
-1. **Xiaomi 原厂网络。** 初始配置完成后路由器会重启，安装器会输出 `waiting up to 300s for tcp/19553`。这属于正常等待。如果电脑断开了连接，请重新连接到原厂网络。
-2. **临时 RAM 系统。** 原厂网络消失后，请连接到：
-
-   ```text
-   SSID:   OpenWrt-RD03v2-Installer
-   Password: rd03v2install
-   ```
-
-3. **永久 OpenWrt。** 写入完成后临时网络会消失。请连接到安装时指定的网络。安装器最多等待路由器 600 秒，并校验主板、永久 overlay 和分区大小。
-
-最后应出现 `[+] OpenWrt 已安装到 NAND。`
+请保持终端开启。按安装器的提示从原厂 Wi-Fi 切换到临时网络，写入完成后再连接到自己设置的永久网络。
 
 如果运行在预检之后被中断，安装器会输出用于继续的命令。在此之前的失败不会输出：此时尚未写入固件，只要一次性触发器未被消耗，从头开始是安全的。仅凭日志无法判断它是否已被消耗；如果已经消耗，漏洞利用会被拒绝，只有恢复出厂设置才能重新获得。断开连接后，路由器最多可能需要 30 分钟才能再次连上。
 
@@ -191,38 +136,19 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 
 ### 固件写入已启动，但出现 `permanent OpenWrt was not verified`
 
-出现 `sysupgrade 已启动` 的提示，意味着不能重复写入。没有找到路由器本身并不能证明失败。请连接到永久网络，或用网线连接到 LAN 口，并**只执行校验**，同时指定本次运行自己的 `resume.json`（路径由安装器输出）：
-
-```powershell
-py -3 install.py --verify-only ".\install-DATE-TIME\resume.json" --verify-interface 12
-```
-
-不要使用其他路由器或其他安装过程的清单文件。
+如果已经开始写入，请使用本次运行的 `resume.json` [仅执行校验](docs/maintenance.zh-CN.md#写入后校验)。
 
 ### 忘记了永久 Wi-Fi 网络的密码
 
-用网线连接到 **LAN 口**，自动获取地址，然后打开 `http://192.168.1.1`。在 LuCI 中依次进入 **Network → Wireless → Edit → Wireless Security**，设置新密码，然后点击 **Save & Apply**。无需恢复出厂设置。
+用网线连接路由器后，可以[在 LuCI 中修改 Wi-Fi 密码](docs/maintenance.zh-CN.md#忘记了永久-wi-fi-网络的密码)。
 
 ## 7. 安装之后
 
-- 如果日志中出现 `root password=unset`，请设置管理员密码：**System → Administration**。
-- 检查国家/地区设置和 Wi-Fi 安全设置。
-- 保存配置：**System → Backup / Flash Firmware → Generate archive**。
-- 把 `install-*` 文件夹保存在私密位置：里面有分区备份、`firstboot.tar.gz`，以及包含密码、会话密钥和设备数据的 `resume.json`。在删除敏感信息之前，不要公开这些文件和完整日志。在 Windows 中，权限是从文件夹继承的，而不是通过 `chmod` 设置，因此请选择没有共享访问权限的文件夹。
+如果管理员密码为空，请设置密码。分区备份和 `resume.json` 应保存在私密目录中。详见[安装后的设置与备份](docs/maintenance.zh-CN.md#安装之后)。
 
 ## 更新已安装的系统
 
-```sh
-python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
-```
-
-把已安装的 OpenWrt 更新到该移植版的最新版本，并像 `sysupgrade` 一样保留设置。`--release TAG` 选择具体版本，`--no-keep-settings` 执行全新安装，`--dry-run` 只下载并校验镜像。在 v2 版本之间，这就是在已安装系统上就地执行的普通 `sysupgrade`，与其他 OpenWrt 设备一样。v2.0.0 至 v2.1.2 会（错误地）拒绝就地升级；如果这是 `sysupgrade -T` 唯一的异议，更新程序会传入 `-F`，其他任何异议都会中止更新。从 v1.x 更新、退回 v1.x，或使用 `--via-ram-installer` 时，更新改为通过 RAM 安装器进行，与[固件的手动步骤](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)相同。写入之前，配置备份会保存到私密的 `update-*` 文件夹。
-
-这里没有 A/B 冗余：已安装的内核只有一份，更新会替换它。写入中断时的保障是 UART 或原厂 TFTP 恢复。走 RAM 安装器路线时，已安装的内核会在进入 RAM 时被覆盖：如果之后运行被中断，请连接到 RAM 安装器，并带上 `--config-backup` 和之前保存的备份重新执行命令。登录采用密码方式，因此仅允许密钥登录（`PasswordAuth off`）的路由器会在开始写入之前被拒绝。它在 Windows 上与 Linux 一样可用，但尚未从 Windows 对真实路由器执行过更新；哪些场景尚未验证见上表。
-
-常用参数：`--verify-interface 接口` 选择最终检查所用的接口；只有在最终检查走 Wi-Fi 时，与 `--no-keep-settings` 一起使用才必须提供（有线更新会默认使用面向路由器的接口）；`--wifi-ssid 名称` 指定从 RAM 安装器继续时重新连接的网络；`--offline` 只使用已校验的缓存；`--yes` 预先确认所有提示；`--device`、`--images` 和 `--outdir` 分别指定配置、镜像缓存和输出目录；`--via-ram-installer` 让 v2 版本之间的更新也走 RAM 安装器，这会重新格式化两个 UBI 分区；`--recover-stale-lock` 在你检查之后清除被中断的切换状态。
-
-到目前为止，更新在真实路由器上**就地运行过两次**（2026 年 11 月 12 日，从 Linux 通过 Wi-Fi）：先从 v2.1.3 到 v2.1.2，再从 v2.1.2 到 v2.1.3，后者由工具自行传入 `-F`；两次都保留了设置，并在新版本的修订号上通过验证。**通过 RAM 安装器运行过一次**（2026 年 11 月 7 日，从 Linux 通过网线，v2.1.2）：所有写入阶段均成功；最终密码登录未能完成，因为恢复的配置关闭了密码登录——工具会事先提示，结果改用 SSH 密钥验证。尚未从 Windows 执行过任何更新。请在手边备好 UART 适配器，并反馈结果。
+`updater.py` 默认保留现有设置。详见[更新 OpenWrt 以及继续中断的更新](docs/maintenance.zh-CN.md#更新已安装的系统)。
 
 ## 网页向导
 
@@ -234,37 +160,11 @@ python3 gui/app.py
 
 ## 恢复原厂固件
 
-下载官方原厂镜像，其 SHA-256 必须已在设备配置文件中获得批准（[列表](docs/technical.md#getting-the-images)）。然后在已安装的 OpenWrt 中执行：
-
-```sh
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface IFACE
-```
-
-在 Windows 中：`py -3 revert.py ...`，这条路径尚未在真实路由器上验证。其他参数：`--transport wired`、`--root-password 'YOUR_OPENWRT_PASSWORD'`、`--dry-run`。确认擦除时必须用拉丁字母输入 `RESTORE`。
-
-`revert.py` 会校验原厂镜像，下载 RAM 系统镜像，把路由器切换到 RAM，恢复原厂固件，并等待原厂系统响应，报告其硬件、ROM 以及设置向导是否在等待。恢复请使用它，而不要重新执行固件写入：执行 `sysupgrade` 之后，原厂的 A/B 备份已经被擦除（见 [NOTICE](NOTICE)）。
-
-## 支持的设备
-
-| 配置 | 硬件 | 安装来源 | 恢复原厂固件 |
-|---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2，Qualcomm IPQ5018 | 原厂 2.0.28 与 2.0.12，已在真实路由器上验证 | 2.0.28 与 2.0.12，已在真实路由器上验证 |
+请使用 `revert.py` 和适用于本机型的已批准原厂镜像。详见[恢复原厂固件的步骤](docs/maintenance.zh-CN.md#恢复原厂固件)。
 
 ## 其他工具
 
-| 命令 | 用途 |
-|---|---|
-| `python3 release.py --device rd03v2` | 显示最新发布版以及所需的文件。 |
-| `python3 release.py --device rd03v2 --download --wifi --dest images` | 下载并校验镜像。 |
-| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | 重新连接到被中断运行的回调通道。 |
-| `python3 probe.py --device rd03v2` | 采集硬件与闪存布局信息，不写入原始固件分区。会初始化或重启原厂固件、修改其状态，并消耗一次性触发器。 |
-| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover 接口` | 从已启动的 RAM 系统执行底层原厂固件写入。 |
-| `python3 ubiparse.py /path/to/ubi-dump.bin` | 离线解析 UBI 转储。 |
-| `python3 selftest.py` | 无需路由器的检查（Linux）。在 Windows 中：`py -3 -m unittest test_hostnet test_windows test_i18n`。 |
-| `python3 updater.py --dry-run` | 下载并校验更新的镜像，不接触路由器。 |
-| `python3 -m unittest test_hostnet test_windows test_i18n` | Windows 与语言检查；需要 `requirements-windows.txt`。 |
-
-`probe.py` 未在 Windows 上验证；它的自动 Wi-Fi 重连只在 Linux 上有效。被中断的运行、各个阶段以及恢复流程在[技术文档](docs/technical.md)中有说明（英文）。
+镜像检查和本地测试命令见[诊断与测试（英文）](docs/technical.md#diagnostics-and-tests)。
 
 ## 许可证
 

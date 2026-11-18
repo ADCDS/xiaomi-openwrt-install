@@ -14,32 +14,13 @@ permanente.
 
 > Leia o [NOTICE](NOTICE). Use o instalador apenas no seu próprio roteador.
 
-As perguntas e instruções do instalador seguem o idioma do sistema. É possível
-escolher explicitamente entre os quatro idiomas disponíveis — inglês, russo,
-chinês simplificado e português do Brasil — com `--lang en`, `--lang ru`,
-`--lang zh-CN` ou `--lang pt-BR`. O diagnóstico de baixo nível continua em inglês:
-assim fica mais fácil anexá-lo a um relato de erro.
+## Dispositivo suportado
+
+Somente o Xiaomi AX3000T **RD03v2** (Qualcomm IPQ5018) é compatível. A instalação e o retorno ao firmware de fábrica foram testados com as versões **2.0.28** e **2.0.12**. Veja o [perfil do dispositivo](devices.py).
 
 ## O que foi verificado
 
-| Cenário | Status |
-|---|---|
-| Linux, firmwares de fábrica 2.0.28 e 2.0.12 | Cenário principal, verificado em roteador real |
-| Windows 10, Wi-Fi, firmware de fábrica 2.0.28, release v1.14 `standard` | Verificado em roteador real em 11 de outubro de 2026 ([alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install)), em uma versão anterior do código |
-| Windows 11 25H2 em máquina virtual, cabo, firmware de fábrica 2.0.28, release v2.1.2, com senha de root | Verificado em roteador real em 7 de novembro de 2026 nesta versão do código, incluindo a retomada de uma execução interrompida |
-| `updater.py` no Linux, no lugar, por Wi-Fi, mantendo as configurações: v2.1.3 para v2.1.2 e depois v2.1.2 para v2.1.3 (em que passa `-F` sozinho) | Executado em 12 de novembro de 2026, com este código, com `--host`. As duas atualizações inicializaram e foram verificadas na revisão do novo release. Ainda não executado em hardware: no lugar por cabo, com `--no-keep-settings` ou `--config-backup`, ou encontrando o roteador sem `--host` |
-| `updater.py` no Linux pelo instalador em RAM, restaurando uma configuração salva | Executado uma vez em 7 de novembro de 2026. Todas as etapas de gravação funcionaram; o login final por senha não completou, porque a configuração restaurada o desativa |
-| `updater.py` a partir do Windows, ou pelo instalador em RAM contra um roteador que mantém login por senha | Testes automatizados; **ainda não verificado em roteador real** |
-| Windows, Wi-Fi nesta versão do código | Testes automatizados; **ainda não verificado em roteador real** |
-| Windows, retorno ao firmware de fábrica (`revert.py`) | Testes automatizados; **ainda não verificado em roteador real** |
-
-Se você for instalar pelo Windows, mantenha por perto um computador com Linux ou
-um adaptador USB-UART, para o caso de uma falha. Relate o resultado em
-[Issues](https://github.com/ADCDS/xiaomi-openwrt-install/issues), principalmente
-se tudo tiver dado certo: isso ajuda a manter a tabela atualizada.
-
-Somente o Xiaomi AX3000T **RD03v2** (Qualcomm IPQ5018) é suportado. O instalador
-recusa outros modelos. Não aplique estas instruções a eles.
+Consulte os [resultados por sistema, conexão e versão do firmware](docs/maintenance.pt-BR.md#o-que-foi-verificado).
 
 ## 1. Preparação
 
@@ -80,60 +61,19 @@ py -3 -m pip install -r requirements-windows.txt
 py -3 install.py --list-interfaces
 ```
 
-O `--list-interfaces` mostra o índice, o nome e o tipo de cada adaptador. Use o
-seu índice ou nome no lugar de `12` nos comandos abaixo. Se o nome tiver
-caracteres cirílicos ou espaços, é mais simples usar o índice; ele pode mudar
-depois que você alterar os adaptadores.
-
-WSL, `sshpass`, `nmcli` e a instalação separada do OpenSSL não são necessários.
-Não desative o IPv6 no adaptador escolhido: a redescoberta do roteador após a
-reinicialização usa o IPv6 link-local.
-
-Em máquina virtual, conecte a placa de rede como bridge ou macvtap. Durante os
-testes, o passthrough USB do adaptador RTL8153 travava em transmissões longas, e
-sem isso a instalação não avança.
-
-Execute o instalador como usuário comum; privilégios de administrador só são
-necessários para a regra de firewall (veja a
-[seção 6](#a-conexão-de-retorno-não-chega-firewall-do-windows)). No Windows, use
-`py -3` no lugar de `python3`. No Prompt de Comando (cmd) você pode usar
-`install.cmd` com os mesmos parâmetros; no PowerShell: `.\install.cmd`.
+Use `py -3` no lugar de `python3`. Nos exemplos, substitua `12` pelo índice do seu adaptador. Mantenha o IPv6 ativado para que o instalador encontre o roteador após a reinicialização.
 
 ## 2. Imagens e Internet
 
-A rede Wi-Fi de fábrica da Xiaomi pode não dar acesso à Internet, então baixe e
-verifique as imagens **com antecedência**. O comando não se comunica com o
-roteador:
+O instalador usa por padrão a versão publicada mais recente do [OpenWrt para RD03v2](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2), com aceleração NSS. O último build `standard` sem NSS é o v1.14.
+
+Antes de desconectar a Internet, baixe e verifique as imagens com `--dry-run`. Para usar `--offline`, informe a tag com `--release TAG` e prepare o cache para o tipo de conexão escolhido. Veja a [verificação de imagens (em inglês)](docs/technical.md#verifying-openwrt-releases).
+
+O exemplo abaixo prepara as imagens de Wi-Fi no Windows. Para verificar as imagens de Ethernet, troque `--transport wifi` por `--transport wired`.
 
 ```powershell
 py -3 install.py --transport wifi --dry-run
 ```
-
-No Linux é a mesma coisa: `python3 install.py --transport wifi --dry-run`. Para
-instalar por cabo, remova `--transport wifi`.
-
-Por padrão é escolhido o último release publicado do
-[port para o RD03v2](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2), com
-aceleração de hardware NSS. A saída traz uma linha
-`selected ... from release vX.Y.Z`: anote essa tag. Para operar sem Internet, é
-preciso de uma tag explícita e das imagens já baixadas:
-
-```powershell
-py -3 install.py --release vX.Y.Z --transport wifi --offline --dry-run
-```
-
-A build sem NSS existe apenas no último release da linha v1.x:
-`py -3 install.py standard --release v1.14`.
-
-`--root-password SENHA` define a senha de root do sistema instalado sem as perguntas
-interativas de `--configure`, e `--attacker ENDEREÇO` fixa o endereço de callback
-quando a escolha automática pegaria o errado em um host com várias interfaces.
-
-Para automação, os segredos podem vir por `RD03V2_ROOT_PASSWORD` e
-`RD03V2_WIFI_KEY`, para não aparecerem na lista de argumentos do processo. A
-variável é consumida na inicialização quando o argumento correspondente não foi
-dado; com os dois presentes o argumento vence e a variável permanece no ambiente.
-É assim que o assistente web os passa.
 
 ## 3. Reset e conexão
 
@@ -159,58 +99,15 @@ No Windows, informando o seu adaptador:
 py -3 install.py --interface 12 --configure
 ```
 
-Sem Internet, acrescente a tag da seção 2: `--release vX.Y.Z --offline`.
+Se a verificação final for por Wi-Fi, informe o SSID da rede permanente, uma senha de 8 a 63 caracteres ASCII imprimíveis e o código do país de uso. Para deixar o Wi-Fi desativado, faça a verificação por cabo com `--verify-interface`. A senha de root é independente da senha do Wi-Fi.
 
-O instalador detecta sozinho a forma de conexão; você pode forçá-la com
-`--transport wired` ou `--transport wifi`, e escolher a interface com
-`--interface`. Antes de cada gravação irreversível ele pede confirmação. A
-resposta deve ser a palavra `YES`, **em letras latinas**.
+Para fornecer senhas por variáveis de ambiente, consulte a [configuração do primeiro boot (em inglês)](docs/technical.md#first-boot-configuration).
 
-Perguntas feitas com `--configure` (na instalação por Wi-Fi elas são obrigatórias
-mesmo sem esse parâmetro, exceto a senha de root):
-
-| Pergunta | O que informar |
-|---|---|
-| Senha de root | Nova senha de administrador do OpenWrt. Melhor não deixar em branco. |
-| Nome da rede Wi-Fi (SSID) | Nome da rede permanente, por exemplo `Xiaomi`. |
-| Senha do Wi-Fi | De 8 a 63 caracteres ASCII imprimíveis: letras latinas, dígitos, sinais comuns. Sem acentos, sem cirílico e sem emojis. |
-| Código do país | País de uso real, por exemplo `BR`. |
-
-As senhas não aparecem enquanto você digita. Guarde-as: a senha do Wi-Fi e a
-senha de root não estão ligadas uma à outra, e o instalador não exibe a senha do
-Wi-Fi.
-
-Para deixar o Wi-Fi permanente desativado, faça a verificação final por cabo:
-
-```sh
-python3 install.py --transport wifi --interface WIFI_INTERFACE \
-    --verify-interface ETHERNET_INTERFACE
-```
+O instalador segue o idioma do sistema. Use `--lang pt-BR` para escolher português do Brasil. As mensagens de diagnóstico são exibidas em inglês.
 
 ## 5. Reinicializações: três redes Wi-Fi diferentes
 
-Na instalação por Wi-Fi, não feche a janela do terminal nem inicie uma segunda
-cópia do instalador. O roteador troca de rede duas vezes, e é preciso conectar-se
-manualmente às novas redes.
-
-1. **Rede de fábrica da Xiaomi.** Depois da configuração inicial o roteador
-   reinicia, e o instalador escreve `waiting up to 300s for tcp/19553`. Essa
-   espera é normal. Se o computador se desconectar, conecte-se de novo à rede de
-   fábrica.
-2. **Sistema temporário em RAM.** Quando a rede de fábrica desaparecer,
-   conecte-se a:
-
-   ```text
-   SSID:   OpenWrt-RD03v2-Installer
-   Password: rd03v2install
-   ```
-
-3. **OpenWrt permanente.** Depois da gravação a rede temporária desaparece.
-   Conecte-se à rede definida na instalação. O instalador espera o roteador por
-   até 600 segundos e verifica a placa, o overlay permanente e os tamanhos das
-   partições.
-
-No final deve aparecer `[+] O OpenWrt está instalado na NAND.`
+Mantenha o terminal aberto. Quando solicitado, passe da rede de fábrica para a rede temporária indicada pelo instalador e, após a gravação, para a rede permanente que você configurou.
 
 Se a execução for interrompida depois da pré-verificação, o instalador imprime o
 comando para continuar. Antes disso ele não imprime: nenhum firmware foi gravado
@@ -281,83 +178,19 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 
 ### Gravação iniciada, mas `permanent OpenWrt was not verified`
 
-A mensagem `sysupgrade já foi iniciado` significa que a gravação não pode ser
-repetida. O fato de o roteador não ter sido encontrado, por si só, não prova que
-houve falha. Conecte-se à rede permanente, ou à porta LAN por cabo, e execute
-**apenas a verificação**, informando o `resume.json` exatamente desta execução (o
-caminho é impresso pelo instalador):
-
-```powershell
-py -3 install.py --verify-only ".\install-DATE-TIME\resume.json" --verify-interface 12
-```
-
-Não use o manifesto de outro roteador ou de outra instalação.
+Se a gravação começou, use o `resume.json` desta execução para fazer [apenas a verificação](docs/maintenance.pt-BR.md#verificação-após-a-gravação).
 
 ### Esqueceu a senha da rede Wi-Fi permanente
 
-Conecte-se à **porta LAN** por cabo, obtenha um endereço automaticamente e abra
-`http://192.168.1.1`. No LuCI: **Network → Wireless → Edit → Wireless Security**,
-defina uma nova senha e depois **Save & Apply**. Não é preciso reset de fábrica.
+Você pode [alterar a senha do Wi-Fi pelo LuCI](docs/maintenance.pt-BR.md#esqueceu-a-senha-da-rede-wi-fi-permanente) usando um cabo de rede.
 
 ## 7. Depois da instalação
 
-- Se o log mostrou `root password=unset`, defina a senha de administrador:
-  **System → Administration**.
-- Confira o país e as configurações de segurança do Wi-Fi.
-- Salve as configurações: **System → Backup / Flash Firmware → Generate archive**.
-- Guarde a pasta `install-*` em um local privado: ela contém backups de partições,
-  o `firstboot.tar.gz` e o `resume.json` com senhas, segredos de sessão e dados do
-  dispositivo. Não publique esses arquivos nem os logs completos sem remover os
-  segredos. No Windows, as permissões são herdadas da pasta e não definidas com
-  `chmod`, então escolha uma pasta sem acesso compartilhado.
+Defina uma senha de administrador se ela estiver em branco. Guarde os backups e o `resume.json` em uma pasta privada. Veja os [cuidados depois da instalação](docs/maintenance.pt-BR.md#depois-da-instalação).
 
 ## Atualização de um sistema instalado
 
-```sh
-python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
-```
-
-Atualiza um OpenWrt instalado para o último release do port, mantendo as
-configurações, como o `sysupgrade`. `--release TAG` escolhe um release específico,
-`--no-keep-settings` faz uma instalação limpa, e `--dry-run` apenas baixa e
-verifica as imagens. Entre releases v2 é um `sysupgrade` comum, no lugar, a partir do
-sistema instalado, como em qualquer outro aparelho com OpenWrt. As v2.0.0 a v2.1.2
-recusam isso (por engano); quando essa recusa é a única objeção do `sysupgrade -T`, o
-atualizador passa `-F`, e qualquer outra objeção interrompe a atualização. A partir da
-v1.x, na volta para a v1.x ou com `--via-ram-installer`, a atualização passa pelo
-instalador em RAM, como no [procedimento manual do firmware](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md).
-Antes da gravação, uma cópia de segurança das configurações é salva em uma pasta
-privada `update-*`.
-
-Aqui não há reserva A/B: existe um único kernel instalado, e a atualização o
-substitui. O seguro para uma gravação interrompida é o UART ou a recuperação TFTP de
-fábrica. No caminho pelo instalador em RAM, o kernel instalado é sobrescrito na
-entrada da RAM: se essa execução for interrompida depois disso, conecte-se ao
-instalador em RAM e repita o comando com `--config-backup` e a cópia salva. O login é
-feito por senha, então um roteador com acesso somente por chaves (`PasswordAuth off`)
-será recusado antes do início da gravação. No Windows funciona como no Linux, mas
-nunca houve uma atualização a partir do Windows contra um roteador real; o que ainda
-não foi verificado está na tabela acima.
-
-Opções úteis: `--verify-interface INTERFACE` escolhe a interface da verificação final e só é
-obrigatório com `--no-keep-settings` quando essa verificação for por Wi-Fi (uma
-atualização por cabo usa a interface voltada ao roteador); `--wifi-ssid
-NOME` indica a rede para reconectar quando a execução continua a partir do instalador
-em RAM; `--offline` usa apenas o cache verificado; `--yes` responde às confirmações
-antecipadamente; `--device`, `--images` e `--outdir` escolhem o perfil, o cache de
-imagens e a pasta de saída; `--via-ram-installer` usa o instalador em RAM também
-entre releases v2, o que reformata as duas partições UBI; `--recover-stale-lock` limpa um estado de transição
-interrompido depois que você o inspecionar.
-
-Em roteador real, a atualização rodou **duas vezes no lugar**, a partir do Linux por
-Wi-Fi em 12 de novembro de 2026: v2.1.3 para v2.1.2 e depois v2.1.2 para v2.1.3, em
-que passou `-F` sozinha. As duas mantiveram as configurações e foram verificadas na
-revisão do novo release. **Pelo instalador em RAM, uma vez** (a partir do Linux, por
-cabo, v2.1.2, em 7 de novembro de 2026): todas as etapas de gravação funcionaram; o
-login final por senha não completou, porque a configuração restaurada o desativa — a
-ferramenta avisa disso antes, e o resultado foi verificado com uma chave SSH. Nenhuma
-atualização a partir do Windows foi feita. Mantenha um adaptador UART à mão e relate
-o resultado.
+O `updater.py` mantém as configurações por padrão. Veja como [atualizar o OpenWrt e retomar uma atualização interrompida](docs/maintenance.pt-BR.md#atualização-de-um-sistema-instalado).
 
 ## Assistente web
 
@@ -372,49 +205,11 @@ Brasil: simulação, acompanhamento de etapas e log em tempo real. Como o
 
 ## Retorno ao firmware de fábrica
 
-Baixe uma imagem oficial de fábrica cujo SHA-256 esteja aprovado no perfil do
-dispositivo ([lista](docs/technical.md#getting-the-images)). Depois, a partir do
-OpenWrt instalado:
-
-```sh
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin --interface IFACE
-```
-
-No Windows: `py -3 revert.py ...`; esse caminho ainda não foi testado em roteador
-real. Parâmetros adicionais: `--transport wired`, `--root-password 'YOUR_OPENWRT_PASSWORD'`,
-`--dry-run`. A confirmação do apagamento deve ser digitada com a palavra `RESTORE`,
-em letras latinas.
-
-O `revert.py` verifica a imagem de fábrica, baixa as imagens do sistema em RAM,
-coloca o roteador em RAM, restaura o firmware de fábrica e aguarda a resposta do sistema de
-fábrica, informando o hardware, a ROM e se o assistente de configuração está
-aguardando. Use-o para o retorno, e não uma nova execução da
-gravação: depois do `sysupgrade` o backup A/B de fábrica já foi apagado (veja o
-[NOTICE](NOTICE)).
-
-## Dispositivo suportado
-
-| Perfil | Hardware | Origem da instalação | Retorno ao firmware de fábrica |
-|---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Firmware de fábrica 2.0.28 e 2.0.12, verificado em roteador real | 2.0.28 e 2.0.12, verificado em roteador real |
+Use o `revert.py` com uma imagem oficial aprovada para o seu modelo. Veja como [restaurar o firmware de fábrica](docs/maintenance.pt-BR.md#retorno-ao-firmware-de-fábrica).
 
 ## Ferramentas adicionais
 
-| Comando | Finalidade |
-|---|---|
-| `python3 release.py --device rd03v2` | Mostrar o último release e os arquivos necessários. |
-| `python3 release.py --device rd03v2 --download --wifi --dest images` | Baixar e verificar as imagens. |
-| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reconectar ao canal de retorno de uma execução interrompida. |
-| `python3 probe.py --device rd03v2` | Coletar evidências de hardware e do layout do flash sem gravar nas partições de firmware. Inicializa ou reinicia o firmware de fábrica, altera o estado dele e consome o gatilho de uso único. |
-| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE` | Executar o gravador de fábrica de baixo nível a partir de um sistema em RAM já iniciado. |
-| `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspecionar um dump UBI offline. |
-| `python3 selftest.py` | Verificações sem roteador (Linux). No Windows: `py -3 -m unittest test_hostnet test_windows test_i18n`. |
-| `python3 updater.py --dry-run` | Baixar e verificar as imagens de uma atualização sem contatar o roteador. |
-| `python3 -m unittest test_hostnet test_windows test_i18n` | Verificações de Windows e de idioma; precisa de `requirements-windows.txt`. |
-
-O `probe.py` não foi testado no Windows; a reconexão automática ao Wi-Fi dele só
-funciona no Linux. Execuções interrompidas, etapas individuais e recuperação estão
-descritas na [documentação técnica](docs/technical.md) (em inglês).
+Consulte os [comandos de diagnóstico e teste (em inglês)](docs/technical.md#diagnostics-and-tests).
 
 ## Licença
 
