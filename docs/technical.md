@@ -11,7 +11,7 @@ adapter or soldering — and put pristine stock back the same way.
 
 | profile | hardware | implementation status |
 |---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2 (Qualcomm IPQ5018) | V1 → V2 root, RAM pivot, NAND install, and restore; see the README and approved-image table for validation status |
+| `rd03v2` | Xiaomi AX3000T RD03v2 (Qualcomm IPQ5018) | V1 → V2 root, RAM pivot, NAND install, and restore; see [hardware validation](#hardware-validation) and the [approved images](#getting-the-images) |
 
 Only `rd03v2` is enabled. The mesh vulnerabilities exist in firmware shared by
 other Xiaomi models, but that does not establish their flash layout, boot
@@ -36,6 +36,21 @@ with `resume.json` reaching `phase: flash-complete` and the installed revision
 matching the release. The return path was run on earlier code; the pivot it now
 uses was rewritten several times afterwards, so treat `revert.py` as
 unit-tested but not re-verified on hardware in its current form.
+
+## Hardware validation
+
+The Windows port is by [alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install).
+
+| Scenario | Result |
+|---|---|
+| Windows 10 over Wi-Fi, stock 2.0.28 to v1.14 standard | Installed on 2026-10-11 (alexsys87), on older code. |
+| Windows 11 25H2 VM over Ethernet, stock 2.0.28 to v2.1.2 with a root password | Installed on 2026-11-07, including continuing an interrupted run. |
+| In-place update from Linux over Wi-Fi, keeping settings, with `--host` | On 2026-11-12, v2.1.3 → v2.1.2 → v2.1.3. The second update used the updater's automatic `-F`. Both booted and were verified on the target revision. In-place Ethernet updates, `--no-keep-settings`, `--config-backup`, and discovery without `--host` still need hardware testing. |
+| Update through the RAM installer from Linux over Ethernet, restoring a saved configuration | Updated to v2.1.2 with `--config-backup` on 2026-11-07. Every write stage completed. The restored configuration disables password login, so the final login was verified with an SSH key. |
+| Updates from Windows, or RAM-installer updates that retain password login | Automated tests only. |
+| Wi-Fi installation and return to stock with the current code | Automated tests only. The older Wi-Fi installation is listed above. |
+
+Keep a Linux machine or a UART adapter within reach, and please report how it went.
 
 ## Prerequisites
 
@@ -105,6 +120,22 @@ sha256sum miwifi_rd03v2_firmware_31bf9_2.0.28.bin
 
 Choose the newest profile-approved stock image that is not older than the
 version the unit last ran. The bootloader's anti-rollback rejects older images.
+
+### Verifying OpenWrt releases
+
+Run a dry run to download and fully verify the release images without
+contacting a router.
+
+```sh
+python3 install.py --dry-run
+python3 install.py --release TAG --transport wifi --dry-run
+```
+
+`--release latest` selects the default, the newest published release without
+drafts or prereleases. The resume manifest records the resolved tag and image
+hashes so an interrupted run can keep using the same release. An explicit tag
+can use its verified cache if GitHub is unavailable. The `latest` selection
+requires GitHub access. Ethernet and Wi-Fi use different image sets in the cache.
 
 ## Two commands
 
@@ -187,6 +218,18 @@ RD03V2_IMAGES="images/$RELEASE_TAG" python3 selftest.py
 XIAOMI_STOCK_IMAGE=/path/to/approved-stock-image.bin python3 selftest.py
 ```
 
+### Diagnostics and tests
+
+| Command | Purpose |
+|---|---|
+| `python3 release.py --device rd03v2` | Inspect the latest release and its required assets. |
+| `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspect a raw UBI dump offline. |
+| `python3 updater.py --dry-run` | Download and verify an update's images without contacting a router. |
+| `python3 -m unittest test_hostnet test_windows test_i18n` | Run the Windows and language checks. Install dependencies from `requirements-windows.txt`. |
+
+`probe.py` has not been tested on Windows. Its automatic Wi-Fi reconnect
+requires Linux.
+
 ## Interrupted runs
 
 Each real (non-dry) `install.py` or `updater.py` run writes a `resume.json` in
@@ -227,6 +270,8 @@ their manifest. Offline operation requires a concrete `--release TAG` (or
 `--tag TAG` in `release.py`), unless the install's resume manifest supplies it.
 An API failure can fall back to a verified cache only for a concrete tag;
 `latest` is never inferred from local cache directories.
+
+### Verify after a disconnect
 
 As soon as the RAM system reports that the detached sysupgrade launcher has
 started, the host atomically records `flash-started` before allowing the write
@@ -331,6 +376,13 @@ final verification interface is Wi-Fi refuses to begin until it has a valid
 permanent SSID, WPA2 passphrase, and country code; noninteractive callers must
 supply all three explicitly. Selecting a wired final verification interface
 keeps those settings optional.
+
+Use `--root-password PASS` to set the installed system's root password without
+the interactive configuration prompts. `RD03V2_ROOT_PASSWORD` and
+`RD03V2_WIFI_KEY` let scripts supply these values without putting them in the
+process argument list. The tool consumes a variable on startup when the
+corresponding flag is absent. The flag takes precedence if both are set, and
+the variable stays in the environment. The web wizard uses these variables.
 
 ## Reaching the installed system
 

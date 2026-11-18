@@ -12,6 +12,12 @@ permanent image.
 
 > Read [NOTICE](NOTICE) before continuing. Run this only on a router you own.
 
+## Supported device
+
+The Xiaomi AX3000T **RD03v2** (Qualcomm IPQ5018) is the only supported model.
+Installation and restoration were tested with stock firmware **2.0.28** and
+**2.0.12**. See the [device profile](devices.py).
+
 ## Before starting
 
 You need a Linux or Windows 10/11 computer with Python 3.9 or newer. On Linux:
@@ -89,22 +95,8 @@ In a virtual machine, give Windows a bridged or macvtap network card. USB
 passthrough of an RTL8153 adapter froze on sustained sends in testing, and the
 exploit's download needs those to work.
 
-**How far this has been tested** on a real RD03v2. The port is by
-[alexsys87](https://github.com/alexsys87/xiaomi-openwrt-install).
-
-| Scenario | Result |
-|---|---|
-| Wi-Fi, stock 2.0.28 to v1.14 standard, on Windows 10 | Installed on 2026-10-11 (alexsys87), on older code |
-| Cable, stock 2.0.28 to v2.1.2 with a root password, on Windows 11 25H2 in a VM | Installed on 2026-11-07, on this code, including continuing an interrupted run |
-| `updater.py` on Linux, in place, over Wi-Fi, keeping settings: v2.1.3 to v2.1.2, then v2.1.2 to v2.1.3 (which passes `-F` by itself) | Ran on 2026-11-12, on this code, with `--host` given. Both updates booted and were verified on the new release's revision. Not yet run on hardware: in place over a cable, with `--no-keep-settings` or `--config-backup`, or finding the router without `--host` |
-| `updater.py` on Linux through the RAM installer, restoring a saved config | Ran once on 2026-11-07. Every write stage worked; the final password login could not complete, because the restored config disables it |
-| `updater.py` from Windows, or through the RAM installer against a router that keeps password login | Automated tests only, not yet run against a real router |
-| Wi-Fi with this code, and `revert.py` | Automated tests only, not yet run against a real router |
-
-Keep a Linux machine or a UART adapter within reach, and please report how it went.
-
-`updater.py` and the web wizard run on Windows 10/11 as well as Linux. What is
-still unproven on real hardware is listed in the table above.
+The updater and web wizard also support Windows 10/11 and Linux. See
+[hardware validation](docs/technical.md#hardware-validation) for tested scenarios.
 
 ## Install OpenWrt
 
@@ -133,12 +125,9 @@ while you join it. By default, final verification uses that same Wi-Fi
 interface, so before doing anything to the router the installer requires the
 SSID, passphrase, and country code for the permanent system. An interactive run
 prompts for missing values; automation must pass `--wifi-ssid`, `--wifi-key`,
-and `--wifi-country`. Secrets may also arrive through `RD03V2_ROOT_PASSWORD` and
-`RD03V2_WIFI_KEY`, so that they never appear in a process argument list. A
-variable is consumed on startup when the matching flag is absent — with both set,
-the flag wins and the variable stays in the environment. The web wizard passes
-them this way for exactly that reason. After `sysupgrade` makes the temporary network disappear,
-join that permanent SSID. The installer never prints its passphrase.
+and `--wifi-country`. After `sysupgrade` makes the temporary network disappear,
+join the permanent SSID. See how to
+[supply passwords through environment variables](docs/technical.md#first-boot-configuration).
 
 To keep permanent Wi-Fi disabled, select an Ethernet interface for the final
 check and connect it when the installer asks:
@@ -147,9 +136,6 @@ check and connect it when the installer asks:
 python3 install.py --transport wifi --interface WIFI_INTERFACE \
     --verify-interface ETHERNET_INTERFACE
 ```
-
-Both paths rediscover the router and verify the board, persistent overlay, and
-partition sizes.
 
 The temporary credentials are fixed and public, and root has no password in
 the RAM system. Keep the link isolated until the permanent system has booted.
@@ -166,91 +152,22 @@ Prompts and instructions follow your system language: English, Russian, Simplifi
 Chinese or Brazilian Portuguese. Choose explicitly with `--lang en`, `ru`, `zh-CN`
 or `pt-BR`; low-level diagnostics stay in English.
 
-Download and fully verify the latest release's image set without contacting a
-router:
+Use `--dry-run` to download and verify images without contacting a router.
+`--offline` requires an explicit release tag and a verified cache for the
+chosen connection type. See [verifying OpenWrt releases](docs/technical.md#verifying-openwrt-releases).
 
-```sh
-python3 install.py --dry-run
-```
+`--attacker ADDRESS` pins the callback address when automatic selection would
+pick the wrong one on a multihomed host.
 
-Use `--release TAG` to select a particular release. `--release latest` explicitly
-selects the default behavior. Each installation records the resolved tag and
-image hashes in its private resume manifest, so continuing an interrupted run
-keeps the original release even if a newer one has been published.
-
-Offline installs require an explicit tag and its verified cached images:
-
-```sh
-python3 install.py --release v2.0.0 --dry-run
-python3 install.py --release v2.0.0 --offline
-
-# a Wi-Fi install caches a different image set
-python3 install.py --release v2.0.0 --transport wifi --dry-run
-python3 install.py --release v2.0.0 --transport wifi --offline
-```
-
-If GitHub is unavailable, an explicitly selected tag can also use its verified
-cache. Selecting `latest` requires GitHub access. A Wi-Fi install needs
-`--transport wifi` for its own cache; the wired run caches only the radio-silent
-images.
-
-`--root-password PASS` sets the installed system's root password without the
-interactive `--configure` prompts, and `--attacker ADDRESS` pins the callback
-address when automatic selection would pick the wrong one on a multihomed host.
-
-If the connection is lost after `sysupgrade` starts, do not repeat the flash
-stage. Use the private manifest printed by the original run to perform only
-the final checks, optionally over a different interface:
-
-```sh
-python3 install.py --verify-only /path/to/resume.json \
-    --verify-interface INTERFACE_NAME
-```
+If the connection drops after `sysupgrade` starts, switch to
+[read-only verification](docs/technical.md#verify-after-a-disconnect) to avoid
+flashing twice.
 
 ## Update an installed system
 
-```sh
-python3 updater.py --root-password 'YOUR_OPENWRT_PASSWORD'
-```
-
-This updates an installed OpenWrt to the latest release of the port, keeping its
-settings like `sysupgrade` does. Use `--release TAG` for a specific one,
-`--no-keep-settings` for a clean install, and `--dry-run` to only download and
-verify the images. Between v2 releases it is a plain in-place `sysupgrade` from the
-installed system, as on any other OpenWrt device. v2.0.0 to v2.1.2 refuse that (by
-mistake); when that refusal is the only objection `sysupgrade -T` raises, the
-updater passes `-F`, and anything else it objects to stops the update. From v1.x,
-going back to v1.x, or with `--via-ram-installer`, it goes through the RAM installer
-instead, as [the firmware's manual procedure](https://github.com/ADCDS/openwrt-xiaomi-ax3000t-rd03v2/blob/main/docs/no-uart-reflash.md)
-does. It saves a config backup in a private `update-*` folder before writing.
-
-Useful flags: `--verify-interface IFACE` chooses the interface for the final
-check and is required with `--no-keep-settings` only when that check would run
-over Wi-Fi — a wired update defaults it to the router-facing interface;
-`--wifi-ssid NAME` names the network to rejoin when continuing a run that stopped
-in the RAM installer, whose own wireless config is the installer's; `--offline`
-uses only the verified cache; `--yes` answers the confirmations up front;
-`--device`, `--images` and `--outdir` pick a profile, an image cache and an output
-directory; `--via-ram-installer` takes the RAM installer route between v2 releases
-too, which reformats both UBI partitions; `--recover-stale-lock` clears an interrupted pivot state once you have
-inspected it.
-
-There is no A/B fallback here: there is one installed kernel, and the update
-replaces it. The recovery net for a torn write is UART or the stock TFTP recovery.
-On the RAM installer route the installed kernel is overwritten on the way into RAM:
-if that run is interrupted after that point, reach the RAM installer and run the
-command again with `--config-backup` and the backup it saved. It logs in by
-password, so a router set to SSH keys only (`PasswordAuth off`) is refused before
-anything is written.
-
-On a real router it has run **in place twice**, from Linux over Wi-Fi on
-2026-11-12: v2.1.3 to v2.1.2, then v2.1.2 to v2.1.3, where it passed `-F` by itself.
-Both kept the settings and were verified on the new release's revision. **Through
-the RAM installer once**: from Linux over a cable, v2.1.2 with `--config-backup`, on
-2026-11-07. Every write stage worked; the final password login could not complete,
-because the restored config turns password login off. The tool warns about this in
-advance, and the result was verified with an SSH key instead. No update has been run
-from Windows. Keep a UART adapter within reach, and please report how it went.
+Use `updater.py` to update OpenWrt while keeping its settings. See the
+[update guide](docs/maintenance.md#update-an-installed-system) for commands,
+release selection, configuration backups, and recovery.
 
 ## Web wizard
 
@@ -264,75 +181,14 @@ log. See [gui/README.md](gui/README.md).
 
 ## Return to stock
 
-Download an official stock image whose SHA-256 is approved by the selected
-device profile. The [technical reference](docs/technical.md#getting-the-images)
-lists the approved images for the enabled profiles.
-
-From an installed OpenWrt system, run:
-
-```sh
-nmcli device status
-IFACE=YOUR_ROUTER_INTERFACE
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
-    --interface "$IFACE"
-```
-
-`revert.py` verifies the stock image, downloads and verifies the profile's RAM
-image pair, pivots the router into RAM, restores stock, and waits for the stock system to
-answer, reporting its hardware, ROM and whether the setup wizard is waiting. It infers Ethernet or Wi-Fi from the selected interface.
-The RAM images default to the latest published release; use `--release TAG` to
-select a specific release, and add `--offline` to use its verified cache.
-During a Wi-Fi revert, join the temporary RAM network when `revert.py` prints
-its SSID and password. The useful overrides are:
-
-```sh
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
-    --transport wired --interface "$IFACE"
-
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
-    --interface "$IFACE" --root-password 'YOUR_OPENWRT_PASSWORD'
-
-python3 revert.py --device rd03v2 /path/to/approved-stock-image.bin \
-    --interface "$IFACE" --dry-run
-```
-
-Use `revert.py` for normal restoration. `restore.py` is the lower-level writer
-and refuses to run unless the router is already booted from a RAM initramfs.
+Use `revert.py` from an installed OpenWrt system with a profile-approved stock
+image. See the [stock restoration guide](docs/maintenance.md#return-to-stock)
+for the image list, command, and connection options.
 
 ## Supporting tools
 
-| Command | Purpose |
-|---|---|
-| `python3 release.py --device rd03v2` | Inspect the latest release and its required assets. |
-| `python3 release.py --device rd03v2 --download --wifi --dest images` | Download and verify a release image set. |
-| `python3 probe.py --device rd03v2` | Collect hardware and flash-layout evidence without raw firmware-partition writes. It initializes or reboots stock as needed, modifies stock control state, and consumes the one-shot trigger. |
-| `python3 attach.py --bind OPERATOR_ADDRESS --peer ROUTER_ADDRESS --session-token TOKEN 'id'` | Reattach to the authenticated callback from an interrupted run. |
-| `python3 restore.py --device rd03v2 /path/to/approved-stock-image.bin --discover INTERFACE_NAME` | Run the low-level stock writer from an already-booted RAM system. |
-| `python3 ubiparse.py /path/to/ubi-dump.bin` | Inspect a raw UBI dump offline. |
-| `python3 selftest.py` | Run checks that do not require a router (Linux). |
-| `python3 updater.py --dry-run` | Download and verify an update's images without contacting a router. |
-| `python3 -m unittest test_hostnet test_windows test_i18n` | Run the Windows and language checks; needs `requirements-windows.txt`. |
-
-`probe.py` has not been tested on Windows, and its automatic Wi-Fi reconnect is
-Linux-only.
-
-See the [technical reference](docs/technical.md) for interrupted runs, manual
-stages, stock-image hashes, flash-layout details, and recovery procedures.
-
-## Supported device
-
-| Profile | Hardware | Install source | Return to stock |
-|---|---|---|---|
-| `rd03v2` | Xiaomi AX3000T RD03v2, Qualcomm IPQ5018 | Stock 2.0.28 and 2.0.12, hardware-tested | 2.0.28 and 2.0.12 hardware-tested |
-
-The exact tested stock ROMs, release source, NAND support, layouts, and accepted
-stock-image hashes live in [`devices.py`](devices.py). Other Xiaomi models may
-contain the same vulnerabilities, but their flash and boot layouts are not
-interchangeable. The installer rejects every model without a reviewed and
-hardware-tested profile.
-
-Technical details and the vulnerability disclosure are in
-[`xiaomi-ax3000t-cabmeshd-disclosure`](https://github.com/ADCDS/xiaomi-ax3000t-cabmeshd-disclosure).
+See [diagnostics and tests](docs/technical.md#diagnostics-and-tests) for image
+inspection and local checks.
 
 ## License
 
