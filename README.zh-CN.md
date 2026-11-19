@@ -40,7 +40,8 @@ sudo apt install sshpass openssl
 
 ### macOS（实验性）
 
-尚未完成 macOS 实机刷写验证。Homebrew 仅支持 Apple Silicon Mac；Intel Mac
+有线安装与恢复已在 macOS 14（Sonoma）对 AX3000T 实机完整验证；macOS 支持仍为实验性，
+Wi-Fi 方式未测试。Homebrew 仅支持 Apple Silicon Mac；Intel Mac
 请使用 MacPorts。需要 Python 3.9 或更新版本，Xcode 命令行工具
 （`xcode-select --install`）已自带。
 

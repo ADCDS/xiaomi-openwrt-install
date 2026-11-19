@@ -46,7 +46,9 @@ cd xiaomi-openwrt-install
 
 ### macOS (experimental)
 
-Flashing on macOS has not been validated on hardware. Homebrew supports only
+The wired install and revert have been run end to end on macOS 14 (Sonoma)
+against an AX3000T; macOS support is still experimental and the Wi-Fi transport
+is untested. Homebrew supports only
 Apple Silicon Macs; on Intel Macs use MacPorts. Python 3.9 or newer is needed;
 the Xcode Command Line Tools (`xcode-select --install`) provide one.
 
