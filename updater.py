@@ -94,7 +94,7 @@ def scp_from(host, remote, local):
     src = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for password in install.SSH_PASSWORDS:
-        argv = ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+        argv = ["scp", *hostnet.scp_legacy_flag(), "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                 "-o", "NumberOfPasswordPrompts=1", src, local]
         env = None

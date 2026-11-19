@@ -1222,7 +1222,7 @@ def scp_to(host, local, remote, passwords=None):
     dest = f"root@[{host}]:{remote}" if ":" in host else f"root@{host}:{remote}"
     last = None
     for pw in SSH_PASSWORDS if passwords is None else passwords:
-        argv = ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+        argv = ["scp", *hostnet.scp_legacy_flag(), "-o", "StrictHostKeyChecking=no",
                 "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
                 "-o", "NumberOfPasswordPrompts=1", local, dest]
         env = None

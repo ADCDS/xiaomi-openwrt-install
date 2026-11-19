@@ -592,7 +592,7 @@ def scp(host, local, remote):
         env = password_env("")
     else:
         base = []
-    base += ["scp", "-O", "-o", "StrictHostKeyChecking=no",
+    base += ["scp", *hostnet.scp_legacy_flag(), "-o", "StrictHostKeyChecking=no",
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
              local, f"root@[{host}]:{remote}" if ":" in host
              else f"root@{host}:{remote}"]

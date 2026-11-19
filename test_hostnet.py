@@ -216,5 +216,66 @@ class HostnetTests(unittest.TestCase):
                 hostnet.discover_candidates("12", timeout)
 
 
+class ScpLegacyFlagTests(unittest.TestCase):
+    """POSIX hosts: pass scp -O only to clients that have it (PR #8)."""
+    # macOS 12.7.6 (OpenSSH 8.6p1), captured 2026-11-19.
+    OLD_BSD = ("scp: illegal option -- O\n"
+               "usage: scp [-346ABCpqrTv] [-c cipher] [-F ssh_config] [-i identity_file]\n")
+    OLD_GNU = "scp: invalid option -- 'O'\nusage: scp [-346BCpqrTv] [-c cipher]\n"
+    # macOS 14.8.9 (OpenSSH 9.9p2).
+    MODERN = "usage: scp [-346ABCOpqRrsTv] [-c cipher] [-D sftp_server_path] [-F ssh_config]\n"
+
+    def setUp(self):
+        hostnet.scp_legacy_flag.cache_clear()
+        self.addCleanup(hostnet.scp_legacy_flag.cache_clear)
+
+    def probe(self, stderr):
+        with patch.object(hostnet.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 1, "", stderr)) as run:
+            flag = hostnet.scp_legacy_flag()
+        self.assertEqual(run.call_args.args[0], ["scp", "-O"])
+        self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C")
+        return flag
+
+    def test_old_clients_get_no_flag(self):
+        self.assertEqual(self.probe(self.OLD_BSD), ())
+        hostnet.scp_legacy_flag.cache_clear()
+        self.assertEqual(self.probe(self.OLD_GNU), ())
+
+    def test_modern_client_and_missing_scp_keep_the_flag(self):
+        self.assertEqual(self.probe(self.MODERN), ("-O",))
+        hostnet.scp_legacy_flag.cache_clear()
+        with patch.object(hostnet.subprocess, "run", side_effect=OSError("no scp")):
+            self.assertEqual(hostnet.scp_legacy_flag(), ("-O",))
+
+    def test_probe_runs_once(self):
+        with patch.object(hostnet.subprocess, "run",
+                          return_value=subprocess.CompletedProcess([], 1, "", self.MODERN)) as run:
+            hostnet.scp_legacy_flag()
+            hostnet.scp_legacy_flag()
+        run.assert_called_once()
+
+    def test_every_scp_caller_follows_the_probe(self):
+        import install
+        import restore
+        import updater
+        calls = {
+            "install.scp_to": lambda: install.scp_to("192.168.1.1", "/tmp/a", "/tmp/b", passwords=[""]),
+            "updater.scp_from": lambda: updater.scp_from("192.168.1.1", "/tmp/b", "/tmp/a"),
+            "restore.scp": lambda: restore.scp("192.168.1.1", "/tmp/a", "/tmp/b"),
+        }
+        for flag in ((), ("-O",)):
+            for name, call in calls.items():
+                with self.subTest(caller=name, flag=flag), \
+                     patch.object(hostnet, "is_windows", return_value=False), \
+                     patch.object(hostnet, "scp_legacy_flag", return_value=flag), \
+                     patch.object(subprocess, "run",
+                                  return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
+                    call()
+                    argv = run.call_args.args[0]
+                    self.assertIn("scp", argv)
+                    self.assertEqual("-O" in argv, bool(flag))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6,8 +6,12 @@ not a claim that any neighbour is the router (callers must check SSH identity).
 
 Originally written by alexsys87 for the native Windows port
 (https://github.com/alexsys87/xiaomi-openwrt-install).
+
+Also home to scp_legacy_flag(), the one OpenSSH difference the POSIX hosts
+(Linux and macOS) need checked: install.py, updater.py and restore.py share it.
 """
 
+import functools
 import ipaddress
 import json
 import math
@@ -320,3 +324,23 @@ def discover_candidates(interface, timeout=15):
                            "on the selected link: {}".format(before["name"], exc)) from exc
     except (KeyError, TypeError, ValueError) as exc:
         raise NetworkError("Invalid IPv6 adapter/neighbour data: " + str(exc)) from exc
+
+
+@functools.lru_cache(maxsize=None)
+def scp_legacy_flag():
+    """("-O",) when this host's OpenSSH scp accepts -O, else ().
+
+    The router's dropbear has no SFTP server, so scp must use the legacy
+    protocol. OpenSSH 9.0 made SFTP the scp default and added -O to ask for
+    the old protocol; older clients (macOS 12 ships 8.6) still default to it
+    but reject -O as an illegal option, which failed every upload there.
+    Asked once, of the scp that will run; the C locale keeps getopt's
+    complaint in English."""
+    try:
+        result = subprocess.run(["scp", "-O"], capture_output=True, text=True,
+                                timeout=10, env=dict(os.environ, LC_ALL="C"))
+    except (OSError, subprocess.TimeoutExpired):
+        return ("-O",)
+    if re.search(r"(illegal|invalid|unknown|unrecognized) option", result.stderr):
+        return ()
+    return ("-O",)
