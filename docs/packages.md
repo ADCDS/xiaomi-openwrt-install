@@ -33,6 +33,32 @@ python3 updater.py --reinstall-only --host 192.168.31.1 --interface en0
 
 Add `--ssh-key-auth` if you log in with a key.
 
+### When DNS depends on a package you installed
+
+dnsmasq may forward every query to a resolver on the router itself, for
+example `127.0.0.1#5053` from `https-dns-proxy`, with `noresolv` set so that it
+does not use the WAN's DNS servers. If that resolver comes from a package that
+is not in the image, the router cannot resolve names after the update. It then
+cannot reach the repositories to reinstall that package.
+
+`updater.py` warns about this before the backup. During the reinstall, if
+`apk update` fails because the router cannot resolve the repository's name,
+it does this:
+
+1. It checks which of the WAN's DNS servers (from
+   `/tmp/resolv.conf.d/resolv.conf.auto`) can resolve the name.
+2. It points the router's own resolver, `/tmp/resolv.conf`, at those servers
+   until the reinstall ends. dnsmasq, the LAN and the UCI configuration are
+   not changed.
+3. At the end, also when the reinstall stops early, it restores
+   `/tmp/resolv.conf`. If dnsmasq has rewritten the file in the meantime,
+   because the reinstalled DNS package restarted it, the new file stays.
+
+`updater.py` never chooses a DNS server itself. If none of the WAN's servers
+works, it reports that and changes nothing. Fix the router's DNS, then run
+`--reinstall-only`. Clients on the LAN cannot resolve names until the DNS
+package is back.
+
 ## Configuration files after the update
 
 Your configuration is restored and in use after the update. `updater.py` then

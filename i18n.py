@@ -683,6 +683,29 @@ PT_BR.update({
     '[r] {path}: upstream change in {diff}': '[r] {path}: mudança do upstream em {diff}',
 })
 
+# updater.py: the temporary resolver while packages reinstall.
+ZH_CN.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] dnsmasq 把 DNS 转发给路由器本机上的解析器（{forwarders}）。如果它来自你自己安装的软件包，更新后在该软件包重装之前，路由器将无法解析域名；届时重装步骤会让路由器自身临时使用 WAN 口的 DNS 服务器。',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] 路由器无法解析 {name}，WAN 口的 DNS 服务器也都无法解析。请先修复路由器的 DNS，然后加上 --reinstall-only 重新运行。',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] 路由器无法解析 {name}。恢复的 dnsmasq 配置把 DNS 转发给 {forwarders}，它很可能来自一个尚未重装的软件包。在重装结束之前，路由器自身临时使用 WAN 口的 DNS 服务器（{servers}）；dnsmasq 和局域网的配置不变。',
+    "[p] the router's own resolver is back to its configuration": '[p] 路由器自身的 DNS 解析设置已恢复原样',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] 无法恢复路由器上的 {conf}（{error}）；请在路由器上重启 dnsmasq（service dnsmasq restart）以重新生成它',
+})
+RU.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] dnsmasq пересылает DNS резолверу на самом роутере ({forwarders}). Если его предоставляет установленный вами пакет, после обновления роутер не сможет разрешать имена, пока пакет не переустановлен; тогда на время переустановки сам роутер будет использовать DNS-серверы WAN.',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] роутер не может разрешить {name}, и ни один DNS-сервер WAN тоже не может. Исправьте DNS роутера и запустите снова с --reinstall-only.',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] роутер не может разрешить {name}. Восстановленная конфигурация dnsmasq пересылает DNS на {forwarders}, вероятно, резолвер из ещё не переустановленного пакета. До конца переустановки сам роутер использует DNS-серверы WAN ({servers}); dnsmasq и LAN не меняются.',
+    "[p] the router's own resolver is back to its configuration": '[p] собственный резолвер роутера возвращён к его настройкам',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] не удалось восстановить {conf} на роутере ({error}); перезапустите там dnsmasq (service dnsmasq restart), чтобы пересоздать его',
+})
+PT_BR.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] O dnsmasq encaminha o DNS para um resolvedor no próprio roteador ({forwarders}). Se ele vier de um pacote que você instalou, após a atualização o roteador não conseguirá resolver nomes até esse pacote ser reinstalado; a reinstalação então usa os servidores DNS da WAN para o próprio roteador.',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] o roteador não consegue resolver {name}, e nenhum servidor DNS da WAN consegue. Corrija o DNS do roteador e execute de novo com --reinstall-only.',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] o roteador não consegue resolver {name}. A configuração restaurada do dnsmasq encaminha para {forwarders}, provavelmente um resolvedor de um pacote ainda não reinstalado. Até o fim da reinstalação, o próprio roteador usa os servidores DNS da WAN ({servers}); o dnsmasq e a LAN não mudam.',
+    "[p] the router's own resolver is back to its configuration": '[p] o resolvedor do próprio roteador voltou à sua configuração',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] não foi possível restaurar {conf} no roteador ({error}); reinicie o dnsmasq lá (service dnsmasq restart) para recriá-lo',
+})
+
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}
 
 # Endonyms: what each language calls itself, used by the wizard's switch and

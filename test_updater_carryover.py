@@ -155,6 +155,8 @@ class ReinstallTests(unittest.TestCase):
                 return 0, pinned
             if cmd.startswith("find /etc -name"):
                 return 0, ""
+            if cmd.startswith("cat /etc/apk/repositories"):
+                return 0, ""            # no repository host: no resolver fallback
             if cmd == "apk update":
                 return (updates.pop(0) if updates else 1), "fetch failed"
             if cmd.startswith("apk add "):
@@ -488,6 +490,147 @@ class ImageDefaultsTests(unittest.TestCase):
             updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
         review.assert_called_once()
         self.assertTrue(reinstall.call_args.kwargs["assume_yes"])
+
+
+@unittest.skipIf(os.name == "nt", "runs the resolver commands through sh")
+class TemporaryResolverTests(unittest.TestCase):
+    """The restored dnsmasq config forwards to https-dns-proxy, which only the
+    reinstall brings back: the case seen on hardware."""
+    ORIGINAL = "search lan\nnameserver 127.0.0.1\nnameserver ::1\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.conf = os.path.join(self.tmp.name, "resolv.conf")
+        self.saved = os.path.join(self.tmp.name, "saved")
+        with open(self.conf, "w") as f:
+            f.write(self.ORIGINAL)
+        for target in (patch.object(updater, "RESOLV_CONF", self.conf),
+                       patch.object(updater, "RESOLV_SAVED", self.saved),
+                       patch.object(updater, "log"),
+                       patch.object(updater.time, "sleep")):
+            target.start()
+            self.addCleanup(target.stop)
+        self.proxy_up = False          # https-dns-proxy serves 127.0.0.1#5053
+        self.wan = "# Interface wan\nnameserver 1.1.1.2\nnameserver 1.0.0.2;reboot\n"
+        self.wan_works = True
+        self.apk_broken = False
+        self.added = []
+        self.restart_dnsmasq_on = "https-dns-proxy"
+
+    def conf_text(self):
+        with open(self.conf) as f:
+            return f.read()
+
+    def system_resolves(self):
+        return self.proxy_up or "nameserver 1.1.1.2" in self.conf_text()
+
+    def ssh(self, host, cmd, **kw):
+        import subprocess
+        if cmd.startswith("uci -q get dhcp.@dnsmasq[0].server"):
+            return 0, "127.0.0.1#5053 /router.example/"
+        if cmd.startswith("cat /etc/apk/repositories"):
+            return 0, "# feeds\nhttps://downloads.openwrt.org/snapshots/packages.adb\n"
+        if cmd.startswith(f"cat {updater.WAN_RESOLV}"):
+            return 0, self.wan
+        if cmd.startswith("nslookup "):
+            words = shlex.split(cmd.split(">")[0])
+            ok = (self.wan_works and words[2] == "1.1.1.2") if len(words) > 2 \
+                else self.system_resolves()
+            return 0, "DNS_OK" if ok else ""
+        if cmd == "apk update":
+            return (0, "OK") if self.system_resolves() and not self.apk_broken \
+                else (1, "ERROR: DNS lookup error")
+        if cmd.startswith("apk add "):
+            name = shlex.split(cmd)[2]
+            if not self.system_resolves():
+                return 1, "ERROR: unable to select packages"
+            self.added.append(name)
+            if name == self.restart_dnsmasq_on:
+                # The package restarts dnsmasq, which rewrites resolv.conf.
+                self.proxy_up = name == "https-dns-proxy"
+                with open(self.conf, "w") as f:
+                    f.write("search lan\nnameserver 127.0.0.1\n")
+            return 0, "OK"
+        if cmd == f"cat {updater.WORLD_OLD}":
+            return 0, "https-dns-proxy\nhtop\nnano\n"
+        if cmd.startswith(("grep -E", "find /etc")) or cmd == "cat /etc/apk/world":
+            return 0, ""
+        result = subprocess.run(["sh", "-c", cmd], capture_output=True, text=True)
+        return result.returncode, (result.stdout + result.stderr).strip()
+
+    def reinstall(self):
+        with patch.object(install, "ssh", self.ssh):
+            return updater.reinstall_packages("h", self.tmp.name, deadline_s=1)
+
+    def test_wan_dns_carries_the_reinstall_then_dnsmasq_wins(self):
+        summary = self.reinstall()
+        self.assertEqual(summary["installed"], ["htop", "https-dns-proxy", "nano"])
+        self.assertEqual(summary["failed"], [])
+        # dnsmasq rewrote the file when https-dns-proxy came back: that stays.
+        self.assertEqual(self.conf_text(), "search lan\nnameserver 127.0.0.1\n")
+        self.assertFalse(os.path.exists(self.saved))
+
+    def test_restored_when_nothing_rewrote_it(self):
+        self.restart_dnsmasq_on = None
+        summary = self.reinstall()
+        self.assertEqual(len(summary["installed"]), 3)
+        self.assertEqual(self.conf_text(), self.ORIGINAL)
+        self.assertFalse(os.path.exists(self.saved))
+
+    def test_only_the_wan_addresses_are_written(self):
+        written = []
+        real = self.ssh
+
+        def spy(host, cmd, **kw):
+            if cmd.startswith(f"[ -e {self.saved} ]"):
+                written.append(cmd)
+            return real(host, cmd, **kw)
+        self.restart_dnsmasq_on = None
+        with patch.object(install, "ssh", spy):
+            updater.reinstall_packages("h", self.tmp.name, deadline_s=1)
+        text = shlex.split(written[0].split(";", 1)[1])[2]
+        self.assertEqual(text, updater.RESOLVER_MARK + "\nnameserver 1.1.1.2\n")
+        self.assertNotIn("reboot", written[0])
+
+    def test_rewritten_mid_way_is_written_again(self):
+        # Another package restarts dnsmasq before the DNS package is back.
+        self.restart_dnsmasq_on = "htop"
+        summary = self.reinstall()
+        self.assertEqual(summary["installed"], ["htop", "https-dns-proxy", "nano"])
+
+    def test_working_dns_is_left_alone(self):
+        self.proxy_up, self.apk_broken = True, True
+        summary = self.reinstall()
+        self.assertEqual(self.conf_text(), self.ORIGINAL)
+        self.assertEqual([name for name, _ in summary["failed"]],
+                         ["htop", "https-dns-proxy", "nano"])
+
+    def test_no_usable_wan_dns_changes_nothing(self):
+        self.wan_works = False
+        summary = self.reinstall()
+        self.assertEqual(self.conf_text(), self.ORIGINAL)
+        self.assertFalse(os.path.exists(self.saved))
+        self.assertEqual(len(summary["failed"]), 3)
+
+    def test_restored_even_when_the_reinstall_stops(self):
+        real = self.ssh
+
+        def stop(host, cmd, **kw):
+            if cmd.startswith("apk add "):
+                raise install.Abort("host key changed")
+            return real(host, cmd, **kw)
+        self.restart_dnsmasq_on = None
+        with patch.object(install, "ssh", stop):
+            with self.assertRaises(install.Abort):
+                updater.reinstall_packages("h", self.tmp.name, deadline_s=1)
+        self.assertEqual(self.conf_text(), self.ORIGINAL)
+
+    def test_local_forwarders(self):
+        with patch.object(install, "ssh", return_value=(
+                0, "127.0.0.1#5053 /router.example/ /lan/::1#5054 8.8.8.8 /x/192.168.1.5")):
+            self.assertEqual(updater.local_dns_forwarders("h"),
+                             ["127.0.0.1#5053", "/lan/::1#5054"])
 
 
 if __name__ == "__main__":

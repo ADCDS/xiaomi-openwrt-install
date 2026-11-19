@@ -63,6 +63,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.parse
 
 import chain
 import devices
@@ -144,6 +145,16 @@ SPECIAL_PACKAGES = {
 
 # How long a freshly updated router gets to reach its package repositories.
 REPOSITORY_DEADLINE_S = 300
+
+# The router's own resolver, and what netifd learned from the WAN. When the
+# restored dnsmasq config forwards to a resolver that a reinstalled package
+# provides (https-dns-proxy, stubby, ...), the router cannot resolve the
+# repositories until that package is back; see TemporaryResolver.
+RESOLV_CONF = "/tmp/resolv.conf"
+RESOLV_SAVED = "/tmp/rd03v2-resolv.conf.saved"
+WAN_RESOLV = "/tmp/resolv.conf.d/resolv.conf.auto"
+RESOLVER_MARK = "# rd03v2-updater: temporary resolver, restored after the reinstall"
+REPOSITORY_LISTS = "/etc/apk/repositories /etc/apk/repositories.d/*.list"
 
 # Configuration files after the update (see review_apk_new and
 # review_image_defaults). The image defaults are read from /rom, the
@@ -364,6 +375,14 @@ def prepare_carryover(host, args, outdir):
     for path in added:
         log(f"[c] {SYSUPGRADE_CONF} += {path}")
 
+    forwarders = local_dns_forwarders(host)
+    if forwarders:
+        log(t("[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). "
+              "If a package you installed provides it, the router cannot resolve "
+              "names after the update until that package is reinstalled; the "
+              "reinstall then uses the WAN's DNS servers for the router itself.",
+              forwarders=", ".join(forwarders)))
+
     wanted = filter_world(world)
     text = "".join(name + "\n" for name in wanted)
     local = _write_local(outdir, "world-old.txt", text)
@@ -374,13 +393,136 @@ def prepare_carryover(host, args, outdir):
     save_overlay_archive(host, outdir)
 
 
-def wait_for_repositories(host, deadline_s=None):
-    """Whether `apk update` succeeded before the deadline."""
+def local_dns_forwarders(host):
+    """The dnsmasq upstreams on this router itself (127.0.0.1#5053 and the like)."""
+    _rc, out = install.ssh(host, "uci -q get dhcp.@dnsmasq[0].server", check=False)
+    return [item for item in out.split()
+            if item.split("#", 1)[0].split("/")[-1] in ("127.0.0.1", "::1")]
+
+
+def repository_host(host):
+    """The host name of the first package repository, or None."""
+    _rc, out = install.ssh(host, f"cat {REPOSITORY_LISTS} 2>/dev/null", check=False)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = urllib.parse.urlsplit(line.split()[-1]).hostname
+        if name:
+            return name
+    return None
+
+
+def wan_nameservers(host):
+    """The DNS servers netifd learned for the WAN, as addresses only."""
+    _rc, out = install.ssh(host, f"cat {WAN_RESOLV} 2>/dev/null", check=False)
+    servers = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "nameserver":
+            try:
+                servers.append(str(ipaddress.ip_address(fields[1])))
+            except ValueError:
+                continue                    # never put anything else in a command
+    return list(dict.fromkeys(servers))
+
+
+def resolves(host, name, server=None):
+    target = shlex.quote(name) + (f" {shlex.quote(server)}" if server else "")
+    _rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
+                           timeout=30, check=False)
+    return "DNS_OK" in out
+
+
+class TemporaryResolver:
+    """Point the router's *own* resolver at the WAN's DNS while packages install.
+
+    The restored config may make dnsmasq forward every query to a resolver
+    that a not-yet-reinstalled package provides, and noresolv keeps it off the
+    WAN's servers. The router then cannot resolve its repositories, and so
+    cannot install the package that would fix that. Only /tmp/resolv.conf,
+    which the router itself uses, is changed: dnsmasq and the LAN keep their
+    configuration, and nothing is committed. The WAN's own servers are used,
+    never a resolver this tool chooses; without any, it only explains.
+
+    restore() puts the saved file back unless dnsmasq has rewritten it in the
+    meantime (a reinstalled DNS package restarts it), in which case that
+    version is the right one and stays."""
+
+    def __init__(self, host):
+        self.host = host
+        self.servers = []
+        self.reported = False
+
+    @property
+    def active(self):
+        return bool(self.servers)
+
+    def engage(self, name):
+        """Use the WAN's DNS when the system resolver cannot resolve `name`."""
+        if resolves(self.host, name):
+            return False
+        servers = [server for server in wan_nameservers(self.host)
+                   if resolves(self.host, name, server)]
+        if not servers:
+            # Asked again on each retry, since the WAN may still be coming up;
+            # said once.
+            if not self.reported:
+                log(t("[p] the router cannot resolve {name}, and none of the WAN's "
+                      "DNS servers can either. Fix its DNS, then run this again "
+                      "with --reinstall-only.", name=name))
+                self.reported = True
+            return False
+        self.servers = servers
+        self._write()
+        log(t("[p] the router cannot resolve {name}. The restored dnsmasq config "
+              "forwards to {forwarders}, probably a resolver from a package that is "
+              "not reinstalled yet. Until the reinstall ends, the router itself uses "
+              "the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.",
+              name=name, forwarders=", ".join(local_dns_forwarders(self.host)) or "?",
+              servers=", ".join(servers)))
+        return True
+
+    def _write(self):
+        text = RESOLVER_MARK + "\n" + "".join(f"nameserver {s}\n" for s in self.servers)
+        install.ssh(self.host,
+                    f"[ -e {RESOLV_SAVED} ] || cp -p {RESOLV_CONF} {RESOLV_SAVED}; "
+                    f"printf %s {shlex.quote(text)} > {RESOLV_CONF}")
+
+    def keep(self, name):
+        """Before each install: write it again if dnsmasq replaced it and the
+        router's own resolver still fails."""
+        if self.active and not resolves(self.host, name):
+            self._write()
+
+    def restore(self):
+        if not self.active:
+            return
+        try:
+            install.ssh(self.host,
+                        f"if [ -e {RESOLV_SAVED} ]; then "
+                        f"grep -qF {shlex.quote(RESOLVER_MARK)} {RESOLV_CONF} && "
+                        f"cat {RESOLV_SAVED} > {RESOLV_CONF}; "
+                        f"rm -f {RESOLV_SAVED}; fi", timeout=30)
+            log(t("[p] the router's own resolver is back to its configuration"))
+        except (Abort, subprocess.TimeoutExpired) as exc:
+            log(t("[!] could not restore {conf} on the router ({error}); restart "
+                  "dnsmasq there (service dnsmasq restart) to rebuild it",
+                  conf=RESOLV_CONF, error=exc))
+        self.servers = []
+
+
+def wait_for_repositories(host, deadline_s=None, resolver=None):
+    """Whether `apk update` succeeded before the deadline.
+
+    With a TemporaryResolver, a failure that is the router's own DNS engages
+    it once, and the wait goes on."""
     deadline_s = REPOSITORY_DEADLINE_S if deadline_s is None else deadline_s
     log(t("[p] waiting up to {seconds}s for the router to reach its package "
           "repositories", seconds=deadline_s))
     end = time.time() + deadline_s
     out = ""
+    name = None
     while True:
         try:
             rc, out = install.ssh(host, "apk update", timeout=120, check=False)
@@ -388,6 +530,10 @@ def wait_for_repositories(host, deadline_s=None):
             rc, out = 1, "apk update timed out"
         if rc == 0:
             return True
+        if resolver is not None and not resolver.active:
+            name = name or repository_host(host)
+            if name and resolver.engage(name):
+                continue
         if time.time() + 15 >= end:
             log(f"[p] apk update: {out.strip()[-300:]}")
             return False
@@ -442,24 +588,31 @@ def reinstall_packages(host, outdir, deadline_s=None, assume_yes=True):
         else:
             missing.append(name)
 
-    if missing and not wait_for_repositories(host, deadline_s):
-        summary["failed"] += [(name, "the package repositories are unreachable")
-                              for name in missing]
-        missing = []
-    before = list_apk_new(host) if missing else set()
-    for name in missing:
-        try:
-            rc, out = install.ssh(host, f"apk add {shlex.quote(name)}",
-                                  timeout=600, check=False)
-        except subprocess.TimeoutExpired:
-            rc, out = 1, "apk add timed out"
-        if rc == 0:
-            summary["installed"].append(name)
-            log(f"[p] installed {name}")
-        else:
-            reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
-            summary["failed"].append((name, reason))
-            log(f"[p] could not install {name}: {reason}")
+    resolver = TemporaryResolver(host)
+    try:
+        if missing and not wait_for_repositories(host, deadline_s, resolver):
+            summary["failed"] += [(name, "the package repositories are unreachable")
+                                  for name in missing]
+            missing = []
+        before = list_apk_new(host) if missing else set()
+        repository = repository_host(host) if resolver.active else None
+        for name in missing:
+            if repository:
+                resolver.keep(repository)
+            try:
+                rc, out = install.ssh(host, f"apk add {shlex.quote(name)}",
+                                      timeout=600, check=False)
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "apk add timed out"
+            if rc == 0:
+                summary["installed"].append(name)
+                log(f"[p] installed {name}")
+            else:
+                reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
+                summary["failed"].append((name, reason))
+                log(f"[p] could not install {name}: {reason}")
+    finally:
+        resolver.restore()
     if summary["installed"]:
         summary["conffiles"] = review_apk_new(host, outdir, before, assume_yes)
     return _write_summary(outdir, summary)
