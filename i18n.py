@@ -128,8 +128,8 @@ RU = {
         "sysupgrade уже был запущен; не запускайте этап прошивки повторно. Продолжите только проверкой: {command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Роутеры с входом только по ключам (PasswordAuth off) не поддерживаются: ничего не записано.",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Для роутера с входом только по ключам (PasswordAuth off) используйте --ssh-key-auth. Ничего не записано.",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "доступно только {available} КиБ памяти, а для {image} нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -290,8 +290,8 @@ ZH_CN = {
         "sysupgrade 已经启动；请勿再次运行刷机阶段。请改用只读的继续命令：{command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} 拒绝了所给的 root 密码。请用 --root-password 传入当前密码。不支持仅允许 SSH 密钥登录（PasswordAuth off）的路由器：未写入任何内容。",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} 拒绝了所给的 root 密码。请用 --root-password 传入当前密码。仅允许 SSH 密钥登录（PasswordAuth off）的路由器请使用 --ssh-key-auth。未写入任何内容。",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "当前仅剩 {available} KiB 内存，而 {image} 需要 {needed} KiB。请先释放一些内存（例如停止可以暂时停用的服务），然后重新运行。",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -452,8 +452,8 @@ PT_BR = {
         "o sysupgrade já foi iniciado; não execute a etapa de gravação novamente. Use a continuação somente leitura: {command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} recusou a senha de root informada. Passe a atual com --root-password. Um roteador configurado para apenas chaves SSH (PasswordAuth off) não é suportado: nada foi gravado.",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} recusou a senha de root informada. Passe a atual com --root-password. Para um roteador configurado para apenas chaves SSH (PasswordAuth off), use --ssh-key-auth. Nada foi gravado.",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "só há {available} KiB de memória disponível e {image} precisa de {needed} KiB. Libere um pouco primeiro, por exemplo parando serviços dispensáveis, e execute isto de novo.",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -516,8 +516,6 @@ PT_BR = {
 
 # Read-only SSH key verification.
 ZH_CN.update({
-    "Verification SSH to {host} failed: {output}": "连接 {host} 的 SSH 验证失败：{output}",
-    "[3] SSH verification failed on {host}: {error}": "[3] {host} 的 SSH 验证失败：{error}",
     "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "密钥验证失败：{error}。请检查密钥或 ssh-agent，并先手动 SSH 登录同一地址以确认并信任主机密钥。",
     "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key 和 --verify-host 必须与 --verify-only 一起使用",
     "--verify-host requires --verify-ssh-key": "--verify-host 必须与 --verify-ssh-key 一起使用",
@@ -526,8 +524,6 @@ ZH_CN.update({
     "--verify-host must be a numeric IP address": "--verify-host 必须是数字形式的 IP 地址",
 })
 RU.update({
-    "Verification SSH to {host} failed: {output}": "Ошибка проверки по SSH на {host}: {output}",
-    "[3] SSH verification failed on {host}: {error}": "[3] Ошибка проверки по SSH на {host}: {error}",
     "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Ошибка проверки с ключом: {error}. Проверьте ключ/ssh-agent и сначала подтвердите ключ хоста, подключившись вручную по SSH к этому же адресу.",
     "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key и --verify-host требуют --verify-only",
     "--verify-host requires --verify-ssh-key": "--verify-host требует --verify-ssh-key",
@@ -536,14 +532,62 @@ RU.update({
     "--verify-host must be a numeric IP address": "--verify-host должен быть числовым IP-адресом",
 })
 PT_BR.update({
-    "Verification SSH to {host} failed: {output}": "Falha na verificação SSH de {host}: {output}",
-    "[3] SSH verification failed on {host}: {error}": "[3] Falha na verificação SSH de {host}: {error}",
     "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Falha na verificação com chave: {error}. Confira a chave/ssh-agent e confirme primeiro a chave do host conectando-se manualmente por SSH a esse mesmo endereço.",
     "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key e --verify-host exigem --verify-only",
     "--verify-host requires --verify-ssh-key": "--verify-host exige --verify-ssh-key",
     "Key verification requires OpenSSH (ssh)": "A verificação com chave exige OpenSSH (ssh)",
     "SSH private key file does not exist": "O arquivo da chave privada SSH não existe",
     "--verify-host must be a numeric IP address": "--verify-host deve ser um endereço IP numérico",
+})
+
+# updater.py --ssh-key-auth: key login to the installed system.
+ZH_CN.update({
+    'SSH key login to {host} failed: {output}': '使用 SSH 密钥登录 {host} 失败：{output}',
+    'scp with the SSH key to {host} failed: {output}': '使用 SSH 密钥对 {host} 执行 scp 失败：{output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": '{host} 的 SSH 主机密钥与 known_hosts 中记录的不一致，或 known_hosts 中没有它的记录。没有向它发送任何内容。请先自行核对路由器的主机密钥，确认后再更新 ~/.ssh/known_hosts；本工具不会放宽这项检查。\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] {host} 上的验证命令失败：{error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias 必须与 --verify-host 一起使用',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'SSH 别名 {alias} 连接的是 {resolved}，而不是 {host}；尚未连接任何设备',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'SSH 别名 {alias} 以 {user} 而不是 root 登录；请在 ~/.ssh/config 中为它设置 "User root"',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} 未接受 SSH 密钥登录，也不会改用任何密码重试：{output}\n请先手动运行 `ssh`，检查密钥、ssh-agent（ssh-add）和 ~/.ssh/config。如果路由器处于 RAM 安装器中（更新曾被中断），其中没有你的公钥：请去掉 --ssh-key-auth 后重新运行。未写入任何内容。',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity 和 --ssh-alias 必须与 --ssh-key-auth 一起使用',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth 不会发送任何密码；请去掉 --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth 要求保留设置：全新安装会删除你的公钥和路由器的主机密钥，更新后就无法用密钥验证',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias 需要用 --host 给出路由器的数字地址，网络检查使用的是这个地址',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH：通过 OpenSSH 和 ~/.ssh/config 用密钥登录已安装的系统；不发送任何密码，known_hosts 中必须已有路由器的主机密钥',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] 本次更新要经过 RAM 安装器，其中没有你的 SSH 公钥。连接它时使用其空的 root 密码，与不加 --ssh-key-auth 时相同（因此需要 sshpass）；最终验证会再次用密钥登录 {host}。',
+})
+RU.update({
+    'SSH key login to {host} failed: {output}': 'Не удалось войти на {host} по SSH-ключу: {output}',
+    'scp with the SSH key to {host} failed: {output}': 'Ошибка scp с SSH-ключом для {host}: {output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": 'Ключ хоста SSH {host} не совпадает с записанным в known_hosts, или записи нет. Ему ничего не отправлено. Сами проверьте ключ роутера и только потом обновите ~/.ssh/known_hosts; эта программа не ослабляет проверку.\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] Команды проверки на {host} завершились с ошибкой: {error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias требует --verify-host',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'SSH-псевдоним {alias} подключается к {resolved}, а не к {host}; ни к чему не подключались',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'SSH-псевдоним {alias} входит как {user}, а не root; укажите для него "User root" в ~/.ssh/config',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} не принял вход по SSH-ключу, и пароль вместо него не пробуется: {output}\nСначала проверьте ключ, ssh-agent (ssh-add) и ~/.ssh/config, подключившись вручную через `ssh`. Если роутер в RAM-установщике (прерванное обновление), вашего ключа там нет: запустите снова без --ssh-key-auth. Ничего не записано.',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity и --ssh-alias требуют --ssh-key-auth',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth не отправляет пароль; уберите --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth требует сохранить настройки: чистая установка удалит ваш открытый ключ и ключ хоста роутера, и обновление нельзя будет проверить по ключу',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias требует --host с числовым адресом роутера, который используют сетевые проверки',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: вход в установленную систему по ключу через OpenSSH и ~/.ssh/config; пароль не отправляется, ключ хоста роутера уже должен быть в known_hosts',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Это обновление идёт через RAM-установщик, в котором нет вашего SSH-ключа. К нему подключаются с его пустым паролем root, как без --ssh-key-auth (поэтому нужен sshpass); итоговая проверка снова входит на {host} по ключу.',
+})
+PT_BR.update({
+    'SSH key login to {host} failed: {output}': 'Falha no login com chave SSH em {host}: {output}',
+    'scp with the SSH key to {host} failed: {output}': 'Falha no scp com chave SSH para {host}: {output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": 'A chave de host SSH de {host} não é a que o known_hosts tem para ele, ou não há nenhuma lá. Nada foi enviado a ele. Confira você mesmo a chave do roteador e só então atualize ~/.ssh/known_hosts; esta ferramenta não relaxa a verificação.\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] Os comandos de verificação falharam em {host}: {error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias exige --verify-host',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'O alias SSH {alias} conecta a {resolved}, não a {host}; nada foi contatado',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'O alias SSH {alias} entra como {user}, não como root; defina "User root" para ele em ~/.ssh/config',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} não aceitou o login com chave SSH, e nenhuma senha é tentada no lugar: {output}\nConfira antes a chave, o ssh-agent (ssh-add) e o ~/.ssh/config com um `ssh` manual. Se o roteador estiver no instalador em RAM (uma atualização interrompida), ele não tem cópia da sua chave: execute de novo sem --ssh-key-auth. Nada foi gravado.',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity e --ssh-alias exigem --ssh-key-auth',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth não envia senha; remova --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth exige manter as configurações: uma instalação limpa remove sua chave pública e a chave de host do roteador, e a atualização não poderia ser verificada por chave',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias exige --host com o endereço numérico do roteador, usado pelas verificações de rede',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: login com chave no sistema instalado via OpenSSH e ~/.ssh/config; nenhuma senha é enviada, e o known_hosts já deve ter a chave de host do roteador',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Esta atualização passa pelo instalador em RAM, que não tem cópia da sua chave SSH. Ele é acessado com sua senha de root vazia, como sem --ssh-key-auth (por isso o sshpass é necessário); a verificação final entra em {host} com a chave de novo.',
 })
 
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}

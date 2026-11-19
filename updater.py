@@ -36,11 +36,16 @@ route `ubi_kernel` is overwritten at step 3, so from there the way out is
 forward: run this again, and it continues from the RAM system. A torn write on
 either route needs the stock TFTP recovery or UART.
 
-It logs in by password, like the rest of this tool. A router configured for
-SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
+By default it logs in by password, like the rest of this tool, and a router
+configured for SSH keys only (`PasswordAuth off`) is refused at step 1. With
+--ssh-key-auth it logs in to the installed system through the system OpenSSH
+and ~/.ssh/config instead, by key only, with the host key checked against
+known_hosts. The RAM installer still gets the empty password: it has no copy
+of the key.
 """
 
 import argparse
+import ipaddress
 import os
 import secrets
 import shlex
@@ -83,9 +88,10 @@ _T_HARMLESS = ("Image check failed.", "verifying sysupgrade tar file integrity")
 
 ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
-
 def scp_from(host, remote, local):
     """Copy remote:path off the box. install.py only ever sends."""
+    if install.key_auth() is not None:
+        return install.key_scp(host, local, remote, upload=False, timeout=300)
     if hostnet.is_windows():
         try:
             return winssh.download(host, remote, local, install.SSH_PASSWORDS)
@@ -215,19 +221,7 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
     and 'ram' otherwise.
     """
     log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
-    # Refuses this host's own gateway; see install.gateway_conflict.
-    install.check_is_openwrt_ram(host, router_iface=router_iface)
-    rc, out = install.ssh(host, "echo up", timeout=30, check=False)
-    if rc != 0:
-        if "Permission denied" in out:
-            raise Abort(t(
-                "{host} refused the root password offered. Pass the current one "
-                "with --root-password. A router set to SSH keys only "
-                "(PasswordAuth off) is not supported: nothing was written.",
-                host=host))
-        raise Abort(f"cannot log in to {host}: {out}")
-
-    board, rootfs = revert.state_of(host, profile)   # refuses any other board
+    board, rootfs = identify(host, profile, router_iface)
     log(f"[1] {host}: {board}, rootfs_type={rootfs}")
     why = revert.require_nand_support(host, rel, profile, images_dir)
     log(f"[1] NAND gate: PASS -- {why}")
@@ -237,13 +231,46 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
         raise Abort(f"rootfs_type is {rootfs!r}: neither the installed system "
                     "nor the RAM installer, so nothing here applies")
 
+    mtd = require_permanent_layout(host, profile, board, rootfs)
+    require_idle_kernel_partition(host, mtd)
+    return _choose_route(host, rel, images, mtd, allow_in_place)
+
+
+def identify(host, profile, router_iface=None):
+    """Log in and return (board, rootfs type); refuses any other board."""
+    # Refuses this host's own gateway; see install.gateway_conflict.
+    install.check_is_openwrt_ram(host, router_iface=router_iface)
+    rc, out = install.ssh(host, "echo up", timeout=30, check=False)
+    if rc != 0:
+        if install.key_auth() is not None:
+            # No password is tried after a refused key, not even the RAM
+            # installer's empty one: see KeyAuth.
+            raise Abort(t(
+                "{host} did not accept the SSH key login, and no password is "
+                "tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) "
+                "and ~/.ssh/config with a manual `ssh` first. If the router is in "
+                "the RAM installer (an interrupted update), it has no copy of your "
+                "key: run this again without --ssh-key-auth. Nothing was written.",
+                host=host, output=out))
+        if "Permission denied" in out:
+            raise Abort(t(
+                "{host} refused the root password offered. Pass the current one "
+                "with --root-password. For a router set to SSH keys only "
+                "(PasswordAuth off), use --ssh-key-auth. Nothing was written.",
+                host=host))
+        raise Abort(f"cannot log in to {host}: {out}")
+    return revert.state_of(host, profile)
+
+
+def require_permanent_layout(host, profile, board, rootfs):
     _rc, mtd_text = install.ssh(host, "cat /proc/mtd")
     if not install.permanent_system_matches(profile, board, rootfs, mtd_text):
         raise Abort("the partition map is not this profile's OpenWrt layout: "
                     f"expected {sorted(profile.openwrt_partitions)}\n{mtd_text}")
-    mtd = install.parse_mtd(mtd_text)
-    require_idle_kernel_partition(host, mtd)
+    return install.parse_mtd(mtd_text)
 
+
+def _choose_route(host, rel, images, mtd, allow_in_place):
     installed = installed_release(host)
     in_place = (allow_in_place and is_v2_release(installed)
                 and is_v2_release(rel.tag))
@@ -266,7 +293,7 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
                       "needs {needed} KiB. Free some first, for example by "
                       "stopping services you can spare, then run this again.",
                       available=available, image=image["name"], needed=needed))
-    return rootfs, ("in-place" if in_place else "ram"), installed
+    return "overlay", ("in-place" if in_place else "ram"), installed
 
 
 def permanent_ssid(host, args, verify_transport, rootfs, profile):
@@ -420,7 +447,10 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
     verify_interface = None if same_host else args.verify_interface
     # On a cable, the router may be this host's gateway (its own DHCP):
     # pre-flight accepted that, and verification has to as well.
-    gateway_iface = args.discover if args.transport == "wired" else None
+    # Under key auth nothing secret is offered and the host key identifies the
+    # router, so it is accepted as the gateway on its interface, Wi-Fi too.
+    gateway_iface = (args.discover if args.transport == "wired" or args.ssh_key_auth
+                     else None)
     router_mac = install.neighbour_mac(host, gateway_iface) if gateway_iface else None
 
     try:
@@ -492,9 +522,80 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
     except Abort:
         log(t("[!] sysupgrade was launched; do not run the flash stage again"))
         log(t("[!] verification-only continuation:"))
-        log("    " + install.verification_command(manifest, verify_interface))
+        log("    " + install.verification_command(
+            manifest, verify_interface, host=host if same_host else None))
         raise
     install.update_resume_phase(manifest, "flash-complete")
+    return found
+
+
+def check_key_options(args):
+    """The --ssh-key-auth combinations that can work, checked before any work."""
+    if not args.ssh_key_auth:
+        if args.ssh_identity or args.ssh_alias:
+            raise Abort(t("--ssh-identity and --ssh-alias require --ssh-key-auth"))
+        return
+    if args.root_password:
+        raise Abort(t("--ssh-key-auth sends no password; drop --root-password"))
+    if not args.keep_settings:
+        raise Abort(t("--ssh-key-auth needs the settings kept: a clean install "
+                      "removes your public key and the router's host key, so the "
+                      "update could not be verified by key"))
+    if args.ssh_identity:
+        args.ssh_identity = os.path.abspath(os.path.expanduser(args.ssh_identity))
+        if not os.path.isfile(args.ssh_identity):
+            raise Abort(t("SSH private key file does not exist"))
+    if args.ssh_alias:
+        try:
+            ipaddress.ip_address((args.host or "").split("%", 1)[0])
+        except ValueError as exc:
+            raise Abort(t("--ssh-alias requires --host with the router's numeric "
+                          "address, which the network checks use")) from exc
+
+
+def enable_key_auth(args):
+    """Send every installed-system ssh/scp through OpenSSH with keys only."""
+    if args.ssh_alias:
+        install.require_alias_matches(args.ssh_alias, args.host)
+    install.KEY_AUTH = install.KeyAuth(args.ssh_identity, alias=args.ssh_alias,
+                                       alias_for=args.host)
+    log(t("[*] SSH: key login to the installed system through OpenSSH and "
+          "~/.ssh/config; no password is sent, and known_hosts must already "
+          "hold the router's host key"))
+
+
+def require_tools_and_login(args):
+    install.require_host_tools(password=bool(args.root_password),
+                               key=args.ssh_key_auth)
+    if args.ssh_key_auth:
+        enable_key_auth(args)
+    if args.root_password:
+        install.SSH_PASSWORDS.append(args.root_password)
+        restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
+
+
+def gateway_allowed(args):
+    """Whether the router may be this host's default gateway on args.discover.
+
+    On a cable the router's own DHCP makes it this host's gateway. That is
+    accepted while all we would offer it is the empty password, the same rule
+    as restore.locate; a configured one goes only to a link-local peer. Under
+    --ssh-key-auth it is accepted as well, on Wi-Fi too: nothing secret is
+    sent (the key never leaves this host), and known_hosts is checked
+    strictly, so a device that only shares the router's address fails the
+    host key check before anything runs on it."""
+    if args.ssh_key_auth:
+        return True
+    return args.transport == "wired" and not any(install.SSH_PASSWORDS)
+
+
+def open_outdir(args, prefix):
+    outdir = os.path.abspath(args.outdir or f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}")
+    os.makedirs(outdir, mode=0o700, exist_ok=True)
+    os.chmod(outdir, 0o700)
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
+    log(f"[*] output -> {outdir}/")
+    return outdir
 
 
 def run(args):
@@ -503,6 +604,7 @@ def run(args):
     i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.image = {"default": "standard", "nss": "nss"}[args.flavour]
+    check_key_options(args)
 
     if args.config_backup:
         args.config_backup = os.path.abspath(args.config_backup)
@@ -529,12 +631,7 @@ def run(args):
     log(f"[*] transport: {args.transport}"
         + (f" via {args.discover}" if args.discover else ""))
 
-    outdir = os.path.abspath(
-        args.outdir or f"update-{time.strftime('%Y%m%d-%H%M%S')}")
-    os.makedirs(outdir, mode=0o700, exist_ok=True)
-    os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
-    log(f"[*] output -> {outdir}/")
+    outdir = open_outdir(args, "update")
 
     rel = release.resolve(args.tag, profile, args.images, offline=args.offline,
                           log=log)
@@ -556,16 +653,9 @@ def run(args):
         log(t("[dry-run] router was not contacted"))
         return 0
 
-    install.require_host_tools(password=bool(args.root_password))
-    if args.root_password:
-        install.SSH_PASSWORDS.append(args.root_password)
-        restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
-
-    # On a cable the router's own DHCP makes it this host's gateway. That is
-    # accepted only while all we would offer it is the empty password, the same
-    # rule as restore.locate; a configured one goes only to a link-local peer.
+    require_tools_and_login(args)
     fallback = profile.openwrt_host if args.transport == "wired" else None
-    gateway_ok = args.transport == "wired" and not any(install.SSH_PASSWORDS)
+    gateway_ok = gateway_allowed(args)
     host = args.host or install.wait_and_discover(
         args.discover, deadline_s=120, fallback=fallback,
         router_gateway_ok=gateway_ok)
@@ -573,6 +663,13 @@ def run(args):
     rootfs, route, installed = preflight(host, profile, rel, images, args.images,
                               router_iface=args.discover if gateway_ok else None,
                               allow_in_place=not args.via_ram_installer)
+    installed_host = host
+    if args.ssh_key_auth and route == "ram":
+        log(t("[!] this update goes through the RAM installer, which has no copy "
+              "of your SSH key. It is reached with its empty root password, as "
+              "without --ssh-key-auth (so sshpass is needed); the final check "
+              "logs in to {host} by key again.", host=installed_host))
+        install.require_host_tools()
     verify_transport = install.detect_transport(args.verify_interface)
     args.wifi_ssid = permanent_ssid(host, args, verify_transport, rootfs,
                                     profile)
@@ -599,7 +696,8 @@ def run(args):
             log("[*] clean install: settings will be reset to defaults; a backup "
                 f"of the current ones is in {outdir}")
 
-    if config_tar and turns_off_password_login(config_tar):
+    # Under --ssh-key-auth the final check logs in by key, so this does not apply.
+    if config_tar and not args.ssh_key_auth and turns_off_password_login(config_tar):
         log(t("[!] this config turns off password login, and the final check logs "
               "in by password. It will report that it could not verify the router "
               "even when the update worked: when it starts waiting, check with your "
@@ -660,13 +758,18 @@ def run(args):
             raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
     install.update_resume_phase(manifest, "pivot-complete")
 
+    # Under key auth the permanent system is verified where it was before:
+    # known_hosts vouches for that address, not for one discovery turns up.
+    # The kept configuration keeps that address, and its host key.
     install.flash(
         host, rel, images, args.yes, profile, args.images, config_tar, manifest,
         args.transport, args.verify_interface, args.wifi_ssid,
         profile.openwrt_host if verify_transport == "wired" else None,
         verify_transport,
         router_iface=args.discover if args.transport == "wired" else None,
-        expected_revision=release.revision(rel, args.images))
+        expected_revision=release.revision(rel, args.images),
+        verify_host=installed_host if args.ssh_key_auth else None,
+        verify_host_iface=args.discover if args.ssh_key_auth else None)
     log(t("[+] update complete: your settings were restored." if config_tar
           else "[+] update complete: the new release is running with default settings."))
     return 0
@@ -711,6 +814,17 @@ def parse_args(argv=None):
     ap.add_argument("--via-ram-installer", action="store_true",
                     help="update through the RAM installer, which reformats both "
                          "UBI partitions (always used from v1.x)")
+    ap.add_argument("--ssh-key-auth", action="store_true",
+                    help="log in to the installed system with your OpenSSH keys "
+                         "and ~/.ssh/config; never a password. The host key must "
+                         "already be in known_hosts")
+    ap.add_argument("--ssh-identity", metavar="PATH", default=None,
+                    help="with --ssh-key-auth: use only this private key "
+                         "(-i PATH, IdentitiesOnly=yes)")
+    ap.add_argument("--ssh-alias", metavar="NAME", default=None,
+                    help="with --ssh-key-auth: connect ssh/scp to this ~/.ssh/config "
+                         "Host; --host stays the numeric address for the network "
+                         "checks")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),

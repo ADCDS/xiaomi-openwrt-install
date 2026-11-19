@@ -61,7 +61,9 @@ ssh-agent or your default OpenSSH configuration. Load encrypted keys with
 the exact target address: confirm it with a manual SSH login first. It checks
 the board, permanent partitions, release revision and recorded reboot, then
 updates the local resume manifest. These options require `--verify-only` and
-do not change authentication during flashing.
+do not change authentication during flashing. If your `~/.ssh/config` names
+the router by an alias, add `--verify-ssh-alias NAME`; that Host must resolve
+to `--verify-host` and log in as `root`.
 
 ### macOS (experimental)
 
@@ -96,6 +98,10 @@ Select the router-facing interface from that list, then run, for example,
 GUI from the same terminal to inherit PATH. Apple's LibreSSL does not support
 `openssl passwd -6`. Join Wi-Fi manually in System Settings; Linux `nmcli`
 automation is unavailable. This approach does not require paramiko or passlib.
+
+To update an installed system from a Mac with the SSH key in your
+`~/.ssh/config`, see [Update with your SSH key](#update-with-your-ssh-key).
+Key login needs neither `sshpass` nor OpenSSL 3.
 
 ### Windows 10/11
 
@@ -221,6 +227,34 @@ flashing twice.
 Use `updater.py` to update OpenWrt while keeping its settings. See the
 [update guide](docs/maintenance.md#update-an-installed-system) for commands,
 release selection, configuration backups, and recovery.
+
+### Update with your SSH key
+
+If the router accepts only SSH keys, or you prefer them, log in with your own
+OpenSSH setup:
+
+```sh
+python3 updater.py --ssh-key-auth --host 192.168.31.1 --interface en0
+```
+
+- `ssh` and `scp` use your `~/.ssh/config` and `known_hosts`. No password is
+  sent, and a refused key is never followed by a password.
+- Log in once by hand (`ssh root@192.168.31.1`) to check and record the
+  router's host key. A missing or changed host key stops the update; check
+  the key yourself before you edit `known_hosts`.
+- Load a key that has a passphrase with `ssh-add` first. Use
+  `--ssh-identity PATH` to offer only one key.
+- If your config names the router by an alias, add `--ssh-alias NAME`.
+  `--host` stays the numeric address that the network checks use; the alias
+  must resolve to it and log in as `root`.
+- The router may be this computer's default gateway on `--interface`: no
+  password is sent, and the host key is checked strictly.
+- The settings must be kept (no `--no-keep-settings`), because the update is
+  verified by key afterwards.
+- The RAM installer route (`--via-ram-installer`, updates from v1.x) still
+  logs in to the RAM installer with its empty password, so it needs
+  `sshpass`. To continue an interrupted update from the RAM installer, run
+  without `--ssh-key-auth`.
 
 ## Web wizard
 
