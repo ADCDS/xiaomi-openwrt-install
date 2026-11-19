@@ -44,6 +44,25 @@ git clone https://github.com/ADCDS/xiaomi-openwrt-install.git
 cd xiaomi-openwrt-install
 ```
 
+### Verify an installed system with an SSH key
+
+If the web UI and manual key-based SSH login work, retry verification without
+flashing again:
+
+```sh
+python3 install.py --verify-only /path/to/install/resume.json \
+  --verify-interface en0 --verify-host 192.168.1.1 \
+  --verify-ssh-key ~/.ssh/id_ed25519
+```
+
+Replace the interface and private key path. Use `agent` instead of the path for
+ssh-agent or your default OpenSSH configuration. Load encrypted keys with
+`ssh-add` first. This mode requires system OpenSSH and a trusted host key for
+the exact target address: confirm it with a manual SSH login first. It checks
+the board, permanent partitions, release revision and recorded reboot, then
+updates the local resume manifest. These options require `--verify-only` and
+do not change authentication during flashing.
+
 ### macOS (experimental)
 
 The wired install and revert have been run end to end on macOS 14 (Sonoma)
