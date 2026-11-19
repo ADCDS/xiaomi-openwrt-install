@@ -1,6 +1,8 @@
 """updater.py's carry-over of extra files and its package reinstall; no router access."""
+import io
 import os
 import shlex
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -151,6 +153,8 @@ class ReinstallTests(unittest.TestCase):
                 return 0, "".join(f"P:{name}\n" for name in installed)
             if cmd == "cat /etc/apk/world":
                 return 0, pinned
+            if cmd.startswith("find /etc -name"):
+                return 0, ""
             if cmd == "apk update":
                 return (updates.pop(0) if updates else 1), "fetch failed"
             if cmd.startswith("apk add "):
@@ -231,6 +235,8 @@ class PrepareTests(unittest.TestCase):
                 return 0, scan
             if updater.KEEP_EOF in cmd:
                 return 0, "/etc/aurora/device.key\n" + updater.KEEP_EOF
+            if "FETCH_OK" in cmd:
+                return 0, "FETCH_NONE"
             if cmd.startswith("du -sk"):
                 return 0, "900\t/overlay/upper"
             if "MemAvailable" in cmd:
@@ -257,12 +263,14 @@ class PrepareTests(unittest.TestCase):
                          "/etc/apk/keys/eamonxg.pem\n/etc/apk/keys/glass-apk.rsa.pub\n"
                          "/etc/aurora/device.hash\n/usr/bin/led-status.sh\n/root/notes\n"
                          "/etc/backup/\n")
-        self.assertEqual(uploads, {updater.WORLD_OLD: "htop\nluci\n"})
+        self.assertEqual(uploads[updater.WORLD_OLD], "htop\nluci\n")
+        self.assertIn("etc/config/network\n", uploads[updater.REMOTE_LIST])
         self.assertEqual(files, ["sysupgrade-list.txt", "world-old.txt", "world.txt"])
         self.assertFalse(any(cmd.startswith("tar czf") for cmd in commands))
 
     def test_no_auto_keep(self):
         commands, _uploads, _files = self.run_prepare("--no-auto-keep")
+        self.assertTrue(any("FETCH_OK" in cmd for cmd in commands))
         self.assertFalse(any("AUTOKEEP_DONE" in cmd for cmd in commands))
         write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
         self.assertEqual(shlex.split(write[0])[2], "/etc/backup/\n")
@@ -277,6 +285,209 @@ class PrepareTests(unittest.TestCase):
             with self.assertRaises(install.Abort):
                 updater.prepare_carryover("h", args, outdir)
         scp.assert_not_called()
+
+
+def tar_bytes(files, extra=()):
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for name, body in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(body)
+            archive.addfile(info, io.BytesIO(body))
+        for info in extra:
+            archive.addfile(info)
+    return buffer.getvalue()
+
+
+class FetchFilesTests(unittest.TestCase):
+    def test_archive_names_are_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "a.tar.gz")
+            link = tarfile.TarInfo("etc/link")
+            link.type = tarfile.SYMTYPE
+            with open(path, "wb") as f:
+                f.write(tar_bytes({"etc/config/dhcp": b"x", "./etc/b": b"y"}, [link]))
+            self.assertEqual(updater.read_files_archive(path),
+                             {"/etc/config/dhcp": b"x", "/etc/b": b"y"})
+            with open(path, "wb") as f:
+                f.write(tar_bytes({"../etc/shadow": b"x"}))
+            with self.assertRaises(install.Abort):
+                updater.read_files_archive(path)
+
+    def run_fetch(self, answer, archive=None, keep=None):
+        commands, lists = [], []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            return (0, answer) if "FETCH_OK" in cmd else (0, "")
+
+        def scp_to(host, local, remote, passwords=None):
+            with open(local, encoding="utf-8") as f:
+                lists.append(f.read())
+
+        def scp_from(host, remote, local):
+            with open(local, "wb") as f:
+                f.write(archive)
+        with patch.object(install, "ssh", ssh), patch.object(install, "scp_to", scp_to), \
+             patch.object(updater, "scp_from", scp_from) as copied:
+            try:
+                return updater.fetch_files("h", "/rom", ["/etc/config/dhcp", "/etc/x"],
+                                           keep=keep), commands, lists
+            finally:
+                self.assertTrue(commands[-1].startswith("rm -f "))
+
+    def test_only_requested_regular_files(self):
+        archive = tar_bytes({"etc/config/dhcp": b"default\n", "etc/config/._dhcp": b"\0meta"})
+        files, commands, lists = self.run_fetch("FETCH_OK", archive)
+        self.assertEqual(files, {"/etc/config/dhcp": b"default\n"})
+        self.assertEqual(lists, ["etc/config/dhcp\netc/x\n"])
+        self.assertIn("cd /rom && ", commands[0])
+        self.assertIn("tar czf", commands[0])
+
+    def test_none_present_and_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            keep = os.path.join(tmp, "kept.tar.gz")
+            files, _commands, _lists = self.run_fetch("FETCH_NONE", keep=keep)
+            self.assertEqual(files, {})
+            self.assertFalse(os.path.exists(keep))
+        with self.assertRaises(install.Abort):
+            self.run_fetch("tar: short write")
+
+
+class ApkNewReviewTests(unittest.TestCase):
+    MINE = b"config dnsmasq\n\toption domain 'lan'\n"
+    PACKAGE = b"config dnsmasq\n\toption domain 'lan'\n\toption rebind_protection '1'\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(updater, "log")
+        p.start()
+        self.addCleanup(p.stop)
+        self.commands = []
+
+    def review(self, answers, assume_yes=False, before=()):
+        found = ("/etc/config/a.apk-new\n/etc/config/b.apk-new\n"
+                 "/etc/config/old.apk-new\n")
+        files = {}
+        for name in ("a", "b"):
+            files[f"/etc/config/{name}"] = self.MINE
+            files[f"/etc/config/{name}.apk-new"] = self.PACKAGE
+
+        def ssh(host, cmd, **kw):
+            self.commands.append(cmd)
+            return (0, found) if cmd.startswith("find /etc") else (0, "")
+        with patch.object(install, "ssh", ssh), \
+             patch.object(updater, "fetch_files",
+                          side_effect=lambda h, root, paths, keep=None:
+                          {p: files[p] for p in paths if p in files}), \
+             patch("builtins.input", side_effect=answers) as asked:
+            result = updater.review_apk_new("h", self.tmp.name,
+                                            set(before) | {"/etc/config/old.apk-new"},
+                                            assume_yes)
+        return result, asked
+
+    def test_keep_and_new(self):
+        result, asked = self.review(["x", "k", "n"])
+        self.assertEqual(result, [("/etc/config/a", "keep"), ("/etc/config/b", "new")])
+        self.assertEqual(asked.call_count, 3)          # "x" was asked again
+        self.assertIn("rm -f /etc/config/a.apk-new", self.commands)
+        self.assertIn("cp -p /etc/config/b /etc/config/b.apk-old && "
+                      "mv -f /etc/config/b.apk-new /etc/config/b", self.commands)
+        self.assertFalse(any("old.apk-new" in cmd for cmd in self.commands[1:]))
+        with open(os.path.join(self.tmp.name, "conffiles",
+                               "etc__config__a.apk-new.diff"), encoding="utf-8") as f:
+            diff = f.read()
+        self.assertIn("+\toption rebind_protection '1'", diff)
+        self.assertIn("/etc/config/a (yours)", diff)
+
+    def test_yes_defers_without_asking_or_writing(self):
+        result, asked = self.review([], assume_yes=True)
+        self.assertEqual([d for _p, d in result], ["defer", "defer"])
+        asked.assert_not_called()
+        self.assertEqual([c for c in self.commands if not c.startswith("find")], [])
+
+    def test_no_terminal_and_ctrl_c_defer(self):
+        result, _asked = self.review(EOFError())
+        self.assertEqual([d for _p, d in result], ["defer", "defer"])
+        result, asked = self.review(KeyboardInterrupt())
+        self.assertEqual([d for _p, d in result], ["defer", "defer"])
+        self.assertEqual(asked.call_count, 1)
+
+    def test_nothing_new_asks_nothing(self):
+        result, asked = self.review([], before={"/etc/config/a.apk-new",
+                                                 "/etc/config/b.apk-new"})
+        self.assertEqual(result, [])
+        asked.assert_not_called()
+
+    def test_decisions_reach_the_summary(self):
+        with tempfile.TemporaryDirectory() as outdir, patch.object(updater, "log"):
+            updater._write_summary(outdir, {
+                "installed": ["luci-app-x"], "present": [], "skipped": [], "failed": [],
+                "conffiles": [("/etc/config/x", "defer")]})
+            with open(os.path.join(outdir, "reinstall-summary.txt"), encoding="utf-8") as f:
+                self.assertIn("config defer: /etc/config/x", f.read())
+
+
+class ImageDefaultsTests(unittest.TestCase):
+    OLD = {"etc/config/dhcp": b"old dhcp\n", "etc/config/system": b"same\n",
+           "etc/config/gone": b"x\n", "etc/config/firewall": b"old fw\n"}
+    NEW = {"/etc/config/dhcp": b"old dhcp\nnew option\n", "/etc/config/system": b"same\n",
+           "/etc/config/firewall": b"new fw\n"}
+    MINE = {"/etc/config/dhcp": b"my dhcp\n", "/etc/config/firewall": b"new fw\n"}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        p = patch.object(updater, "log")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def fetch(self, host, root, paths, keep=None):
+        source = self.NEW if root == "/rom" else self.MINE
+        return {path: source[path] for path in paths if path in source}
+
+    def test_only_upstream_changes_are_reported(self):
+        with open(os.path.join(self.tmp.name, updater.ROM_DEFAULTS_OLD), "wb") as f:
+            f.write(tar_bytes(self.OLD))
+        with patch.object(updater, "fetch_files", side_effect=self.fetch) as fetch, \
+             patch.object(install, "ssh", side_effect=AssertionError("writes nothing")):
+            result = dict(updater.review_image_defaults("h", self.tmp.name))
+        # system did not change upstream; firewall is already the new default.
+        self.assertEqual(set(result), {"/etc/config/dhcp", "/etc/config/gone",
+                                       "/etc/config/firewall"})
+        self.assertIsNone(result["/etc/config/gone"])
+        self.assertIsNone(result["/etc/config/firewall"])
+        with open(result["/etc/config/dhcp"], encoding="utf-8") as f:
+            diff = f.read()
+        self.assertIn("+new option", diff)
+        self.assertIn("(old default)", diff)
+        self.assertEqual(fetch.call_args_list[1].args[1], "/")
+
+    def test_without_old_defaults_nothing_is_read(self):
+        with patch.object(updater, "fetch_files") as fetch:
+            self.assertEqual(updater.review_image_defaults("h", self.tmp.name), [])
+        fetch.assert_not_called()
+
+    def test_saving_old_defaults_never_stops_the_update(self):
+        listed = "/etc/config/dhcp\n/etc/sysupgrade.conf\n"
+        with patch.object(updater, "fetch_files", return_value={"/etc/config/dhcp": b"x"}) as fetch:
+            self.assertEqual(updater.save_rom_defaults("h", self.tmp.name, listed), 1)
+        self.assertEqual(fetch.call_args.args[1:3],
+                         ("/rom", ["/etc/config/dhcp", "/etc/sysupgrade.conf"]))
+        self.assertEqual(fetch.call_args.kwargs["keep"],
+                         os.path.join(self.tmp.name, updater.ROM_DEFAULTS_OLD))
+        with patch.object(updater, "fetch_files", side_effect=install.Abort("no tar")):
+            self.assertEqual(updater.save_rom_defaults("h", self.tmp.name, listed), 0)
+
+    def test_finish_reviews_then_reinstalls_with_the_yes_flag(self):
+        args = updater.parse_args(["--yes"])
+        with patch.object(updater, "review_image_defaults",
+                          side_effect=install.Abort("lost")) as review, \
+             patch.object(updater, "reinstall_packages") as reinstall:
+            updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
+        review.assert_called_once()
+        self.assertTrue(reinstall.call_args.kwargs["assume_yes"])
 
 
 if __name__ == "__main__":

@@ -642,6 +642,47 @@ PT_BR.update({
     '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] um kmod que falhou não está no repositório do firmware em execução; não instale um feito para outro kernel',
 })
 
+# updater.py: reviewing configuration files after the update.
+ZH_CN.update({
+    '\n=== configuration files: new package versions ===': '\n=== 配置文件：软件包带来的新版本 ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] 有 {count} 个重装的软件包带来了你改过的配置文件的新版本；当前使用的仍是你的版本',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}：保留你的版本（k）、换成软件包的新版本（n），还是稍后决定（d）？[k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] 已保留你的 {path}；软件包的版本已删除',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] 已换成软件包的 {path}；你的版本保存在 {old}。请重启使用它的服务，或重启路由器。',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] 留待稍后处理：{path} 和 {new}；差异见 {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== 配置文件：上游改动过的镜像默认版本 ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] 新版本没有改动你改过的那些文件的默认版本；你的版本保持不变',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] 新版本改动了 {count} 个你改过的文件的默认版本。你的版本已恢复并在使用中；请从上游的改动里挑出需要的内容加进去：',
+    '[r] the new release no longer ships {path}': '[r] 新版本不再包含 {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}：上游的改动见 {diff}',
+})
+RU.update({
+    '\n=== configuration files: new package versions ===': '\n=== файлы настроек: новые версии из пакетов ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] переустановленные пакеты ({count}) принесли новую версию изменённого вами файла настроек; используется ваша версия',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}: оставить вашу версию (k), установить новую из пакета (n) или решить позже (d)? [k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] ваш {path} оставлен; версия из пакета удалена',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] установлен {path} из пакета; ваша версия сохранена в {old}. Перезапустите службу, которая его читает, или перезагрузите роутер.',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] отложено: {path} и {new}; различия в {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== файлы настроек: значения по умолчанию, изменённые в образе ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] новый выпуск не изменил значения по умолчанию ни одного из изменённых вами файлов; ваши версии остаются как есть',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] новый выпуск изменил значения по умолчанию у изменённых вами файлов ({count}). Ваши версии восстановлены и используются; перенесите нужное из изменений образа:',
+    '[r] the new release no longer ships {path}': '[r] в новом выпуске больше нет {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}: изменения образа в {diff}',
+})
+PT_BR.update({
+    '\n=== configuration files: new package versions ===': '\n=== arquivos de configuração: novas versões dos pacotes ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] {count} pacote(s) reinstalado(s) trouxe(ram) uma nova versão de um arquivo de configuração que você alterou; a sua está em uso',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}: manter a sua versão (k), instalar a nova do pacote (n) ou decidir depois (d)? [k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] o seu {path} foi mantido; a versão do pacote foi removida',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] o {path} do pacote foi instalado; o seu está em {old}. Reinicie o serviço que o lê, ou reinicie o roteador.',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] deixado para depois: {path} e {new}; a diferença está em {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== arquivos de configuração: padrões da imagem alterados pelo upstream ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] a nova versão não alterou o padrão de nenhum dos arquivos que você mudou; as suas versões ficam como estão',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] a nova versão alterou o padrão de {count} arquivo(s) que você mudou. Os seus foram restaurados e estão em uso; leve deles o que precisar da mudança do upstream:',
+    '[r] the new release no longer ships {path}': '[r] a nova versão não inclui mais {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}: mudança do upstream em {diff}',
+})
+
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}
 
 # Endonyms: what each language calls itself, used by the wizard's switch and

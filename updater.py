@@ -51,6 +51,7 @@ docs/packages.md.
 """
 
 import argparse
+import difflib
 import fnmatch
 import ipaddress
 import os
@@ -60,6 +61,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
 
 import chain
@@ -142,6 +144,17 @@ SPECIAL_PACKAGES = {
 
 # How long a freshly updated router gets to reach its package repositories.
 REPOSITORY_DEADLINE_S = 300
+
+# Configuration files after the update (see review_apk_new and
+# review_image_defaults). The image defaults are read from /rom, the
+# read-only copy of the running image, before and after the update.
+REMOTE_LIST = "/tmp/rd03v2-files.list"
+REMOTE_FILES = "/tmp/rd03v2-files.tar.gz"
+ROM_DEFAULTS_OLD = "rom-defaults-old.tar.gz"
+CONFFILE_DIR = "conffiles"
+APK_NEW = ".apk-new"
+# How much of a diff the log shows; the whole of it is always saved.
+DIFF_LOG_LINES = 40
 
 
 def is_auto_keep_excluded(path, excludes=AUTO_KEEP_EXCLUDES):
@@ -332,6 +345,7 @@ def prepare_carryover(host, args, outdir):
     _write_local(outdir, "world.txt", world)
     _rc, listed = install.ssh(host, "sysupgrade -l", timeout=120)
     _write_local(outdir, "sysupgrade-list.txt", listed)
+    save_rom_defaults(host, outdir, listed)
 
     extras = [] if args.no_auto_keep else detect_extra_files(host)
     if args.no_auto_keep:
@@ -380,13 +394,15 @@ def wait_for_repositories(host, deadline_s=None):
         time.sleep(15)
 
 
-def reinstall_packages(host, outdir, deadline_s=None):
+def reinstall_packages(host, outdir, deadline_s=None, assume_yes=True):
     """Install what world-old.txt lists and the updated system lacks.
 
     Each package is checked first and added only when missing; a pinned or
-    special one is never added by name (see SPECIAL_PACKAGES). Returns the
-    summary as {"installed", "present", "skipped", "failed"} and writes it to
-    reinstall-summary.txt."""
+    special one is never added by name (see SPECIAL_PACKAGES). A package
+    whose configuration the backup restored leaves the new default beside it
+    as *.apk-new; each of those is then reviewed (review_apk_new), asking
+    unless assume_yes. Returns the summary as {"installed", "present",
+    "skipped", "failed", "conffiles"} and writes it to reinstall-summary.txt."""
     log(t("\n=== packages: reinstall what the update dropped ==="))
     rc, text = install.ssh(host, f"cat {WORLD_OLD}", check=False)
     if rc != 0:
@@ -399,7 +415,8 @@ def reinstall_packages(host, outdir, deadline_s=None):
             text = source.read()
         log(f"[p] {WORLD_OLD} is missing on the router; using {local}")
     wanted = filter_world(text)
-    summary = {"installed": [], "present": [], "skipped": [], "failed": []}
+    summary = {"installed": [], "present": [], "skipped": [], "failed": [],
+               "conffiles": []}
     if not wanted:
         log(t("[p] the package list is empty; nothing to reinstall"))
         return _write_summary(outdir, summary)
@@ -429,6 +446,7 @@ def reinstall_packages(host, outdir, deadline_s=None):
         summary["failed"] += [(name, "the package repositories are unreachable")
                               for name in missing]
         missing = []
+    before = list_apk_new(host) if missing else set()
     for name in missing:
         try:
             rc, out = install.ssh(host, f"apk add {shlex.quote(name)}",
@@ -442,6 +460,8 @@ def reinstall_packages(host, outdir, deadline_s=None):
             reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
             summary["failed"].append((name, reason))
             log(f"[p] could not install {name}: {reason}")
+    if summary["installed"]:
+        summary["conffiles"] = review_apk_new(host, outdir, before, assume_yes)
     return _write_summary(outdir, summary)
 
 
@@ -450,6 +470,7 @@ def _write_summary(outdir, summary):
     lines += [f"already present: {name}" for name in summary["present"]]
     lines += [f"skipped: {name} -- {why}" for name, why in summary["skipped"]]
     lines += [f"failed: {name} -- {why}" for name, why in summary["failed"]]
+    lines += [f"config {decision}: {path}" for path, decision in summary.get("conffiles", [])]
     path = _write_local(outdir, "reinstall-summary.txt", "\n".join(lines))
     log(t("[p] packages: {installed} installed, {present} already present, "
           "{skipped} skipped, {failed} failed -> {path}",
@@ -464,6 +485,240 @@ def _write_summary(outdir, summary):
         log(t("[p] a kmod that failed is not in the repository of the running "
               "firmware; do not install one built for another kernel"))
     return summary
+
+
+def read_files_archive(path):
+    """{"/absolute/path": bytes} for the regular files in a fetch_files archive.
+
+    Names are checked rather than trusted: nothing absolute, no "..", so an
+    odd archive cannot name a path outside the tree it claims to be."""
+    files = {}
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name.startswith("/") or ".." in name.split("/"):
+                raise Abort(f"{path} names {member.name!r}, outside its tree")
+            files["/" + name] = archive.extractfile(member).read()
+    return files
+
+
+def fetch_files(host, root, paths, keep=None):
+    """{path: bytes} for those of `paths` that are regular files under `root`.
+
+    One tar on the router, copied off with scp, so the bytes are exact (ssh
+    output is stripped). `paths` are absolute, as seen from `root`: /rom for
+    the image's defaults, / for what is in use. keep: also save the archive
+    there; it is not written when none of the paths exists."""
+    relative = [path.lstrip("/") for path in paths
+                if path.startswith("/") and "\n" not in path]
+    if not relative:
+        return {}
+    with tempfile.TemporaryDirectory() as tmp:
+        listing = os.path.join(tmp, "files.list")
+        with open(listing, "w", encoding="utf-8", newline="\n") as output:
+            output.write("".join(path + "\n" for path in relative))
+        have = REMOTE_LIST + ".have"
+        try:
+            install.scp_to(host, listing, REMOTE_LIST)
+            _rc, out = install.ssh(
+                host,
+                f"cd {shlex.quote(root)} && "
+                "while IFS= read -r p; do [ -f \"$p\" ] && [ ! -L \"$p\" ] && echo \"$p\"; "
+                f"done < {REMOTE_LIST} > {have} && "
+                f"if [ -s {have} ]; then tar czf {REMOTE_FILES} -T {have} && echo FETCH_OK; "
+                "else echo FETCH_NONE; fi",
+                timeout=120, check=False)
+            if "FETCH_NONE" in out:
+                return {}
+            if "FETCH_OK" not in out:
+                raise Abort(f"cannot read files under {root} on {host}: {out.strip()!r}")
+            local = keep or os.path.join(tmp, "files.tar.gz")
+            scp_from(host, REMOTE_FILES, local)
+        finally:
+            try:
+                install.ssh(host, f"rm -f {REMOTE_LIST} {have} {REMOTE_FILES}",
+                            timeout=30, check=False)
+            except Exception:               # noqa: BLE001 -- the first error matters
+                pass
+        # Only what was asked for: a tar may add entries of its own (macOS's
+        # adds AppleDouble ._ files), and those are not the router's files.
+        wanted = {"/" + path for path in relative}
+        return {path: data for path, data in read_files_archive(local).items()
+                if path in wanted}
+
+
+def _text(data):
+    return data.decode("utf-8", "replace").splitlines(keepends=True)
+
+
+def unified(old, new, old_name, new_name):
+    """A unified diff of two file contents, or a note when either is binary."""
+    if b"\0" in old or b"\0" in new:
+        return f"Binary files {old_name} and {new_name} differ\n"
+    lines = difflib.unified_diff(_text(old), _text(new), old_name, new_name)
+    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+
+
+def save_diff(outdir, path, suffix, text):
+    folder = os.path.join(outdir, CONFFILE_DIR)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    local = os.path.join(folder, path.strip("/").replace("/", "__") + suffix)
+    with open(local, "w", encoding="utf-8", newline="\n") as output:
+        output.write(text)
+    return local
+
+
+def log_diff(text, saved):
+    lines = text.splitlines()
+    for line in lines[:DIFF_LOG_LINES]:
+        log("      " + line)
+    if len(lines) > DIFF_LOG_LINES:
+        log(f"      ... {len(lines) - DIFF_LOG_LINES} more lines in {saved}")
+
+
+# ---- configuration files of reinstalled packages (as dpkg asks) -------------
+
+def list_apk_new(host):
+    _rc, out = install.ssh(host, f"find /etc -name '*{APK_NEW}' 2>/dev/null",
+                           check=False)
+    return {line.strip() for line in out.splitlines()
+            if line.strip().startswith("/") and line.strip().endswith(APK_NEW)}
+
+
+def ask_conffile(path, assume_yes):
+    """The decision for one configuration file: keep, new or defer."""
+    if assume_yes:
+        return "defer"
+    choices = {"k": "keep", "n": "new", "d": "defer"}
+    while True:
+        try:
+            answer = input(t("[?] {path}: keep your version (k), install the "
+                             "package's new one (n), or decide later (d)? "
+                             "[k/n/d] ", path=path)).strip().lower()
+        except EOFError:
+            return "defer"
+        if answer in choices:
+            return choices[answer]
+
+
+def review_apk_new(host, outdir, before, assume_yes):
+    """Decide each *.apk-new that the reinstall left, as dpkg asks on upgrade.
+
+    apk never overwrites a configuration file you changed: it keeps yours and
+    writes the package's new default beside it as *.apk-new. Only those that
+    this reinstall created (not in `before`) are shown, as a diff from yours
+    to the package's, and for each one:
+      keep   your version stays and the *.apk-new is removed;
+      new    the package's version is installed, yours is kept as *.apk-old;
+      defer  both stay as they are (always so with --yes).
+    Every diff is saved under conffiles/ in the output directory.
+    Returns [(path, decision)]."""
+    created = sorted(list_apk_new(host) - set(before))
+    if not created:
+        return []
+    log(t("\n=== configuration files: new package versions ==="))
+    log(t("[p] {count} reinstalled package(s) brought a new version of a "
+          "configuration file you changed; yours is in use", count=len(created)))
+    pairs = [(new[:-len(APK_NEW)], new) for new in created]
+    files = fetch_files(host, "/", [path for pair in pairs for path in pair])
+    decisions = []
+    for path, new in pairs:
+        if path not in files or new not in files:
+            log(f"[p] cannot read {path} or {new}; left as it is")
+            decisions.append((path, "defer"))
+            continue
+        text = unified(files[path], files[new], f"{path} (yours)", f"{new} (package)")
+        saved = save_diff(outdir, path, ".apk-new.diff", text)
+        log(f"[p] {path}:")
+        log_diff(text, saved)
+        try:
+            decision = ask_conffile(path, assume_yes)
+        except KeyboardInterrupt:
+            # The update itself is done; Ctrl-C only stops the questions.
+            log("[p] interrupted: this and the remaining files are left for later")
+            assume_yes, decision = True, "defer"
+        quoted, quoted_new = shlex.quote(path), shlex.quote(new)
+        if decision == "keep":
+            install.ssh(host, f"rm -f {quoted_new}")
+            log(t("[p] kept your {path}; the package's version was removed",
+                  path=path))
+        elif decision == "new":
+            old = path + ".apk-old"
+            install.ssh(host, f"cp -p {quoted} {shlex.quote(old)} && "
+                              f"mv -f {quoted_new} {quoted}")
+            log(t("[p] installed the package's {path}; yours is in {old}. Restart "
+                  "the service that reads it, or reboot.", path=path, old=old))
+        else:
+            log(t("[p] left for later: {path} and {new}; the difference is in "
+                  "{diff}", path=path, new=new, diff=saved))
+        decisions.append((path, decision))
+    return decisions
+
+
+# ---- configuration files of the image's own packages ------------------------
+
+def save_rom_defaults(host, outdir, listed):
+    """Before the update: the image defaults of the files the backup keeps.
+
+    `listed` is `sysupgrade -l`. For each of those files that the running
+    image ships (it is in /rom), its default is saved as
+    rom-defaults-old.tar.gz. With the new image's default read after the
+    update, that gives the three versions a real comparison needs. Never
+    stops the update: this is only for the review afterwards."""
+    paths = [line.strip() for line in listed.splitlines() if line.strip().startswith("/")]
+    keep = os.path.join(outdir, ROM_DEFAULTS_OLD)
+    try:
+        found = fetch_files(host, "/rom", paths, keep=keep)
+    except (Abort, OSError, tarfile.TarError) as exc:
+        log(f"[c] could not save the image defaults ({exc}); the review of "
+            "changed defaults after the update is skipped")
+        return 0
+    log(f"[c] {len(found)} image default(s) of kept files -> {keep}" if found
+        else "[c] none of the kept files has an image default")
+    return len(found)
+
+
+def review_image_defaults(host, outdir):
+    """After the update: which kept files' image defaults the new release changed.
+
+    Your version was restored and is in use, which is right for a file whose
+    default did not change; those are not mentioned. For one whose default
+    did change, the upstream change (old default to new) is saved and shown,
+    so you can carry it into yours. Nothing on the router is changed.
+    Returns [(path, saved diff or None)]."""
+    archive = os.path.join(outdir, ROM_DEFAULTS_OLD)
+    if not os.path.exists(archive):
+        return []
+    log(t("\n=== configuration files: image defaults that changed upstream ==="))
+    old = read_files_archive(archive)
+    new = fetch_files(host, "/rom", sorted(old))
+    changed = sorted(path for path in old if new.get(path) != old[path])
+    if not changed:
+        log(t("[r] the new release changed none of the defaults of the files you "
+              "changed; your versions stay as they are"))
+        return []
+    mine = fetch_files(host, "/", [path for path in changed if path in new])
+    results = []
+    log(t("[r] the new release changed the default of {count} file(s) that you "
+          "changed. Yours were restored and are in use; carry over what you "
+          "need from the upstream change:", count=len(changed)))
+    for path in changed:
+        if path not in new:
+            log(t("[r] the new release no longer ships {path}", path=path))
+            results.append((path, None))
+            continue
+        if mine.get(path) == new[path]:
+            results.append((path, None))
+            continue
+        text = unified(old[path], new[path], f"{path} (old default)",
+                       f"{path} (new default)")
+        saved = save_diff(outdir, path, ".upstream.diff", text)
+        log(t("[r] {path}: upstream change in {diff}", path=path, diff=saved))
+        log_diff(text, saved)
+        results.append((path, saved))
+    return results
 
 
 def scp_from(host, remote, local):
@@ -977,14 +1232,21 @@ def open_outdir(args, prefix):
 
 
 def finish_packages(host, args, outdir, config_tar):
-    """Reinstall after a verified update. Never turns that update into a failure."""
+    """After a verified update: review the configuration files, reinstall.
+
+    Neither ever turns that update into a failure."""
     if not config_tar or not host:
         return
+    try:
+        review_image_defaults(host, outdir)
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired, OSError,
+            tarfile.TarError) as exc:
+        log(f"[r] the review of changed image defaults stopped: {exc}")
     if args.no_reinstall:
         log("[p] package reinstall skipped (--no-reinstall)")
         return
     try:
-        reinstall_packages(host, outdir)
+        reinstall_packages(host, outdir, assume_yes=args.yes)
     except (Abort, restore.RestoreError, subprocess.TimeoutExpired) as exc:
         log(t("[!] the update is complete, but reinstalling packages stopped: "
               "{error}. Run this again with --reinstall-only to retry.", error=exc))
@@ -1009,7 +1271,7 @@ def run_reinstall_only(args, profile):
                     "--reinstall-only works on an installed, updated router")
     require_permanent_layout(host, profile, board, rootfs)
     log(f"[*] {host}: {board}, the installed system")
-    reinstall_packages(host, outdir)
+    reinstall_packages(host, outdir, assume_yes=args.yes)
     return 0
 
 

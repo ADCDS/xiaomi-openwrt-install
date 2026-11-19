@@ -33,6 +33,36 @@ python3 updater.py --reinstall-only --host 192.168.31.1 --interface en0
 
 Add `--ssh-key-auth` if you log in with a key.
 
+## Configuration files after the update
+
+Your configuration is restored and in use after the update. `updater.py` then
+shows you where a newer default exists, in two ways.
+
+**Packages that were reinstalled.** apk never overwrites a configuration file
+that you changed. It keeps yours and saves the package's new default next to
+it as `*.apk-new`. For each `*.apk-new` that the reinstall created,
+`updater.py` shows the difference from your version and asks, as dpkg does:
+
+- `k`: keep your version. The `*.apk-new` file is removed.
+- `n`: install the package's version. Yours is saved as `*.apk-old`. Restart
+  the service that reads the file, or reboot.
+- `d`: decide later. Both files stay as they are.
+
+With `--yes`, or without a terminal, every file is left for later. Ctrl-C
+leaves the current file and the rest for later.
+
+**Packages in the image.** sysupgrade restores your version over the image's
+default without asking, which is correct when that default did not change.
+Before the update, `updater.py` saves the current image defaults (from `/rom`)
+of the files that the backup keeps, as `rom-defaults-old.tar.gz`. After the
+update, it compares them with the new image's defaults and lists only the
+files whose default the new release changed. For each of those, it shows the
+upstream change from the old default to the new one, so you can copy what you
+need into your version. Nothing on the router is changed in this step.
+
+All differences are saved in `conffiles/` in the output directory. The
+decisions are listed in `reinstall-summary.txt`.
+
 ## Kernel modules
 
 A `kmod-*` package must be built for the exact kernel that is running. Install

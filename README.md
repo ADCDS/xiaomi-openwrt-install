@@ -243,6 +243,12 @@ Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
   `--no-reinstall`; retry it later with `--reinstall-only`. See
   [docs/packages.md](docs/packages.md) for kernel modules and packages such as
   `dnsmasq-full`, which are not replaced automatically.
+- After the update, configuration files that have a newer default are shown.
+  For a reinstalled package's `*.apk-new` you choose, as with dpkg, to keep
+  your version, install the new one, or decide later. For an image package
+  whose default the new release changed, the upstream change is shown and
+  saved in `conffiles/`. See
+  [Configuration files after the update](docs/packages.md#configuration-files-after-the-update).
 
 The output directory also keeps `world.txt`, `sysupgrade-list.txt` and
 `overlay-full.tar.gz` for comparison. The archive is never restored.

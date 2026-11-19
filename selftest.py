@@ -2184,6 +2184,8 @@ class _UpdateBox:
             return 0, "AUTOKEEP_DONE"
         if "RD03V2_KEEP_EOF" in cmd:
             return 0, "RD03V2_KEEP_EOF"
+        if "FETCH_OK" in cmd:
+            return 0, "FETCH_NONE"
         if "board_name" in cmd:
             return (self.board_rc, self.board if self.board_rc == 0 else "")
         if "rootfs_type" in cmd:
