@@ -71,6 +71,12 @@ def list_interfaces():
                  "ipv4": row["ipv4"],
                  "state": str(row.get("status") or "?").lower()}
                 for row in records if not row.get("hidden")]
+    if sys.platform == "darwin":
+        import macnet
+        return [{"name": name, "transport": transport,
+                 "ipv4": [str(n) for n in install.interface_ipv4_networks(name)],
+                 "state": "?"}
+                for name, transport in macnet.interfaces().items()]
     out = []
     base = "/sys/class/net"
     try:

@@ -38,6 +38,22 @@ cd xiaomi-openwrt-install
 sudo apt install sshpass openssl
 ```
 
+### macOS（实验性）
+
+快速适配使用 Homebrew 网络工具，尚未完成实机刷写验证：
+
+```sh
+brew install python iproute2mac sshpass openssl@3
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+python3 install.py --list-interfaces
+```
+
+从列表选择连接路由器的接口（例如 `en0`），然后运行
+`python3 install.py --interface en0`。不要仅凭名称假定 `en0` 是有线网卡。
+GUI 必须从同一终端启动以继承 PATH。系统自带 LibreSSL 不支持所需的
+`openssl passwd -6`。Wi-Fi 请在 macOS 系统设置中手动连接；不支持 Linux
+的 `nmcli` 自动连接。此方案不需要 paramiko 或 passlib。
+
 ### Windows 10/11
 
 从 [python.org](https://www.python.org/downloads/windows/) 安装 Python 3.9 或更新版本，并包含 `py` 启动器。也可以下载仓库的 ZIP 包来代替 `git clone`。在包含 `install.py` 的目录中打开 PowerShell，并**在有互联网访问时**安装依赖：

@@ -65,9 +65,18 @@ def collect():
              "ok": _which("powershell"), "required": True},
         ]
 
+    if system == "Darwin":
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        import macnet
+        for check in checks:
+            if check["id"] == "openssl":
+                check["ok"] = macnet.openssl_ready()
+            if check["id"] == "ip":
+                check["label"] = "iproute2mac (ip)"
+
     host = {"Linux": "wsl" if wsl else "linux", "Windows": "windows",
             "Darwin": "macos"}.get(system, "other")
-    platform_ok = system in ("Linux", "Windows")
+    platform_ok = system in ("Linux", "Windows", "Darwin")
 
     return {
         "system": system,
@@ -78,6 +87,8 @@ def collect():
         "ready": platform_ok and all(c["ok"] for c in checks if c["required"]),
         "hint_install": {
             "Linux": "sudo apt install sshpass openssl",
+            "Darwin": 'brew install iproute2mac sshpass openssl@3; '
+                      'export PATH="$(brew --prefix openssl@3)/bin:$PATH"',
             "Windows": "py -3 -m pip install -r requirements-windows.txt",
         }.get(system, ""),
     }
