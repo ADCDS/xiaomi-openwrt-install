@@ -228,6 +228,25 @@ Use `updater.py` to update OpenWrt while keeping its settings. See the
 [update guide](docs/maintenance.md#update-an-installed-system) for commands,
 release selection, configuration backups, and recovery.
 
+Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
+
+- Files in `/overlay/upper` that no package owns and `sysupgrade -l` does not
+  list (for example your own scripts or apk keys) are shown, and after your
+  confirmation added to `/etc/sysupgrade.conf`. Generated and program files
+  are excluded (`AUTO_KEEP_EXCLUDES` in `updater.py`). Add paths by hand with
+  `--extra-keep PATH` (repeatable); turn the detection off with
+  `--no-auto-keep`.
+- The packages you installed are saved as `/etc/backup/world-old.txt`, which
+  goes into the backup. After a verified update, each missing package is
+  installed again with `apk add`, and a summary is written to
+  `reinstall-summary.txt` in the output directory. Skip this with
+  `--no-reinstall`; retry it later with `--reinstall-only`. See
+  [docs/packages.md](docs/packages.md) for kernel modules and packages such as
+  `dnsmasq-full`, which are not replaced automatically.
+
+The output directory also keeps `world.txt`, `sysupgrade-list.txt` and
+`overlay-full.tar.gz` for comparison. The archive is never restored.
+
 ### Update with your SSH key
 
 If the router accepts only SSH keys, or you prefer them, log in with your own

@@ -42,9 +42,16 @@ configured for SSH keys only (`PasswordAuth off`) is refused at step 1. With
 and ~/.ssh/config instead, by key only, with the host key checked against
 known_hosts. The RAM installer still gets the empty password: it has no copy
 of the key.
+
+Before the backup it also carries over what sysupgrade would drop: files in
+/overlay/upper that no package owns are added to /etc/sysupgrade.conf, and the
+packages the operator installed are listed in /etc/backup/world-old.txt.
+After a verified update those packages are installed again. See
+docs/packages.md.
 """
 
 import argparse
+import fnmatch
 import ipaddress
 import os
 import secrets
@@ -87,6 +94,377 @@ IN_PLACE_REFUSAL = "Boot the initramfs image and run sysupgrade from there."
 _T_HARMLESS = ("Image check failed.", "verifying sysupgrade tar file integrity")
 
 ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
+
+# ---- carry-over: extra files and packages -----------------------------------
+
+SYSUPGRADE_CONF = "/etc/sysupgrade.conf"
+BACKUP_DIR = "/etc/backup/"
+WORLD_OLD = "/etc/backup/world-old.txt"
+REMOTE_OVERLAY = "/tmp/overlay-full.tar.gz"
+KEEP_EOF = "RD03V2_KEEP_EOF"
+
+# Files in /overlay/upper that are never added to sysupgrade.conf on their
+# own: generated at boot or by apk, tied to this one image, or programs that a
+# package (or the next image) provides. Shell glob patterns, matched against
+# the full path; `*` also matches "/". Edit here.
+AUTO_KEEP_EXCLUDES = (
+    "/etc/apk/world",
+    "/etc/urandom.seed",
+    "/etc/board*.json",
+    "/etc/hotplug*.json",
+    "/etc/capabilities/*",
+    "/etc/banner.openwrt",
+    "/lib/firmware/ath11k/*/cal-*.bin",
+    "/.wget-hsts",
+    "*.apk-new",
+    "/tmp/*",
+    "/var/*",
+    "/bin/*",
+    "/sbin/*",
+    "/lib/*",
+    "/usr/lib/*",
+    "/www/*",
+)
+
+# World entries that the firmware pins (name=version and the like) or that
+# are its own base; they come with the image and are never added by name.
+BASE_PACKAGES = ("kernel", "libc", "base-files")
+
+# Packages not reinstalled automatically, because adding them replaces a
+# package the firmware ships (apk resolves the conflict by swapping them).
+# Glob patterns -> why; docs/packages.md says how to do it by hand.
+SPECIAL_PACKAGES = {
+    "dnsmasq-*": "replaces the firmware's dnsmasq",
+    "wpad*": "replaces the firmware's wpad variant",
+    "hostapd*": "replaces the firmware's wpad/hostapd variant",
+    "odhcpd*": "replaces the firmware's odhcpd variant",
+}
+
+# How long a freshly updated router gets to reach its package repositories.
+REPOSITORY_DEADLINE_S = 300
+
+
+def is_auto_keep_excluded(path, excludes=AUTO_KEEP_EXCLUDES):
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in excludes)
+
+
+def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
+    """One remote pass over /overlay/upper; see detect_extra_files.
+
+    Prints `AUTOKEEP <path>` for each regular file or symlink that no package
+    owns, sysupgrade -l does not list, and no exclude matches, then
+    AUTOKEEP_DONE. Whiteouts (character devices) are not files and are
+    skipped by -type, as are names with a newline, which `read` would split.
+    """
+    for pattern in excludes:
+        if not all(c.isalnum() or c in "/._-*" for c in pattern):
+            raise ValueError(f"unsafe exclude pattern {pattern!r}")
+    case = "|".join(excludes)
+    return (
+        "cd /overlay/upper 2>/dev/null || { echo 'AUTOKEEP_ERROR no /overlay/upper'; exit 1; }\n"
+        "command -v apk >/dev/null 2>&1 || { echo 'AUTOKEEP_ERROR no apk'; exit 1; }\n"
+        "keep=/tmp/autokeep.$$\n"
+        "sysupgrade -l > \"$keep\" 2>/dev/null || "
+        "{ rm -f \"$keep\"; echo 'AUTOKEEP_ERROR sysupgrade -l failed'; exit 1; }\n"
+        "find . \\( -type f -o -type l \\) | while IFS= read -r p; do\n"
+        "  p=${p#.}\n"
+        f"  case \"$p\" in {case}) continue ;; esac\n"
+        "  grep -qxF \"$p\" \"$keep\" && continue\n"
+        "  apk info --who-owns \"$p\" >/dev/null 2>&1 && continue\n"
+        "  echo \"AUTOKEEP $p\"\n"
+        "done\n"
+        "rm -f \"$keep\"\n"
+        "echo AUTOKEEP_DONE\n")
+
+
+def parse_extra_files(output, excludes=AUTO_KEEP_EXCLUDES):
+    """The paths auto_keep_script reported, excludes applied again here."""
+    lines = output.splitlines()
+    for line in lines:
+        if line.startswith("AUTOKEEP_ERROR"):
+            raise Abort(f"cannot list the extra files: {line.split(' ', 1)[-1]}")
+    if "AUTOKEEP_DONE" not in (line.strip() for line in lines):
+        raise Abort(f"the extra-file scan did not finish: {output.strip()[-300:]!r}")
+    found = {line[len("AUTOKEEP "):] for line in lines if line.startswith("AUTOKEEP /")}
+    return sorted(path for path in found if not is_auto_keep_excluded(path, excludes))
+
+
+def detect_extra_files(host):
+    rc, out = install.ssh(host, auto_keep_script(), timeout=600, check=False)
+    if rc != 0 and "AUTOKEEP_ERROR" not in out:
+        raise Abort(f"cannot list the extra files on {host}: {out.strip()}")
+    return parse_extra_files(out)
+
+
+def _keep_key(line):
+    line = line.strip()
+    return line.rstrip("/") or line
+
+
+def keep_append_text(existing, paths):
+    """What to append to sysupgrade.conf so that it lists every one of paths.
+
+    Paths already listed (with or without a trailing "/") are not repeated, nor
+    is any path twice. A file that does not end in a newline gets one first, so
+    the first new path does not run into its last line."""
+    listed = {_keep_key(line) for line in existing.splitlines()
+              if line.strip() and not line.lstrip().startswith("#")}
+    new = []
+    for path in paths:
+        if _keep_key(path) not in listed:
+            listed.add(_keep_key(path))
+            new.append(path)
+    if not new:
+        return ""
+    lead = "\n" if existing and not existing.endswith("\n") else ""
+    return lead + "".join(path + "\n" for path in new)
+
+
+def validate_keep_path(path):
+    if not path.startswith("/") or "\n" in path or "\r" in path:
+        raise Abort(t("--extra-keep needs an absolute path on the router, got {path!r}",
+                      path=path))
+    return path
+
+
+def append_keep_list(host, paths):
+    """Add paths to the router's sysupgrade.conf; returns those it added."""
+    # install.ssh strips its output, which would hide whether the file ends in
+    # a newline; a marker after it keeps that last character in place.
+    _rc, out = install.ssh(
+        host, f"cat {SYSUPGRADE_CONF} 2>/dev/null; echo {KEEP_EOF}", check=False)
+    if KEEP_EOF not in out:
+        raise Abort(f"cannot read {SYSUPGRADE_CONF}: {out.strip()!r}")
+    existing = out.rsplit(KEEP_EOF, 1)[0]
+    text = keep_append_text(existing, paths)
+    if text:
+        install.ssh(host, f"printf %s {shlex.quote(text)} >> {SYSUPGRADE_CONF}")
+    return [line for line in text.splitlines() if line]
+
+
+def filter_world(text):
+    """The packages to reinstall, from /etc/apk/world.
+
+    Left out: entries with a version constraint (= < > ~: the firmware pins
+    those), the firmware's base (kernel, libc, base-files), libraries (lib*,
+    which come in as dependencies), and negations (!name). Sorted, unique."""
+    keep = set()
+    for entry in text.split():
+        if any(mark in entry for mark in "=<>~") or entry.startswith("!"):
+            continue
+        name = entry.split("@", 1)[0]
+        if name in BASE_PACKAGES or name.startswith("lib"):
+            continue
+        keep.add(entry)
+    return sorted(keep)
+
+
+def pinned_names(text):
+    """Package names /etc/apk/world pins with a version constraint."""
+    names = set()
+    for entry in text.split():
+        for mark in "=<>~":
+            if mark in entry:
+                names.add(entry.split(mark, 1)[0].split("@", 1)[0])
+                break
+    return names
+
+
+def installed_names(db_text):
+    """Names installed or provided, from /lib/apk/db/installed P: and p: lines."""
+    names = set()
+    for line in db_text.splitlines():
+        if line.startswith("P:"):
+            names.add(line[2:].strip())
+        elif line.startswith("p:"):
+            for item in line[2:].split():
+                names.add(item.split("=", 1)[0])
+    return names
+
+
+def special_reason(package):
+    for pattern, why in SPECIAL_PACKAGES.items():
+        if fnmatch.fnmatchcase(package.split("@", 1)[0], pattern):
+            return why
+    return None
+
+
+def _write_local(outdir, name, text):
+    path = os.path.join(outdir, name)
+    with open(path, "w", encoding="utf-8", newline="\n") as output:
+        output.write(text if not text or text.endswith("\n") else text + "\n")
+    return path
+
+
+def save_overlay_archive(host, outdir):
+    """overlay-full.tar.gz, for comparing by hand later; never restored."""
+    _rc, used = install.ssh(host, "du -sk /overlay/upper 2>/dev/null", check=False)
+    sizes = [token for token in used.split() if token.isdigit()]
+    if not sizes:
+        log(f"[c] cannot size /overlay/upper ({used.strip()!r}); overlay archive skipped")
+        return None
+    # The archive sits in tmpfs while it is copied off, beside a router still
+    # running everything, so it gets the same headroom as an uploaded image.
+    if int(sizes[0]) + IN_PLACE_MARGIN_KB > available_memory_kb(host):
+        log(t("[c] /overlay/upper ({size} KiB) does not fit in the router's free "
+              "memory; overlay-full.tar.gz was not saved", size=sizes[0]))
+        return None
+    local = os.path.join(outdir, "overlay-full.tar.gz")
+    try:
+        install.ssh(host, f"tar czf {REMOTE_OVERLAY} -C /overlay/upper .", timeout=300)
+        scp_from(host, REMOTE_OVERLAY, local)
+    finally:
+        try:
+            install.ssh(host, f"rm -f {REMOTE_OVERLAY}", timeout=30, check=False)
+        except Exception:               # noqa: BLE001 -- the first error matters
+            pass
+    log(f"[c] overlay archive (reference only, never restored) -> {local}")
+    return local
+
+
+def prepare_carryover(host, args, outdir):
+    """Before the backup: what sysupgrade would drop, made part of it.
+
+    Writes to the router's /etc only (sysupgrade.conf, /etc/backup/), which
+    the backup then carries; the image and the partitions are not touched."""
+    log(t("\n=== carry-over: extra files and packages ==="))
+    _rc, world = install.ssh(host, "cat /etc/apk/world")
+    _write_local(outdir, "world.txt", world)
+    _rc, listed = install.ssh(host, "sysupgrade -l", timeout=120)
+    _write_local(outdir, "sysupgrade-list.txt", listed)
+
+    extras = [] if args.no_auto_keep else detect_extra_files(host)
+    if args.no_auto_keep:
+        log("[c] automatic extra-file detection is off (--no-auto-keep)")
+    manual = [validate_keep_path(path) for path in args.extra_keep]
+    paths = list(dict.fromkeys(extras + manual))
+    if paths:
+        log(t("[c] files no package owns and sysupgrade would not keep:"))
+        for path in paths:
+            log(f"      {path}")
+        install.confirm(t("add these {count} path(s) to {conf}?",
+                          count=len(paths), conf=SYSUPGRADE_CONF), args.yes)
+    else:
+        log(t("[c] no extra files found that sysupgrade would drop"))
+    added = append_keep_list(host, paths + [BACKUP_DIR])
+    for path in added:
+        log(f"[c] {SYSUPGRADE_CONF} += {path}")
+
+    wanted = filter_world(world)
+    text = "".join(name + "\n" for name in wanted)
+    local = _write_local(outdir, "world-old.txt", text)
+    install.ssh(host, f"mkdir -p {BACKUP_DIR}")
+    install.scp_to(host, local, WORLD_OLD)
+    log(t("[c] {count} package(s) to reinstall after the update -> {path}",
+          count=len(wanted), path=WORLD_OLD))
+    save_overlay_archive(host, outdir)
+
+
+def wait_for_repositories(host, deadline_s=None):
+    """Whether `apk update` succeeded before the deadline."""
+    deadline_s = REPOSITORY_DEADLINE_S if deadline_s is None else deadline_s
+    log(t("[p] waiting up to {seconds}s for the router to reach its package "
+          "repositories", seconds=deadline_s))
+    end = time.time() + deadline_s
+    out = ""
+    while True:
+        try:
+            rc, out = install.ssh(host, "apk update", timeout=120, check=False)
+        except subprocess.TimeoutExpired:
+            rc, out = 1, "apk update timed out"
+        if rc == 0:
+            return True
+        if time.time() + 15 >= end:
+            log(f"[p] apk update: {out.strip()[-300:]}")
+            return False
+        time.sleep(15)
+
+
+def reinstall_packages(host, outdir, deadline_s=None):
+    """Install what world-old.txt lists and the updated system lacks.
+
+    Each package is checked first and added only when missing; a pinned or
+    special one is never added by name (see SPECIAL_PACKAGES). Returns the
+    summary as {"installed", "present", "skipped", "failed"} and writes it to
+    reinstall-summary.txt."""
+    log(t("\n=== packages: reinstall what the update dropped ==="))
+    rc, text = install.ssh(host, f"cat {WORLD_OLD}", check=False)
+    if rc != 0:
+        local = os.path.join(outdir, "world-old.txt")
+        if not os.path.exists(local):
+            log(t("[p] no package list on the router or in {outdir}; nothing to "
+                  "reinstall", outdir=outdir))
+            return None
+        with open(local, encoding="utf-8") as source:
+            text = source.read()
+        log(f"[p] {WORLD_OLD} is missing on the router; using {local}")
+    wanted = filter_world(text)
+    summary = {"installed": [], "present": [], "skipped": [], "failed": []}
+    if not wanted:
+        log(t("[p] the package list is empty; nothing to reinstall"))
+        return _write_summary(outdir, summary)
+    if any(name.startswith("kmod-") for name in wanted):
+        log(t("[p] kernel modules (kmod-*) install only from the repository "
+              "built for the running firmware; a kmod that it lacks fails and "
+              "is listed below"))
+
+    _rc, db = install.ssh(host, "grep -E '^[Pp]:' /lib/apk/db/installed", check=False)
+    have = installed_names(db)
+    _rc, world_now = install.ssh(host, "cat /etc/apk/world", check=False)
+    pinned = pinned_names(world_now)
+    missing = []
+    for name in wanted:
+        bare = name.split("@", 1)[0]
+        if bare in have:
+            summary["present"].append(name)
+        elif bare in pinned:
+            summary["skipped"].append((name, "pinned by the firmware"))
+        elif special_reason(name):
+            summary["skipped"].append((name, special_reason(name)
+                                       + "; see docs/packages.md"))
+        else:
+            missing.append(name)
+
+    if missing and not wait_for_repositories(host, deadline_s):
+        summary["failed"] += [(name, "the package repositories are unreachable")
+                              for name in missing]
+        missing = []
+    for name in missing:
+        try:
+            rc, out = install.ssh(host, f"apk add {shlex.quote(name)}",
+                                  timeout=600, check=False)
+        except subprocess.TimeoutExpired:
+            rc, out = 1, "apk add timed out"
+        if rc == 0:
+            summary["installed"].append(name)
+            log(f"[p] installed {name}")
+        else:
+            reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
+            summary["failed"].append((name, reason))
+            log(f"[p] could not install {name}: {reason}")
+    return _write_summary(outdir, summary)
+
+
+def _write_summary(outdir, summary):
+    lines = [f"installed: {name}" for name in summary["installed"]]
+    lines += [f"already present: {name}" for name in summary["present"]]
+    lines += [f"skipped: {name} -- {why}" for name, why in summary["skipped"]]
+    lines += [f"failed: {name} -- {why}" for name, why in summary["failed"]]
+    path = _write_local(outdir, "reinstall-summary.txt", "\n".join(lines))
+    log(t("[p] packages: {installed} installed, {present} already present, "
+          "{skipped} skipped, {failed} failed -> {path}",
+          installed=len(summary["installed"]), present=len(summary["present"]),
+          skipped=len(summary["skipped"]), failed=len(summary["failed"]),
+          path=path))
+    for name, why in summary["skipped"]:
+        log(t("[p] not reinstalled, do it by hand: {name} ({why})", name=name, why=why))
+    for name, why in summary["failed"]:
+        log(t("[p] failed: {name} ({why})", name=name, why=why))
+    if any(name.startswith("kmod-") for name, _why in summary["failed"]):
+        log(t("[p] a kmod that failed is not in the repository of the running "
+              "firmware; do not install one built for another kernel"))
+    return summary
+
 
 def scp_from(host, remote, local):
     """Copy remote:path off the box. install.py only ever sends."""
@@ -598,6 +976,43 @@ def open_outdir(args, prefix):
     return outdir
 
 
+def finish_packages(host, args, outdir, config_tar):
+    """Reinstall after a verified update. Never turns that update into a failure."""
+    if not config_tar or not host:
+        return
+    if args.no_reinstall:
+        log("[p] package reinstall skipped (--no-reinstall)")
+        return
+    try:
+        reinstall_packages(host, outdir)
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired) as exc:
+        log(t("[!] the update is complete, but reinstalling packages stopped: "
+              "{error}. Run this again with --reinstall-only to retry.", error=exc))
+
+
+def run_reinstall_only(args, profile):
+    """--reinstall-only: on an already updated router, only reinstall packages."""
+    args.discover = (install.canonical_interface(args.discover)
+                     or chain.local_interface(args.host or profile.openwrt_host))
+    if args.transport == "auto" and args.discover:
+        args.transport = install.detect_transport(args.discover)
+    outdir = open_outdir(args, "reinstall")
+    require_tools_and_login(args)
+    gateway_ok = gateway_allowed(args) and bool(args.discover)
+    host = args.host or install.wait_and_discover(
+        args.discover, deadline_s=120,
+        fallback=profile.openwrt_host if args.transport == "wired" else None,
+        router_gateway_ok=gateway_ok)
+    board, rootfs = identify(host, profile, args.discover if gateway_ok else None)
+    if rootfs != "overlay":
+        raise Abort(f"rootfs_type is {rootfs!r}, not the installed system; "
+                    "--reinstall-only works on an installed, updated router")
+    require_permanent_layout(host, profile, board, rootfs)
+    log(f"[*] {host}: {board}, the installed system")
+    reinstall_packages(host, outdir)
+    return 0
+
+
 def run(args):
     os.umask(0o077)
     i18n.set_language(args.lang)
@@ -605,6 +1020,8 @@ def run(args):
     profile = devices.get_profile(args.device)
     args.image = {"default": "standard", "nss": "nss"}[args.flavour]
     check_key_options(args)
+    if args.reinstall_only:
+        return run_reinstall_only(args, profile)
 
     if args.config_backup:
         args.config_backup = os.path.abspath(args.config_backup)
@@ -688,8 +1105,12 @@ def run(args):
         if args.config_backup:
             config_tar = args.config_backup
             log(f"[*] restoring the given config backup: {config_tar}")
+            log("[c] the extra files and package list are whatever that archive "
+                "holds; nothing is added to it")
             backup_config(host, outdir)      # still take one of what is there now
         else:
+            if args.keep_settings:
+                prepare_carryover(host, args, outdir)
             config_tar = backup_config(host, outdir)
         if not args.keep_settings:
             config_tar = None
@@ -708,10 +1129,11 @@ def run(args):
                                   secrets.token_hex(16), config_tar)
 
     if route == "in-place":
-        flash_in_place(host, rel, images, args, profile, manifest,
-                       verify_transport, installed)
+        found = flash_in_place(host, rel, images, args, profile, manifest,
+                               verify_transport, installed)
         log(t("[+] update complete: your settings were restored." if config_tar
               else "[+] update complete: the new release is running with default settings."))
+        finish_packages(found or host, args, outdir, config_tar)
         return 0
 
     if rootfs != "tmpfs":
@@ -761,7 +1183,7 @@ def run(args):
     # Under key auth the permanent system is verified where it was before:
     # known_hosts vouches for that address, not for one discovery turns up.
     # The kept configuration keeps that address, and its host key.
-    install.flash(
+    found = install.flash(
         host, rel, images, args.yes, profile, args.images, config_tar, manifest,
         args.transport, args.verify_interface, args.wifi_ssid,
         profile.openwrt_host if verify_transport == "wired" else None,
@@ -772,6 +1194,7 @@ def run(args):
         verify_host_iface=args.discover if args.ssh_key_auth else None)
     log(t("[+] update complete: your settings were restored." if config_tar
           else "[+] update complete: the new release is running with default settings."))
+    finish_packages(found, args, outdir, config_tar)
     return 0
 
 
@@ -825,6 +1248,16 @@ def parse_args(argv=None):
                     help="with --ssh-key-auth: connect ssh/scp to this ~/.ssh/config "
                          "Host; --host stays the numeric address for the network "
                          "checks")
+    ap.add_argument("--extra-keep", metavar="PATH", action="append", default=[],
+                    help="also add PATH to /etc/sysupgrade.conf before the backup "
+                         "(repeatable)")
+    ap.add_argument("--no-auto-keep", action="store_true",
+                    help="do not look for files that no package owns")
+    ap.add_argument("--no-reinstall", action="store_true",
+                    help="do not reinstall your packages after the update")
+    ap.add_argument("--reinstall-only", action="store_true",
+                    help="only reinstall the packages listed in "
+                         "/etc/backup/world-old.txt on an already updated router")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),

@@ -540,7 +540,8 @@ PT_BR.update({
     "--verify-host must be a numeric IP address": "--verify-host deve ser um endereço IP numérico",
 })
 
-# updater.py --ssh-key-auth: key login to the installed system.
+# updater.py --ssh-key-auth, the carry-over of extra files, and the package
+# reinstall.
 ZH_CN.update({
     'SSH key login to {host} failed: {output}': '使用 SSH 密钥登录 {host} 失败：{output}',
     'scp with the SSH key to {host} failed: {output}': '使用 SSH 密钥对 {host} 执行 scp 失败：{output}',
@@ -556,6 +557,23 @@ ZH_CN.update({
     "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias 需要用 --host 给出路由器的数字地址，网络检查使用的是这个地址',
     "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH：通过 OpenSSH 和 ~/.ssh/config 用密钥登录已安装的系统；不发送任何密码，known_hosts 中必须已有路由器的主机密钥',
     '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] 本次更新要经过 RAM 安装器，其中没有你的 SSH 公钥。连接它时使用其空的 root 密码，与不加 --ssh-key-auth 时相同（因此需要 sshpass）；最终验证会再次用密钥登录 {host}。',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] 更新已完成，但重装软件包中途停止：{error}。可加上 --reinstall-only 重新运行以重试。',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep 需要路由器上的绝对路径，收到的是 {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper（{size} KiB）超出路由器的可用内存；未保存 overlay-full.tar.gz',
+    '\n=== carry-over: extra files and packages ===': '\n=== 迁移：额外文件和软件包 ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] 不属于任何软件包、sysupgrade 也不会保留的文件：',
+    'add these {count} path(s) to {conf}?': '将这 {count} 个路径追加到 {conf}？',
+    '[c] no extra files found that sysupgrade would drop': '[c] 没有发现 sysupgrade 会丢弃的额外文件',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] 更新后需重装 {count} 个软件包 -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] 最多等待 {seconds} 秒，直到路由器能访问软件包仓库',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== 软件包：重装更新后缺失的软件包 ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] 路由器上和 {outdir} 中都没有软件包列表；无需重装',
+    '[p] the package list is empty; nothing to reinstall': '[p] 软件包列表为空；无需重装',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] 内核模块（kmod-*）只能从当前固件对应的仓库安装；仓库里没有的 kmod 会安装失败，并列在下方',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] 软件包：已安装 {installed} 个，原已存在 {present} 个，跳过 {skipped} 个，失败 {failed} 个 -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] 未自动重装，请手动处理：{name}（{why}）',
+    '[p] failed: {name} ({why})': '[p] 失败：{name}（{why}）',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] 安装失败的 kmod 不在当前固件对应的仓库中；不要安装为其他内核编译的版本',
 })
 RU.update({
     'SSH key login to {host} failed: {output}': 'Не удалось войти на {host} по SSH-ключу: {output}',
@@ -572,6 +590,23 @@ RU.update({
     "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias требует --host с числовым адресом роутера, который используют сетевые проверки',
     "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: вход в установленную систему по ключу через OpenSSH и ~/.ssh/config; пароль не отправляется, ключ хоста роутера уже должен быть в known_hosts',
     '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Это обновление идёт через RAM-установщик, в котором нет вашего SSH-ключа. К нему подключаются с его пустым паролем root, как без --ssh-key-auth (поэтому нужен sshpass); итоговая проверка снова входит на {host} по ключу.',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] Обновление завершено, но переустановка пакетов остановилась: {error}. Чтобы повторить, запустите снова с --reinstall-only.',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep требует абсолютный путь на роутере, получено {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper ({size} КиБ) не помещается в свободную память роутера; overlay-full.tar.gz не сохранён',
+    '\n=== carry-over: extra files and packages ===': '\n=== перенос: дополнительные файлы и пакеты ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] файлы, не принадлежащие ни одному пакету и не сохраняемые sysupgrade:',
+    'add these {count} path(s) to {conf}?': 'Добавить эти пути ({count}) в {conf}?',
+    '[c] no extra files found that sysupgrade would drop': '[c] дополнительных файлов, которые sysupgrade отбросил бы, не найдено',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] пакетов для переустановки после обновления: {count} -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] ожидание до {seconds} с, пока роутер не получит доступ к репозиториям пакетов',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== пакеты: переустановка того, что убрало обновление ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] списка пакетов нет ни на роутере, ни в {outdir}; переустанавливать нечего',
+    '[p] the package list is empty; nothing to reinstall': '[p] список пакетов пуст; переустанавливать нечего',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] модули ядра (kmod-*) ставятся только из репозитория, собранного для работающей прошивки; kmod, которого там нет, не установится и будет указан ниже',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] пакеты: установлено {installed}, уже были {present}, пропущено {skipped}, с ошибкой {failed} -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] не переустановлен, сделайте вручную: {name} ({why})',
+    '[p] failed: {name} ({why})': '[p] ошибка: {name} ({why})',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] не установившегося kmod нет в репозитории работающей прошивки; не ставьте сборку для другого ядра',
 })
 PT_BR.update({
     'SSH key login to {host} failed: {output}': 'Falha no login com chave SSH em {host}: {output}',
@@ -588,6 +623,23 @@ PT_BR.update({
     "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias exige --host com o endereço numérico do roteador, usado pelas verificações de rede',
     "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: login com chave no sistema instalado via OpenSSH e ~/.ssh/config; nenhuma senha é enviada, e o known_hosts já deve ter a chave de host do roteador',
     '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Esta atualização passa pelo instalador em RAM, que não tem cópia da sua chave SSH. Ele é acessado com sua senha de root vazia, como sem --ssh-key-auth (por isso o sshpass é necessário); a verificação final entra em {host} com a chave de novo.',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] A atualização terminou, mas a reinstalação de pacotes parou: {error}. Execute de novo com --reinstall-only para tentar outra vez.',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep exige um caminho absoluto no roteador, recebido {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper ({size} KiB) não cabe na memória livre do roteador; overlay-full.tar.gz não foi salvo',
+    '\n=== carry-over: extra files and packages ===': '\n=== transferência: arquivos extras e pacotes ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] arquivos que nenhum pacote possui e que o sysupgrade não manteria:',
+    'add these {count} path(s) to {conf}?': 'adicionar estes {count} caminho(s) a {conf}?',
+    '[c] no extra files found that sysupgrade would drop': '[c] nenhum arquivo extra que o sysupgrade descartaria foi encontrado',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] {count} pacote(s) para reinstalar após a atualização -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] aguardando até {seconds}s até o roteador alcançar seus repositórios de pacotes',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== pacotes: reinstalar o que a atualização removeu ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] não há lista de pacotes no roteador nem em {outdir}; nada a reinstalar',
+    '[p] the package list is empty; nothing to reinstall': '[p] a lista de pacotes está vazia; nada a reinstalar',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] módulos do kernel (kmod-*) só se instalam do repositório feito para o firmware em execução; um kmod que falte lá falha e é listado abaixo',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] pacotes: {installed} instalados, {present} já presentes, {skipped} ignorados, {failed} com falha -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] não reinstalado, faça à mão: {name} ({why})',
+    '[p] failed: {name} ({why})': '[p] falhou: {name} ({why})',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] um kmod que falhou não está no repositório do firmware em execução; não instale um feito para outro kernel',
 })
 
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}

@@ -205,6 +205,21 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 
 `updater.py` 默认保留现有设置。详见[更新 OpenWrt 以及继续中断的更新](docs/maintenance.zh-CN.md#更新已安装的系统)。
 
+备份之前，`updater.py` 还会保留 `sysupgrade` 默认会丢弃的内容：
+
+- `/overlay/upper` 中不属于任何软件包、也不在 `sysupgrade -l` 列表里的文件
+  （例如自己的脚本或 apk 密钥）会列出来，确认后追加到 `/etc/sysupgrade.conf`。
+  自动生成的文件和程序文件不在此列（见 `updater.py` 中的 `AUTO_KEEP_EXCLUDES`）。
+  可用 `--extra-keep 路径`（可重复）手动追加，用 `--no-auto-keep` 关闭自动检测。
+- 你安装的软件包会记录在 `/etc/backup/world-old.txt`，随配置一起备份。
+  更新并验证成功后，缺少的软件包会逐个用 `apk add` 重新安装，结果汇总写入输出目录的
+  `reinstall-summary.txt`。用 `--no-reinstall` 跳过这一步，之后可用
+  `--reinstall-only` 重试。内核模块以及 `dnsmasq-full` 等不会自动替换的软件包，见
+  [docs/packages.md](docs/packages.md)。
+
+输出目录还会保存 `world.txt`、`sysupgrade-list.txt` 和 `overlay-full.tar.gz`
+供对照，其中的归档不会用于恢复。
+
 ### 使用 SSH 密钥更新
 
 如果路由器只允许 SSH 密钥登录，或者你更想用密钥，可以使用自己的 OpenSSH 配置：

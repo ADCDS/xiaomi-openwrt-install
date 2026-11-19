@@ -2178,6 +2178,12 @@ class _UpdateBox:
         return rc, out
 
     def answer(self, cmd):
+        # The carry-over before the backup: no extra files, an empty
+        # sysupgrade.conf. Everything else it asks reads as empty.
+        if "AUTOKEEP_DONE" in cmd:
+            return 0, "AUTOKEEP_DONE"
+        if "RD03V2_KEEP_EOF" in cmd:
+            return 0, "RD03V2_KEEP_EOF"
         if "board_name" in cmd:
             return (self.board_rc, self.board if self.board_rc == 0 else "")
         if "rootfs_type" in cmd:
