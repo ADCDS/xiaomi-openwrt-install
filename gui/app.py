@@ -73,10 +73,21 @@ def list_interfaces():
                 for row in records if not row.get("hidden")]
     if sys.platform == "darwin":
         import macnet
-        return [{"name": name, "transport": transport,
-                 "ipv4": [str(n) for n in install.interface_ipv4_networks(name)],
-                 "state": "?"}
-                for name, transport in macnet.interfaces().items()]
+        # Like the other branches: a failed query is an empty list, never an
+        # exception, which would close /api/interfaces without a JSON reply.
+        try:
+            ports = macnet.interfaces()
+        except Exception:                                       # noqa: BLE001
+            return []
+        out = []
+        for name, transport in ports.items():
+            try:
+                addrs = [str(n) for n in install.interface_ipv4_networks(name)]
+            except Exception:                                   # noqa: BLE001
+                addrs = []
+            out.append({"name": name, "transport": transport,
+                        "ipv4": addrs, "state": "?"})
+        return out
     out = []
     base = "/sys/class/net"
     try:

@@ -14,13 +14,19 @@ def query(command):
 
 
 def interfaces():
-    """Only hardware ports: exclude VPNs and virtual peer interfaces."""
+    """Hardware ports that are live network interfaces, by device name.
+
+    networksetup also lists ports that are not network interfaces at all (a
+    VM's "Built-in Serial Port" is serial1) and ports whose device is gone.
+    `ip addr show` fails on those, so only names `ifconfig -l` knows are kept.
+    VPNs and other virtual interfaces are never hardware ports."""
+    live = set(query(["/sbin/ifconfig", "-l"]).split())
     text = query(["/usr/sbin/networksetup", "-listallhardwareports"])
     ports = {}
     for block in text.split("\n\n"):
         port = re.search(r"^Hardware Port: (.+)$", block, re.M)
         device = re.search(r"^Device: (\S+)$", block, re.M)
-        if port and device:
+        if port and device and device[1] in live:
             label = port[1].lower()
             ports[device[1]] = "wifi" if label in ("wi-fi", "airport") else "wired"
     if not ports:

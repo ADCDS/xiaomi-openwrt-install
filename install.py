@@ -2284,7 +2284,11 @@ def main(argv=None):
         if sys.platform == "darwin" and not hostnet.is_windows():
             try:
                 for name, transport in macnet.interfaces().items():
-                    addresses = ", ".join(map(str, interface_ipv4_networks(name)))
+                    # One unreadable port must not hide the others.
+                    try:
+                        addresses = ", ".join(map(str, interface_ipv4_networks(name)))
+                    except Abort:
+                        addresses = "IPv4 unreadable"
                     log(f"{name}  {transport}  {addresses or 'no IPv4'}")
             except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
                 raise Abort(str(exc)) from exc
