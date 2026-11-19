@@ -38,6 +38,23 @@ cd xiaomi-openwrt-install
 sudo apt install sshpass openssl
 ```
 
+### 刷写后使用 SSH 密钥验证
+
+若网页可访问且手动密钥 SSH 登录成功，可只重新验证，不重复刷写：
+
+```sh
+python3 install.py --verify-only /实际安装目录/resume.json \
+  --verify-interface en0 --verify-host 192.168.1.1 \
+  --verify-ssh-key ~/.ssh/id_ed25519
+```
+
+将接口和私钥路径替换为实际值。使用 ssh-agent 或默认 SSH 配置时，可将
+私钥路径替换为 `agent`。带口令的私钥请先用 `ssh-add` 加载。
+此模式使用系统 OpenSSH，只允许公钥认证，并严格检查已知主机密钥；请先
+手动 SSH 登录同一 IP 地址并确认主机身份。它仍检查设备型号、永久分区、
+固件版本及记录的重启信息，成功后更新本地 `resume.json`。
+这些选项仅用于 `--verify-only`，不改变刷写阶段的认证方式。
+
 ### macOS（实验性）
 
 快速适配使用 Homebrew 网络工具，尚未完成实机刷写验证：

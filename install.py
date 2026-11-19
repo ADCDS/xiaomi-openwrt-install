@@ -1167,6 +1167,8 @@ def check_is_openwrt_ram(host, router_iface=None, router_mac=None):
 # device that never came back, because setting the password is what locked us
 # out. main() appends the configured password here.
 SSH_PASSWORDS = [""]
+# Enabled only by the explicit read-only verification CLI path.
+VERIFY_SSH_KEY = None
 
 # What the RAM system is offered, and all it is offered: it has no password,
 # so whatever refuses this is not it, and a configured root password never
@@ -1176,6 +1178,21 @@ RAM_PASSWORDS = ("",)
 
 def ssh(host, cmd, timeout=120, check=True, passwords=None):
     """Root over dropbear, trying each password we might have set."""
+    if VERIFY_SSH_KEY is not None:
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+                "-o", "ConnectTimeout=10", "-o", "PreferredAuthentications=publickey",
+                "-o", "PasswordAuthentication=no", "-o", "PubkeyAuthentication=yes"]
+        if VERIFY_SSH_KEY != "agent":
+            argv += ["-o", "IdentitiesOnly=yes", "-i", VERIFY_SSH_KEY]
+        argv += [f"root@{host}", cmd]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            rc, output = result.returncode, (result.stdout + result.stderr).strip()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            rc, output = 255, str(exc)
+        if check and rc:
+            raise Abort(t("Verification SSH to {host} failed: {output}", host=host, output=output))
+        return rc, output
     if hostnet.is_windows():
         try:
             result = winssh.run(host, cmd,
@@ -1453,7 +1470,7 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
     where = interface or host
     log(t("[3] waiting up to {seconds}s for permanent OpenWrt on {where}",
           seconds=deadline_s, where=where))
-    secret = any(SSH_PASSWORDS)
+    secret = any(SSH_PASSWORDS) and VERIFY_SSH_KEY is None
     gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
     mac = router_mac if secret else None
     router_iface = interface if gateway_ok else None
@@ -1495,6 +1512,18 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
             require_expected_revision(candidate, expected_revision)
             log(t("[+] OpenWrt is installed on NAND."))
             return candidate
+        failures = [(name, rc, output) for name, rc, output in
+                    (("board_name", rc1, board), ("rootfs_type", rc2, rtype),
+                     ("partition table", rc3, mtd_text)) if rc]
+        if failures:
+            last = "; ".join(f"{name}: SSH/command exit {rc}: {output.strip()}"
+                             for name, rc, output in failures)
+            log(t("[3] SSH verification failed on {host}: {error}", host=candidate, error=last))
+            if VERIFY_SSH_KEY is not None:
+                raise Abort(t("Key verification failed: {error}. Check the key/ssh-agent "
+                              "and trust this exact address with a manual SSH login first.", error=last))
+            time.sleep(10)
+            continue
         last = (f"board={board.strip()!r} rootfs={rtype.strip()!r}; expected "
                 f"board={profile.openwrt_board!r}, rootfs='overlay', and the "
                 "profile partition sizes")
@@ -1832,6 +1861,10 @@ def parse_args(argv=None):
     hidden = argparse.SUPPRESS
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),
                     help=hidden)
+    ap.add_argument("--verify-ssh-key", metavar="PATH_OR_agent",
+                    help="with --verify-only: use OpenSSH key file or 'agent'; requires a trusted host key")
+    ap.add_argument("--verify-host", metavar="ADDRESS",
+                    help="with --verify-only and --verify-ssh-key: verify this address without discovery")
     ap.add_argument("--openwrt-host", default=None, help=hidden)
     ap.add_argument("--stage", default="all",
                     choices=("preflight", "pivot", "flash", "verify", "all"),
@@ -2277,8 +2310,27 @@ def verify_resume_selection(resume, args, profile, rel, images):
 
 def main(argv=None):
     os.umask(0o077)
+    global VERIFY_SSH_KEY
+    VERIFY_SSH_KEY = None
     args = absorb_secret_env(parse_args(argv))
     i18n.set_language(args.lang)
+    if args.verify_ssh_key or args.verify_host:
+        if not args.verify_only:
+            raise Abort(t("--verify-ssh-key and --verify-host require --verify-only"))
+        if args.verify_host and not args.verify_ssh_key:
+            raise Abort(t("--verify-host requires --verify-ssh-key"))
+        if shutil.which("ssh") is None:
+            raise Abort(t("Key verification requires OpenSSH (ssh)"))
+        VERIFY_SSH_KEY = args.verify_ssh_key
+        if VERIFY_SSH_KEY != "agent":
+            VERIFY_SSH_KEY = os.path.abspath(os.path.expanduser(VERIFY_SSH_KEY))
+            if not os.path.isfile(VERIFY_SSH_KEY):
+                raise Abort(t("SSH private key file does not exist"))
+        if args.verify_host:
+            try:
+                ipaddress.ip_address(args.verify_host.split("%", 1)[0])
+            except ValueError as exc:
+                raise Abort(t("--verify-host must be a numeric IP address")) from exc
     i18n.tolerate_console_encoding()
     if args.list_interfaces:
         if sys.platform == "darwin" and not hostnet.is_windows():
@@ -2353,7 +2405,8 @@ def main(argv=None):
     args.discover = canonical_interface(args.discover)
     args.verify_interface = canonical_interface(args.verify_interface)
     if not args.dry_run:
-        require_host_tools(password=bool(args.root_password))
+        if VERIFY_SSH_KEY is None:
+            require_host_tools(password=bool(args.root_password))
 
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
         args.discover = chain.local_interface(args.host)
@@ -2377,7 +2430,7 @@ def main(argv=None):
 
     if (resume and resume.get("root_password_set")
             and args.stage in ("flash", "verify", "all")
-            and not args.root_password):
+            and not args.root_password and VERIFY_SSH_KEY is None):
         if not sys.stdin.isatty():
             raise Abort("post-install verification needs the configured root "
                         "password; rerun in a terminal")
@@ -2393,6 +2446,13 @@ def main(argv=None):
         phase = resume.get("phase")
         if phase not in ("pivot-complete", "flash-started", "flash-complete"):
             raise Abort(f"resume phase {phase!r} has not reached the RAM pivot")
+        if args.verify_host:
+            found = verify_permanent_system(
+                profile, host=args.verify_host, host_iface=args.verify_interface,
+                expected_revision=resume.get("expected_revision", ""))
+            require_new_boot(found, resume.get("boot_id"))
+            update_resume_phase(args.resume_manifest, "flash-complete")
+            return 0
         pinned = resume.get("verify_host")
         if pinned and not explicit_verify_interface:
             # An in-place update kept the router's address: go back to that

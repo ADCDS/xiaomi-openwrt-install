@@ -514,6 +514,38 @@ PT_BR = {
         "[!] o firmware de fábrica não respondeu em {host} dentro de 7 minutos. Ele ainda pode estar inicializando; verifique se este computador tem um endereço nessa sub-rede.",
 }
 
+# Read-only SSH key verification.
+ZH_CN.update({
+    "Verification SSH to {host} failed: {output}": "连接 {host} 的 SSH 验证失败：{output}",
+    "[3] SSH verification failed on {host}: {error}": "[3] {host} 的 SSH 验证失败：{error}",
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "密钥验证失败：{error}。请检查密钥或 ssh-agent，并先手动 SSH 登录同一地址以确认并信任主机密钥。",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key 和 --verify-host 必须与 --verify-only 一起使用",
+    "--verify-host requires --verify-ssh-key": "--verify-host 必须与 --verify-ssh-key 一起使用",
+    "Key verification requires OpenSSH (ssh)": "密钥验证需要安装 OpenSSH（ssh）",
+    "SSH private key file does not exist": "SSH 私钥文件不存在",
+    "--verify-host must be a numeric IP address": "--verify-host 必须是数字形式的 IP 地址",
+})
+RU.update({
+    "Verification SSH to {host} failed: {output}": "Ошибка проверки по SSH на {host}: {output}",
+    "[3] SSH verification failed on {host}: {error}": "[3] Ошибка проверки по SSH на {host}: {error}",
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Ошибка проверки с ключом: {error}. Проверьте ключ/ssh-agent и сначала подтвердите ключ хоста, подключившись вручную по SSH к этому же адресу.",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key и --verify-host требуют --verify-only",
+    "--verify-host requires --verify-ssh-key": "--verify-host требует --verify-ssh-key",
+    "Key verification requires OpenSSH (ssh)": "Для проверки с ключом нужен OpenSSH (ssh)",
+    "SSH private key file does not exist": "Файл закрытого ключа SSH не существует",
+    "--verify-host must be a numeric IP address": "--verify-host должен быть числовым IP-адресом",
+})
+PT_BR.update({
+    "Verification SSH to {host} failed: {output}": "Falha na verificação SSH de {host}: {output}",
+    "[3] SSH verification failed on {host}: {error}": "[3] Falha na verificação SSH de {host}: {error}",
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Falha na verificação com chave: {error}. Confira a chave/ssh-agent e confirme primeiro a chave do host conectando-se manualmente por SSH a esse mesmo endereço.",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key e --verify-host exigem --verify-only",
+    "--verify-host requires --verify-ssh-key": "--verify-host exige --verify-ssh-key",
+    "Key verification requires OpenSSH (ssh)": "A verificação com chave exige OpenSSH (ssh)",
+    "SSH private key file does not exist": "O arquivo da chave privada SSH não existe",
+    "--verify-host must be a numeric IP address": "--verify-host deve ser um endereço IP numérico",
+})
+
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}
 
 # Endonyms: what each language calls itself, used by the wizard's switch and
