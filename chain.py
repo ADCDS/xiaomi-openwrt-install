@@ -41,6 +41,7 @@ import json
 import random
 import re
 import socket
+import sys
 import ssl
 import struct
 import subprocess
@@ -183,6 +184,12 @@ def local_mac(host):
         try:
             return hostnet.adapter(dev)["mac"]
         except hostnet.NetworkError:
+            return "00:00:00:00:00:00"
+    if dev and sys.platform == "darwin":
+        import macnet
+        try:
+            return macnet.local_mac(dev) or "00:00:00:00:00:00"
+        except (RuntimeError, OSError, subprocess.TimeoutExpired):
             return "00:00:00:00:00:00"
     if dev:
         try:

@@ -44,6 +44,23 @@ git clone https://github.com/ADCDS/xiaomi-openwrt-install.git
 cd xiaomi-openwrt-install
 ```
 
+### macOS (experimental)
+
+The quick compatibility port uses Homebrew tools. Flashing on macOS has not
+been validated on hardware.
+
+```sh
+brew install python iproute2mac sshpass openssl@3
+export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+python3 install.py --list-interfaces
+```
+
+Select the router-facing interface from that list, then run, for example,
+`python3 install.py --interface en0`. Do not assume en0 is Ethernet. Launch the
+GUI from the same terminal to inherit PATH. Apple's LibreSSL does not support
+`openssl passwd -6`. Join Wi-Fi manually in System Settings; Linux `nmcli`
+automation is unavailable. This approach does not require paramiko or passlib.
+
 ### Windows 10/11
 
 Native support, no WSL. Install Python from

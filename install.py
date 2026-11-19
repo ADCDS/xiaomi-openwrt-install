@@ -78,6 +78,7 @@ import channel
 import devices
 import dtbread
 import hostnet
+import macnet
 import i18n
 import release
 import ubiparse
@@ -1021,6 +1022,11 @@ def neighbour_mac(host, iface=None):
     dev = scope or iface or chain.local_interface(bare)
     if not dev:
         return None
+    if sys.platform == "darwin" and not hostnet.is_windows():
+        try:
+            return macnet.neighbor_mac(bare, dev)
+        except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired):
+            return None
     if hostnet.is_windows():
         try:
             return hostnet.neighbor_mac(bare, dev)
@@ -1895,6 +1901,11 @@ def detect_transport(interface, sysfs_root="/sys/class/net"):
             return "wifi" if hostnet.adapter(interface)["wireless"] else "wired"
         except hostnet.NetworkError as exc:
             raise Abort(str(exc)) from exc
+    if sys.platform == "darwin" and sysfs_root == "/sys/class/net":
+        try:
+            return macnet.transport(interface)
+        except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+            raise Abort(str(exc)) from exc
     device = os.path.join(sysfs_root, interface)
     if not os.path.isdir(device):
         raise Abort(f"network interface {interface!r} does not exist")
@@ -1988,6 +1999,9 @@ def require_host_tools(password=False):
     if password:
         needed.append("openssl")
     missing = [tool for tool in needed if shutil.which(tool) is None]
+    if password and sys.platform == "darwin" and not macnet.openssl_ready():
+        raise Abort('macOS requires Homebrew OpenSSL: brew install openssl@3; '
+                    'export PATH="$(brew --prefix openssl@3)/bin:$PATH"')
     if missing:
         raise Abort("this host is missing " + ", ".join(missing)
                     + "; install them before the router is touched")
@@ -2267,6 +2281,14 @@ def main(argv=None):
     i18n.set_language(args.lang)
     i18n.tolerate_console_encoding()
     if args.list_interfaces:
+        if sys.platform == "darwin" and not hostnet.is_windows():
+            try:
+                for name, transport in macnet.interfaces().items():
+                    addresses = ", ".join(map(str, interface_ipv4_networks(name)))
+                    log(f"{name}  {transport}  {addresses or 'no IPv4'}")
+            except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+                raise Abort(str(exc)) from exc
+            return 0
         if not hostnet.is_windows():
             raise Abort("--list-interfaces is for Windows; "
                         "use `ip -br addr` on Linux")
