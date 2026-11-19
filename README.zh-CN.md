@@ -40,11 +40,27 @@ sudo apt install sshpass openssl
 
 ### macOS（实验性）
 
-快速适配使用 Homebrew 网络工具，尚未完成实机刷写验证：
+尚未完成 macOS 实机刷写验证。Homebrew 仅支持 Apple Silicon Mac；Intel Mac
+请使用 MacPorts。需要 Python 3.9 或更新版本，Xcode 命令行工具
+（`xcode-select --install`）已自带。
+
+Apple Silicon（Homebrew）：
 
 ```sh
 brew install python iproute2mac sshpass openssl@3
 export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+```
+
+Intel（MacPorts）：
+
+```sh
+sudo port install iproute2mac sshpass openssl3
+export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
+```
+
+然后列出网络接口：
+
+```sh
 python3 install.py --list-interfaces
 ```
 

@@ -1,4 +1,4 @@
-"""Small macOS adaptations for the Homebrew/iproute2mac transport."""
+"""Small macOS adaptations for the iproute2mac transport (Homebrew or MacPorts)."""
 import ipaddress
 import os
 import re

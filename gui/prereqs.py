@@ -73,6 +73,8 @@ def collect():
                 check["ok"] = macnet.openssl_ready()
             if check["id"] == "ip":
                 check["label"] = "iproute2mac (ip)"
+        # Wi-Fi is joined by hand on macOS; there is no nmcli to look for.
+        checks = [c for c in checks if c["id"] != "nmcli"]
 
     host = {"Linux": "wsl" if wsl else "linux", "Windows": "windows",
             "Darwin": "macos"}.get(system, "other")
@@ -87,8 +89,9 @@ def collect():
         "ready": platform_ok and all(c["ok"] for c in checks if c["required"]),
         "hint_install": {
             "Linux": "sudo apt install sshpass openssl",
-            "Darwin": 'brew install iproute2mac sshpass openssl@3; '
-                      'export PATH="$(brew --prefix openssl@3)/bin:$PATH"',
+            "Darwin": 'brew install iproute2mac sshpass openssl@3 (Apple Silicon) '
+                      'or sudo port install iproute2mac sshpass openssl3 (Intel), '
+                      'then put that OpenSSL 3 first in PATH',
             "Windows": "py -3 -m pip install -r requirements-windows.txt",
         }.get(system, ""),
     }

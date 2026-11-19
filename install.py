@@ -2000,8 +2000,10 @@ def require_host_tools(password=False):
         needed.append("openssl")
     missing = [tool for tool in needed if shutil.which(tool) is None]
     if password and sys.platform == "darwin" and not macnet.openssl_ready():
-        raise Abort('macOS requires Homebrew OpenSSL: brew install openssl@3; '
-                    'export PATH="$(brew --prefix openssl@3)/bin:$PATH"')
+        raise Abort('macOS needs OpenSSL 3 ahead of Apple\'s LibreSSL in PATH, which '
+                    'lacks `openssl passwd -6`. Apple Silicon: brew install openssl@3; '
+                    'export PATH="$(brew --prefix openssl@3)/bin:$PATH". Intel: '
+                    'sudo port install openssl3, with /opt/local/bin first in PATH.')
     if missing:
         raise Abort("this host is missing " + ", ".join(missing)
                     + "; install them before the router is touched")

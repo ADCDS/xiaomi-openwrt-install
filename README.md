@@ -46,12 +46,27 @@ cd xiaomi-openwrt-install
 
 ### macOS (experimental)
 
-The quick compatibility port uses Homebrew tools. Flashing on macOS has not
-been validated on hardware.
+Flashing on macOS has not been validated on hardware. Homebrew supports only
+Apple Silicon Macs; on Intel Macs use MacPorts. Python 3.9 or newer is needed;
+the Xcode Command Line Tools (`xcode-select --install`) provide one.
+
+Apple Silicon (Homebrew):
 
 ```sh
 brew install python iproute2mac sshpass openssl@3
 export PATH="$(brew --prefix openssl@3)/bin:$PATH"
+```
+
+Intel (MacPorts):
+
+```sh
+sudo port install iproute2mac sshpass openssl3
+export PATH="/opt/local/bin:/opt/local/sbin:$PATH"
+```
+
+Then list the interfaces:
+
+```sh
 python3 install.py --list-interfaces
 ```
 
