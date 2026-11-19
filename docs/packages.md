@@ -128,7 +128,11 @@ files that no package owns (`apk info --who-owns` finds none) and that
 `sysupgrade -l` does not list. After you confirm the list, it adds these files
 to `/etc/sysupgrade.conf`. Paths that are already listed are not added again.
 Generated files and program directories are excluded. The list is
-`AUTO_KEEP_EXCLUDES` in `updater.py`.
+`AUTO_KEEP_EXCLUDES` in `updater.py`. It includes the service links in
+`/etc/rc.d/`. So the scan does not carry over which services are enabled: a
+reinstalled package enables its service as the package does by default. If
+you disabled one, check it after the update with `service`, and disable it
+again with `service NAME disable`.
 
 Use `--extra-keep PATH` to add more paths, and `--no-auto-keep` to turn off
 the scan. The paths go into `/etc/sysupgrade.conf` itself, because lists in

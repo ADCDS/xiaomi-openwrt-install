@@ -122,6 +122,14 @@ AUTO_KEEP_EXCLUDES = (
     "*.apk-new",
     "/tmp/*",
     "/var/*",
+    "/run",
+    "/run/*",
+    # Generated when a service is enabled; a reinstalled package enables its
+    # own, and a kept link would point at an init script not yet installed.
+    "/etc/rc.d/*",
+    # Includes that services (https-dns-proxy, pbr, ...) write at run time;
+    # files a package installs here are owned, so excluded anyway.
+    "/usr/share/nftables.d/*",
     "/bin/*",
     "/sbin/*",
     "/lib/*",

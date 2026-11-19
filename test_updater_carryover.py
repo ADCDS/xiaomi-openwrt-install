@@ -39,9 +39,14 @@ class ExtraFileTests(unittest.TestCase):
                     "/etc/capabilities/ntpd.json", "/etc/banner.openwrt",
                     "/lib/firmware/ath11k/IPQ5018/cal-x.bin", "/.wget-hsts",
                     "/etc/config/dhcp.apk-new", "/tmp/x", "/var/run/x", "/bin/x",
-                    "/sbin/x", "/lib/x.so", "/usr/lib/x.so", "/www/luci-static/x.css"]
+                    "/sbin/x", "/lib/x.so", "/usr/lib/x.so", "/www/luci-static/x.css",
+                    # Seen on hardware (v2.1.4): generated, not the operator's.
+                    "/etc/rc.d/S99ttyd", "/etc/rc.d/K10collectd", "/run",
+                    "/run/x.pid",
+                    "/usr/share/nftables.d/ruleset-post/20-https-dns-proxy-notrack.nft"]
         kept = ["/etc/aurora/device.key", "/usr/bin/led-status.sh", "/root/.profile",
-                "/etc/banner", "/usr/sbin/tool", "/etc/apk/keys/eamonxg.pem"]
+                "/etc/banner", "/usr/sbin/tool", "/etc/apk/keys/eamonxg.pem",
+                "/etc/rc.local", "/etc/nftables.d/10-custom.nft", "/runner.sh"]
         for path in excluded:
             self.assertTrue(updater.is_auto_keep_excluded(path), path)
         for path in kept:
