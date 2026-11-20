@@ -1190,7 +1190,8 @@ class KeyAuth:
     Nothing secret goes over the wire: the client proves it holds a key, and
     the server proves who it is against known_hosts. ~/.ssh/config is honoured
     -- no -i unless asked, no throwaway known_hosts, pubkey auth left on --
-    except for what keeps the login non-interactive and key-only.
+    except for what keeps the login non-interactive, key-only, checked
+    against known_hosts by this very client, and its output clean.
 
     Only for the installed system. The RAM installer has no copy of the public
     key, and every call that addresses it passes passwords=RAM_PASSWORDS,
@@ -1212,8 +1213,19 @@ class KeyAuth:
                 "-o", "PreferredAuthentications=publickey",
                 # Accepting the router as this host's gateway rests on its host
                 # key being checked, so a looser ~/.ssh/config setting (no,
-                # accept-new) is overridden here. Nothing else is.
-                "-o", "StrictHostKeyChecking=yes"]
+                # accept-new) is overridden here. A shared master connection
+                # would skip this client's check: it was verified however the
+                # master was opened.
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                # The output is parsed (package lists, markers), so only the
+                # remote command may write to it: no client warnings, no pty,
+                # no LocalCommand, no RemoteCommand in its place. Nothing of
+                # this host's goes to the router: no agent, X11 or forwarding.
+                "-o", "LogLevel=ERROR", "-o", "RequestTTY=no",
+                "-o", "PermitLocalCommand=no", "-o", "RemoteCommand=none",
+                "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
+                "-o", "ClearAllForwardings=yes"]
         if self.identity:
             opts += ["-o", "IdentitiesOnly=yes", "-i", self.identity]
         return opts
@@ -1246,7 +1258,11 @@ def key_failure(rc, output):
 
     Only 255 is OpenSSH's own failure. Any other status is the remote
     command's, and says nothing about the key (PR #8 review).
-    Returns "host-key", "auth" or "connection" for a 255."""
+    Returns "host-key", "auth" or "connection" for a 255.
+
+    The remote command's stderr arrives mixed with the client's, so a command
+    that itself exits 255 and prints "Permission denied" reads as "auth".
+    Nothing here runs such a command; it cannot be told apart in any case."""
     if rc != 255:
         return None
     if any(marker in output for marker in HOST_KEY_FAILURES):
@@ -1262,15 +1278,25 @@ def _run_key(argv, timeout, host):
     That is never retried or tolerated, whatever check= the caller passed: the
     device answering is not the one known_hosts describes."""
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        # No command reads its stdin, and ssh would otherwise take what is
+        # typed ahead at the terminal for the next prompt.
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                                stdin=subprocess.DEVNULL)
         rc, output = result.returncode, (result.stdout + result.stderr).strip()
     except (OSError, subprocess.TimeoutExpired) as exc:
         rc, output = 255, str(exc)
     if key_failure(rc, output) == "host-key":
+        # An interrupted update or install leaves the router in the RAM
+        # installer, whose host key is its own: adding that one to known_hosts
+        # would be exactly the wrong fix.
         raise Abort(t("the SSH host key of {host} is not the one known_hosts holds "
-                      "for it, or it has none there. Nothing was sent to it. Check "
-                      "the router's key yourself and update ~/.ssh/known_hosts "
-                      "only then; this tool does not relax the check.\n{output}",
+                      "for it, or it has none there. Nothing was sent to it. If an "
+                      "update or install was interrupted, the router may be in the "
+                      "RAM installer, which has a host key of its own: do not add "
+                      "that key, run this again without SSH key login. Otherwise, "
+                      "check the router's key yourself and update "
+                      "~/.ssh/known_hosts only then; this tool does not relax the "
+                      "check.\n{output}",
                       host=host, output=output))
     return rc, output
 
@@ -1326,7 +1352,7 @@ def ssh(host, cmd, timeout=120, check=True, passwords=None):
             base = ["sshpass", "-e"] + base
             env = password_env(pw)
         r = subprocess.run(base, capture_output=True, text=True,
-                           timeout=timeout, env=env)
+                           timeout=timeout, env=env, stdin=subprocess.DEVNULL)
         last = (r.returncode, (r.stdout + r.stderr).strip())
         if r.returncode == 0:
             return last
@@ -2040,7 +2066,9 @@ def parse_args(argv=None):
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),
                     help=hidden)
     ap.add_argument("--verify-ssh-key", metavar="PATH_OR_agent",
-                    help="with --verify-only: use OpenSSH key file or 'agent'; requires a trusted host key")
+                    help="with --verify-only: log in with this OpenSSH key file, or "
+                         "'agent' for ssh-agent and your default OpenSSH identities; "
+                         "requires a trusted host key")
     ap.add_argument("--verify-host", metavar="ADDRESS",
                     help="with --verify-only and --verify-ssh-key: verify this address without discovery")
     ap.add_argument("--verify-ssh-alias", metavar="NAME",

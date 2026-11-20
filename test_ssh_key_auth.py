@@ -54,6 +54,32 @@ class CommandTests(KeyAuthCase):
         self.assertEqual(argv[-2:], ["root@192.168.31.1", "echo up"])
         self.assertIsNone(run.call_args.kwargs.get("env"))
 
+    def test_output_stays_clean_and_nothing_is_forwarded(self):
+        # ~/.ssh/config is honoured, except where it could put client chatter
+        # into parsed output, reuse a master verified some other way, or hand
+        # this host's agent/X11/ports to the router.
+        for argv in (install.KeyAuth().options(), install.KeyAuth("/k").options()):
+            for option in ("LogLevel=ERROR", "RequestTTY=no", "PermitLocalCommand=no",
+                           "RemoteCommand=none", "ControlMaster=no", "ControlPath=none",
+                           "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes"):
+                self.assertIn(option, argv)
+                self.assertEqual(argv[argv.index(option) - 1], "-o")
+
+    def test_ssh_never_reads_the_terminal(self):
+        with patch.object(install.subprocess, "run", return_value=done(0, "up")) as run:
+            install.ssh("192.168.31.1", "echo up")
+        self.assertIs(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+        install.KEY_AUTH = None
+        with patch.object(install.subprocess, "run", return_value=done(0, "up")) as run:
+            install.ssh("192.168.31.1", "echo up")
+        self.assertIs(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+
+    def test_host_key_failure_warns_about_the_ram_installer(self):
+        with patch.object(install.subprocess, "run",
+                          return_value=done(255, "", "Host key verification failed.")):
+            with self.assertRaisesRegex(install.Abort, "RAM installer.*do not add"):
+                install.ssh("192.168.31.1", "echo up", check=False)
+
     def test_identity_is_the_only_key_offered(self):
         install.KEY_AUTH = install.KeyAuth("/keys/router key")
         with patch.object(install.subprocess, "run", return_value=done()) as run:
