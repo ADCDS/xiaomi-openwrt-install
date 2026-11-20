@@ -151,6 +151,7 @@ SPECIAL_PACKAGES = {
     "wpad*": "replaces the firmware's wpad variant",
     "hostapd*": "replaces the firmware's wpad/hostapd variant",
     "odhcpd*": "replaces the firmware's odhcpd variant",
+    "libustream-*": "replaces the firmware's TLS backend for uclient/uhttpd",
 }
 
 # How long a freshly updated router gets to reach its package repositories.
@@ -280,14 +281,16 @@ def filter_world(text):
     """The packages to reinstall, from /etc/apk/world.
 
     Left out: entries with a version constraint (= < > ~: the firmware pins
-    those), the firmware's base (kernel, libc, base-files), libraries (lib*,
-    which come in as dependencies), and negations (!name). Sorted, unique."""
+    those), the firmware's base (kernel, libc, base-files), and negations
+    (!name). Libraries stay: world lists only what was asked for by name, so
+    a lib* there was installed on purpose, and dependencies are never in it.
+    Sorted, unique."""
     keep = set()
     for entry in text.split():
         if any(mark in entry for mark in "=<>~") or entry.startswith("!"):
             continue
         name = entry.split("@", 1)[0]
-        if name in BASE_PACKAGES or name.startswith("lib"):
+        if name in BASE_PACKAGES:
             continue
         keep.add(entry)
     return sorted(keep)
@@ -517,10 +520,21 @@ def wan_nameservers(host):
     return list(dict.fromkeys(servers))
 
 
+def ssh_lost(host, rc, out, doing):
+    """Abort when OpenSSH itself failed (exit 255; see install.key_failure).
+
+    That is not the router's DNS or its repositories, and must not be
+    reported as either, or answered by changing its resolver."""
+    if rc == 255:
+        raise Abort(f"lost the SSH connection to {host} while {doing}: "
+                    f"{out.strip()[-300:]}")
+
+
 def resolves(host, name, server=None):
     target = shlex.quote(name) + (f" {shlex.quote(server)}" if server else "")
-    _rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
-                           timeout=30, check=False)
+    rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
+                          timeout=30, check=False)
+    ssh_lost(host, rc, out, "checking its DNS")
     return "DNS_OK" in out
 
 
@@ -620,11 +634,12 @@ def wait_for_repositories(host, deadline_s=None, resolver=None):
             rc, out = 1, "apk update timed out"
         if rc == 0:
             return True
-        if resolver is not None and not resolver.active:
+        if rc != 255 and resolver is not None and not resolver.active:
             name = name or repository_host(host)
             if name and resolver.engage(name):
                 continue
         if time.time() + 15 >= end:
+            ssh_lost(host, rc, out, "waiting for its package repositories")
             log(f"[p] apk update: {out.strip()[-300:]}")
             return False
         time.sleep(15)
@@ -697,6 +712,15 @@ def reinstall_packages(host, outdir, deadline_s=None, assume_yes=True):
             if rc == 0:
                 summary["installed"].append(name)
                 log(f"[p] installed {name}")
+            elif rc == 255:
+                # OpenSSH failed, not apk: every later package would fail the
+                # same way, and not for any reason of its own.
+                reason = "the SSH connection failed: " + (
+                    out.strip().splitlines() or ["exit 255"])[-1]
+                rest = missing[missing.index(name):]
+                summary["failed"] += [(other, reason) for other in rest]
+                log(f"[p] {reason}; {len(rest)} package(s) left for --reinstall-only")
+                break
             else:
                 reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
                 summary["failed"].append((name, reason))
@@ -1517,7 +1541,8 @@ def finish_packages(host, args, outdir, config_tar):
         return
     try:
         reinstall_packages(host, outdir, assume_yes=args.yes)
-    except (Abort, restore.RestoreError, subprocess.TimeoutExpired) as exc:
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired, OSError,
+            tarfile.TarError) as exc:
         log(t("[!] the update is complete, but reinstalling packages stopped: "
               "{error}. Run this again with --reinstall-only to retry.", error=exc))
 

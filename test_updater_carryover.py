@@ -129,8 +129,8 @@ class WorldTests(unittest.TestCase):
 
     def test_filter(self):
         self.assertEqual(updater.filter_world(self.WORLD),
-                         ["dnsmasq-full", "htop@custom", "kmod-wireguard", "luci",
-                          "luci-app-aurora"])
+                         ["dnsmasq-full", "htop@custom", "kmod-wireguard",
+                          "libustream-mbedtls", "luci", "luci-app-aurora"])
 
     def test_pinned_and_installed_names(self):
         self.assertEqual(updater.pinned_names(self.WORLD),
@@ -148,7 +148,7 @@ class ReinstallTests(unittest.TestCase):
             target.start()
             self.addCleanup(target.stop)
 
-    def router(self, world_old, *, installed=(), pinned="", fail=(), update_rc=(0,)):
+    def router(self, world_old, *, installed=(), pinned="", fail=(), update_rc=(0,), lost=()):
         added, updates = [], list(update_rc)
 
         def ssh(host, cmd, **kw):
@@ -170,6 +170,8 @@ class ReinstallTests(unittest.TestCase):
                 added.append(name)
                 if name in fail:
                     return 1, "ERROR: unable to select packages:\n  " + name + " (no such package)"
+                if name in lost:
+                    return 255, "Connection to 192.168.31.1 closed by remote host."
                 return 0, "OK"
             raise AssertionError(cmd)
         return ssh, added
@@ -195,6 +197,30 @@ class ReinstallTests(unittest.TestCase):
         self.assertIn("installed: htop", text)
         self.assertIn("skipped: dnsmasq-full -- ", text)
 
+    def test_libraries_come_back_but_tls_variants_are_listed(self):
+        ssh, added = self.router("libpcap\nlibustream-openssl\nhtop\n")
+        with patch.object(install, "ssh", ssh):
+            summary = updater.reinstall_packages("h", self.tmp.name)
+        self.assertEqual(added, ["htop", "libpcap"])
+        self.assertIn("TLS backend", dict(summary["skipped"])["libustream-openssl"])
+
+    def test_a_lost_connection_stops_the_adds_and_lists_the_rest(self):
+        ssh, added = self.router("a\nb\nc\n", lost=("b",))
+        with patch.object(install, "ssh", ssh):
+            summary = updater.reinstall_packages("h", self.tmp.name)
+        self.assertEqual(added, ["a", "b"])                 # c is not tried
+        self.assertEqual(summary["installed"], ["a"])
+        failed = dict(summary["failed"])
+        self.assertEqual(sorted(failed), ["b", "c"])
+        self.assertIn("SSH connection failed", failed["c"])
+
+    def test_a_lost_connection_is_not_reported_as_repositories(self):
+        ssh, added = self.router("htop\n", update_rc=(255, 255, 255))
+        with patch.object(install, "ssh", ssh):
+            with self.assertRaisesRegex(install.Abort, "lost the SSH connection"):
+                updater.reinstall_packages("h", self.tmp.name, deadline_s=1)
+        self.assertEqual(added, [])
+
     def test_unreachable_repositories_fail_every_missing_package(self):
         ssh, added = self.router("htop\nnano\n", update_rc=())
         with patch.object(install, "ssh", ssh):
@@ -218,9 +244,12 @@ class ReinstallTests(unittest.TestCase):
 
     def test_a_reinstall_failure_does_not_fail_the_update(self):
         args = updater.parse_args([])
-        with patch.object(updater, "reinstall_packages",
-                          side_effect=install.Abort("lost the router")):
-            updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
+        for error in (install.Abort("lost the router"), OSError("disk full"),
+                      tarfile.ReadError("not a gzip file")):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(updater, "review_image_defaults"), \
+                 patch.object(updater, "reinstall_packages", side_effect=error):
+                updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
         args = updater.parse_args(["--no-reinstall"])
         with patch.object(updater, "reinstall_packages") as reinstall:
             updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
@@ -271,7 +300,7 @@ class PrepareTests(unittest.TestCase):
                          "/etc/apk/keys/eamonxg.pem\n/etc/apk/keys/glass-apk.rsa.pub\n"
                          "/etc/aurora/device.hash\n/usr/bin/led-status.sh\n/root/notes\n"
                          "/etc/backup/\n")
-        self.assertEqual(uploads[updater.WORLD_OLD], "htop\nluci\n")
+        self.assertEqual(uploads[updater.WORLD_OLD], "htop\nlibfoo\nluci\n")
         self.assertIn("etc/config/network\n", uploads[updater.REMOTE_LIST])
         self.assertEqual(files, ["sysupgrade-list.txt", "world-old.txt", "world.txt"])
         self.assertFalse(any(cmd.startswith("tar czf") for cmd in commands))
@@ -799,6 +828,15 @@ class TemporaryResolverTests(unittest.TestCase):
             self.assertEqual(updater.local_dns_forwarders("h"),
                              ["127.0.0.1#5053", "/lan/::1#5054"])
 
+
+
+class SshLossTests(unittest.TestCase):
+    def test_a_lost_connection_is_not_a_dns_answer(self):
+        with patch.object(install, "ssh", return_value=(255, "Connection timed out")):
+            with self.assertRaisesRegex(install.Abort, "lost the SSH connection.*DNS"):
+                updater.resolves("h", "downloads.openwrt.org")
+        with patch.object(install, "ssh", return_value=(1, "")):
+            self.assertFalse(updater.resolves("h", "downloads.openwrt.org"))
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,7 +17,9 @@ It leaves out these entries:
   these to its own build, for example `kernel`, `base-files` and its kernel
   modules.
 - `kernel`, `libc` and `base-files`.
-- `lib*` packages. Libraries come back as dependencies.
+
+Libraries stay in the list. `/etc/apk/world` holds only the packages that were
+asked for by name, so a `lib*` entry there was installed on purpose.
 
 After the update has been verified, `updater.py` waits until `apk update`
 works, then checks each listed package. It installs only those that are
@@ -113,6 +115,7 @@ patterns in `SPECIAL_PACKAGES` in `updater.py`:
 | `dnsmasq-*` (such as `dnsmasq-full`) | `dnsmasq` |
 | `wpad*`, `hostapd*` | the firmware's `wpad` variant |
 | `odhcpd*` | the firmware's `odhcpd` variant |
+| `libustream-*` | the firmware's TLS backend for `uclient-fetch` and `uhttpd` |
 
 Replace one of these by hand. Download the new package first: once `dnsmasq`
 is removed, the router may not resolve the repository's name any more. For
