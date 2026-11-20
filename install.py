@@ -1608,10 +1608,13 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
     log(t("[3] waiting up to {seconds}s for permanent OpenWrt on {where}",
           seconds=deadline_s, where=where))
     # A key login sends nothing secret, so it is treated like the empty
-    # password here; the host key check in KeyAuth identifies the device.
+    # password for the gateway rule; the host key check in KeyAuth identifies
+    # the device. A MAC on record is still bound under key auth: two routers
+    # restored from one backup share a host key (/etc/dropbear is kept), and
+    # what follows the check (the package reinstall) acts on the device.
     secret = any(SSH_PASSWORDS) and key_auth() is None
     gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
-    mac = router_mac if secret else None
+    mac = router_mac if secret or key_auth() is not None else None
     router_iface = interface if gateway_ok else None
     if host and not interface and host_iface and (router_mac or not secret):
         router_iface = host_iface

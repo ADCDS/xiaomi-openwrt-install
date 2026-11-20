@@ -224,6 +224,28 @@ class VerificationTests(KeyAuthCase):
         self.assertEqual(check.call_args.kwargs["router_iface"], "en0")
         self.assertIsNone(check.call_args.kwargs["router_mac"])
 
+    def test_a_recorded_mac_is_bound_under_key_auth_too(self):
+        # Two routers restored from one backup share a host key; the MAC the
+        # update recorded tells them apart before the reinstall acts on one.
+        with patch.object(install, "check_is_openwrt_ram") as check, \
+             patch.object(install, "ssh", return_value=(255, "Permission denied")), \
+             patch.object(install, "log"):
+            with self.assertRaises(install.Abort):
+                install.verify_permanent_system(devices.RD03V2, host="192.168.31.1",
+                                                host_iface="en0",
+                                                router_mac="aa:bb:cc:dd:ee:ff")
+        self.assertEqual(check.call_args.kwargs["router_iface"], "en0")
+        self.assertEqual(check.call_args.kwargs["router_mac"], "aa:bb:cc:dd:ee:ff")
+
+    def test_another_mac_is_refused_under_key_auth(self):
+        with patch.object(install, "gateway_conflict", return_value=None), \
+             patch.object(install, "ssh_banner", return_value=("SSH-2.0-dropbear", None)), \
+             patch.object(install, "neighbour_mac", return_value="11:22:33:44:55:66"), \
+             patch.object(install, "log"):
+            with self.assertRaisesRegex(install.Abort, "not the router's"):
+                install.check_is_openwrt_ram("192.168.31.1", router_iface="en0",
+                                             router_mac="aa:bb:cc:dd:ee:ff")
+
     def test_continuation_verifies_by_key(self):
         install.KEY_AUTH = install.KeyAuth("/k/id", alias="ax", alias_for="192.168.31.1")
         command = install.verification_command("/out/resume.json", "en0", host="192.168.31.1")

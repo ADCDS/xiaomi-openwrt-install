@@ -1560,7 +1560,9 @@ def gateway_allowed(args):
     --ssh-key-auth it is accepted as well, on Wi-Fi too: nothing secret is
     sent (the key never leaves this host), and known_hosts is checked
     strictly, so a device that only shares the router's address fails the
-    host key check before anything runs on it."""
+    host key check before anything runs on it. Where a MAC was recorded, the
+    final check binds it too (install.verify_permanent_system): a host key
+    restored from one backup onto two routers does not tell them apart."""
     if args.ssh_key_auth:
         return True
     return args.transport == "wired" and not any(install.SSH_PASSWORDS)
