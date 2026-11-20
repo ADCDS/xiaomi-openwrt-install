@@ -1763,6 +1763,22 @@ def ssh_config_value(alias, key):
     return ""
 
 
+# An interface name or a Windows interface index, as a link-local scope id.
+SCOPE_ID = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def numeric_address(text):
+    """ipaddress.ip_address of an operator-given address, scope id included.
+
+    ipaddress takes anything after "%" as the scope ("fe80::1%;reboot"); only
+    an interface name or index is let through here. Raises ValueError."""
+    address, sep, scope = text.partition("%")
+    ip = ipaddress.ip_address(address)
+    if sep and (ip.version != 6 or not SCOPE_ID.fullmatch(scope)):
+        raise ValueError(f"not an interface as the scope of {text!r}")
+    return ip
+
+
 def require_alias_matches(alias, host):
     """An --ssh-alias must log in as root to the very address that is checked.
 
@@ -2550,7 +2566,7 @@ def main(argv=None):
                 raise Abort(t("SSH private key file does not exist"))
         if args.verify_host:
             try:
-                ipaddress.ip_address(args.verify_host.split("%", 1)[0])
+                numeric_address(args.verify_host)
             except ValueError as exc:
                 raise Abort(t("--verify-host must be a numeric IP address")) from exc
         if args.verify_ssh_alias:

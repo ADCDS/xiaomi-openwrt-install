@@ -144,5 +144,7 @@ you disabled one, check it after the update with `service`, and disable it
 again with `service NAME disable`.
 
 The scan is off by default, because it is slow on a large overlay. Use
-`--extra-keep PATH` to add paths without it. The paths go into `/etc/sysupgrade.conf` itself, because lists in
+`--extra-keep PATH` to add paths without it. A file whose name has a space, wildcard or
+quote is listed as not kept: sysupgrade reads `/etc/sysupgrade.conf` unquoted
+and would split or expand that name. Keep the folder that holds it instead. The paths go into `/etc/sysupgrade.conf` itself, because lists in
 `/etc/sysupgrade.conf.d/` were found not to take effect on this firmware.

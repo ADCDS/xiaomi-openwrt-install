@@ -175,6 +175,8 @@ REMOTE_FILES = "/tmp/rd03v2-files.tar.gz"
 ROM_DEFAULTS_OLD = "rom-defaults-old.tar.gz"
 CONFFILE_DIR = "conffiles"
 APK_NEW = ".apk-new"
+# Paths per `apk info --who-owns` call in the extra-file scan.
+OWNER_BATCH = 100
 # How much of a diff the log shows; the whole of it is always saved.
 DIFF_LOG_LINES = 40
 
@@ -190,6 +192,12 @@ def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
     owns, sysupgrade -l does not list, and no exclude matches, then
     AUTOKEEP_DONE. Whiteouts (character devices) are not files and are
     skipped by -type, as are names with a newline, which `read` would split.
+
+    Ownership is asked of apk in batches of OWNER_BATCH paths: each apk call
+    loads its whole database, so one call per file took minutes on a large
+    overlay. apk 3 prints `<path> is owned by <package>` on stdout for each
+    owned path and an error on stderr for each other one (checked on the
+    reference router, apk-tools 3.0.5).
     """
     for pattern in excludes:
         if not all(c.isalnum() or c in "/._-*" for c in pattern):
@@ -201,14 +209,24 @@ def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
         "keep=/tmp/autokeep.$$\n"
         "sysupgrade -l > \"$keep\" 2>/dev/null || "
         "{ rm -f \"$keep\"; echo 'AUTOKEEP_ERROR sysupgrade -l failed'; exit 1; }\n"
+        "cand=$keep.cand; owned=$keep.owned; : > \"$owned\"\n"
         "find . \\( -type f -o -type l \\) | while IFS= read -r p; do\n"
         "  p=${p#.}\n"
         f"  case \"$p\" in {case}) continue ;; esac\n"
         "  grep -qxF \"$p\" \"$keep\" && continue\n"
-        "  apk info --who-owns \"$p\" >/dev/null 2>&1 && continue\n"
+        "  printf '%s\\n' \"$p\"\n"
+        "done > \"$cand\"\n"
+        "set --\n"
+        "while IFS= read -r p; do\n"
+        "  set -- \"$@\" \"$p\"\n"
+        f"  if [ $# -ge {OWNER_BATCH} ]; then apk info --who-owns \"$@\" 2>/dev/null >> \"$owned\"; set --; fi\n"
+        "done < \"$cand\"\n"
+        "if [ $# -gt 0 ]; then apk info --who-owns \"$@\" 2>/dev/null >> \"$owned\"; fi\n"
+        "sed -n 's/ is owned by .*//p' \"$owned\" > \"$owned.paths\"\n"
+        "grep -vxF -f \"$owned.paths\" \"$cand\" | while IFS= read -r p; do\n"
         "  echo \"AUTOKEEP $p\"\n"
         "done\n"
-        "rm -f \"$keep\"\n"
+        "rm -f \"$keep\" \"$cand\" \"$owned\" \"$owned.paths\"\n"
         "echo AUTOKEEP_DONE\n")
 
 
@@ -255,10 +273,35 @@ def keep_append_text(existing, paths):
     return lead + "".join(path + "\n" for path in new)
 
 
+# Characters sysupgrade cannot take in a sysupgrade.conf line: it expands the
+# list unquoted (`find $(sed ... /etc/sysupgrade.conf ...)` in
+# list_static_conffiles, read on the reference router), so whitespace splits
+# a name into several find arguments -- "/etc/x -delete" would be a find
+# action -- quotes and backslashes are kept as they are, and wildcards are
+# expanded: wanted in a pattern someone typed, wrong in a file's real name.
+UNQUOTABLE = set("\\'\"")
+WILDCARDS = set("*?[]")
+
+
+def keep_path_problem(path, wildcards_ok=False):
+    """Why sysupgrade.conf cannot carry `path` as it is, or None."""
+    if not path.startswith("/"):
+        return "not an absolute path"
+    if any(c.isspace() or not c.isprintable() or c in UNQUOTABLE for c in path):
+        return "a space, quote or backslash, which sysupgrade does not take"
+    if not wildcards_ok and any(c in WILDCARDS for c in path):
+        return "a wildcard, which sysupgrade would expand"
+    return None
+
+
 def validate_keep_path(path):
     if not path.startswith("/") or "\n" in path or "\r" in path:
         raise Abort(t("--extra-keep needs an absolute path on the router, got {path!r}",
                       path=path))
+    if keep_path_problem(path, wildcards_ok=True):
+        raise Abort(t("--extra-keep {path!r}: sysupgrade splits names at spaces and "
+                      "does not take quotes or backslashes, so it cannot keep this "
+                      "one. Keep the folder that holds it instead.", path=path))
     return path
 
 
@@ -446,6 +489,13 @@ def prepare_carryover(host, args, outdir, undo=None):
     save_rom_defaults(host, outdir, listed)
 
     extras = detect_extra_files(host) if args.auto_keep else []
+    unkeepable = [path for path in extras if keep_path_problem(path)]
+    if unkeepable:
+        log(t("[c] not kept: sysupgrade cannot keep names with spaces, wildcards or "
+              "quotes. Keep their folder with --extra-keep, or rename them:"))
+        for path in unkeepable:
+            log(f"      {path!r}")
+        extras = [path for path in extras if path not in unkeepable]
     if not args.auto_keep:
         log("[c] extra-file scan not run (--auto-keep looks for files no package owns)")
     manual = [validate_keep_path(path) for path in args.extra_keep]
@@ -1474,7 +1524,7 @@ def check_key_options(args):
             raise Abort(t("SSH private key file does not exist"))
     if args.ssh_alias:
         try:
-            ipaddress.ip_address((args.host or "").split("%", 1)[0])
+            install.numeric_address(args.host or "")
         except ValueError as exc:
             raise Abort(t("--ssh-alias requires --host with the router's numeric "
                           "address, which the network checks use")) from exc

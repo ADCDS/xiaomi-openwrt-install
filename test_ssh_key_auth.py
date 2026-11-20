@@ -74,6 +74,14 @@ class CommandTests(KeyAuthCase):
             install.ssh("192.168.31.1", "echo up")
         self.assertIs(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
 
+    def test_a_scope_id_must_name_an_interface(self):
+        for good in ("192.168.31.1", "fe80::1%en0", "fe80::1%12", "fe80::1%br-lan.1"):
+            install.numeric_address(good)
+        for bad in ("fe80::1%;reboot", "fe80::1%$(id)", "192.168.31.1%en0", "fe80::1%",
+                    "router.lan"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                install.numeric_address(bad)
+
     def test_host_key_failure_warns_about_the_ram_installer(self):
         with patch.object(install.subprocess, "run",
                           return_value=done(255, "", "Host key verification failed.")):

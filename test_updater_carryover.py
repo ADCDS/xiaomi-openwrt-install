@@ -2,6 +2,8 @@
 import io
 import os
 import shlex
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -62,6 +64,48 @@ class ExtraFileTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             updater.auto_keep_script(("/etc/$(reboot)",))
 
+    @unittest.skipUnless(shutil.which("busybox"), "needs busybox, the router's shell")
+    def test_script_on_busybox_with_batched_owner_lookups(self):
+        # The real script, run by busybox ash against a fake overlay and an
+        # apk that answers as apk-tools 3.0.5 does: "<path> is owned by <pkg>"
+        # on stdout for an owned path, an error on stderr for the others.
+        with tempfile.TemporaryDirectory() as tmp:
+            upper, bin_dir = os.path.join(tmp, "upper"), os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            files = (["etc/config/network", "etc/mine.conf", "etc/has space.conf",
+                      "etc/rc.d/S10x"] + [f"etc/owned/{n}" for n in range(205)])
+            for name in files:
+                os.makedirs(os.path.dirname(os.path.join(upper, name)), exist_ok=True)
+                open(os.path.join(upper, name), "w").close()
+            calls = os.path.join(tmp, "calls")
+            scripts = {
+                "apk": f'echo "$#" >> {shlex.quote(calls)}\nshift 2\nfor p; do case "$p" in '
+                       '/etc/owned/*) echo "$p is owned by pkg-1.0" ;; '
+                       '*) echo "ERROR: $p: Could not find owner package" >&2 ;; esac; done\n'
+                       'exit 3\n',
+                "sysupgrade": 'echo /etc/config/network\n',
+            }
+            for name, body in scripts.items():
+                with open(os.path.join(bin_dir, name), "w") as f:
+                    f.write("#!/bin/sh\n" + body)
+                os.chmod(os.path.join(bin_dir, name), 0o755)
+            script = updater.auto_keep_script().replace("/overlay/upper", shlex.quote(upper))
+            env = dict(os.environ, PATH=bin_dir + ":" + os.environ["PATH"], TMPDIR=tmp)
+            result = subprocess.run(["busybox", "sh", "-c", script], capture_output=True,
+                                    text=True, env=env, timeout=60)
+            self.assertEqual(updater.parse_extra_files(result.stdout),
+                             ["/etc/has space.conf", "/etc/mine.conf"])
+            with open(calls) as f:
+                batches = [int(n) - 2 for n in f.read().split()]
+            self.assertEqual(sorted(batches), [7, 100, 100])   # 207 paths, three calls
+            # No owned path at all: an empty pattern list must not hide the rest.
+            for n in range(205):
+                os.remove(os.path.join(upper, f"etc/owned/{n}"))
+            result = subprocess.run(["busybox", "sh", "-c", script], capture_output=True,
+                                    text=True, env=env, timeout=60)
+            self.assertEqual(updater.parse_extra_files(result.stdout),
+                             ["/etc/has space.conf", "/etc/mine.conf"])
+
     def test_detection_is_one_ssh_call(self):
         with patch.object(install, "ssh", return_value=(0, self.SCAN)) as ssh:
             updater.detect_extra_files("192.168.31.1")
@@ -120,6 +164,37 @@ class SysupgradeConfTests(unittest.TestCase):
         with self.assertRaises(install.Abort):
             updater.validate_keep_path("etc/x")
         self.assertEqual(updater.validate_keep_path("/etc/x"), "/etc/x")
+
+    def test_extra_keep_refuses_what_sysupgrade_would_split(self):
+        # sysupgrade expands sysupgrade.conf unquoted: "/etc/x -delete" would
+        # hand find an action. A wildcard typed on purpose is a pattern.
+        for path in ("/etc/x -delete", "/etc/has space.conf", "/etc/tab\there",
+                     "/etc/it's", '/etc/"q"', "/etc/back\\slash"):
+            with self.subTest(path=path), self.assertRaisesRegex(install.Abort, "folder"):
+                updater.validate_keep_path(path)
+        self.assertEqual(updater.validate_keep_path("/etc/foo/*"), "/etc/foo/*")
+
+    def test_scanned_names_sysupgrade_cannot_keep_are_reported_not_kept(self):
+        args = updater.parse_args(["--auto-keep", "--yes"])
+        scan = ("AUTOKEEP /etc/mine.conf\nAUTOKEEP /etc/has space.conf\n"
+                "AUTOKEEP /etc/star*.conf\nAUTOKEEP_DONE\n")
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            if "AUTOKEEP_DONE" in cmd:
+                return 0, scan
+            if updater.KEEP_EOF in cmd:
+                return 0, updater.KEEP_EOF
+            return 0, "UNDO_READY" if "UNDO_READY" in cmd else ""
+        with patch.object(install, "ssh", ssh), patch.object(install, "scp_to"), \
+             patch.object(updater, "log") as log, tempfile.TemporaryDirectory() as outdir:
+            updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
+        write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
+        self.assertEqual(shlex.split(write[0])[2], "/etc/mine.conf\n/etc/backup/\n")
+        said = str(log.call_args_list)
+        self.assertIn("'/etc/has space.conf'", said)
+        self.assertIn("'/etc/star*.conf'", said)
 
 
 class WorldTests(unittest.TestCase):
