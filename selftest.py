@@ -2184,6 +2184,11 @@ class _UpdateBox:
             return 0, "AUTOKEEP_DONE"
         if "RD03V2_KEEP_EOF" in cmd:
             return 0, "RD03V2_KEEP_EOF"
+        # CarryoverUndo: the copy taken before those writes, and putting it back.
+        if "UNDO_READY" in cmd:
+            return 0, "UNDO_READY"
+        if "echo UNDONE" in cmd:
+            return 0, "UNDONE"
         if "FETCH_OK" in cmd:
             return 0, "FETCH_NONE"
         if "board_name" in cmd:

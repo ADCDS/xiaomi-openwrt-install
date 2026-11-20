@@ -105,6 +105,8 @@ BACKUP_DIR = "/etc/backup/"
 WORLD_OLD = "/etc/backup/world-old.txt"
 REMOTE_OVERLAY = "/tmp/overlay-full.tar.gz"
 KEEP_EOF = "RD03V2_KEEP_EOF"
+# Where CarryoverUndo keeps what the carry-over is about to change (tmpfs).
+UNDO_DIR = "/tmp/rd03v2-carryover-undo"
 
 # Files in /overlay/upper that are never added to sysupgrade.conf on their
 # own: generated at boot or by apk, tied to this one image, or programs that a
@@ -354,11 +356,85 @@ def save_overlay_archive(host, outdir):
     return local
 
 
-def prepare_carryover(host, args, outdir):
+def agree(question, assume_yes):
+    """install.confirm for a question whose "no" skips one step, not the run.
+
+    Anything but YES is a no; EOF (no terminal) is a no. Ctrl-C still stops
+    the whole run."""
+    if assume_yes:
+        log(t("[?] {question} -- assumed yes (--yes)", question=question))
+        return True
+    try:
+        answer = input(t("[?] {question} [type YES to continue] ", question=question))
+    except EOFError:
+        return False
+    return answer.strip() == "YES"
+
+
+class CarryoverUndo:
+    """What prepare_carryover changed on the router, put back on failure.
+
+    The carry-over writes sysupgrade.conf and /etc/backup/ before the update
+    is confirmed, because the backup has to carry them. Until the update
+    starts writing the new release (commit()), a decline, a rejected image or
+    any other stop puts both back, so "nothing was written" stays true. After
+    that, or when it cannot tell, it leaves the router alone."""
+
+    def __init__(self):
+        self.host = None
+        self.added = []
+        self.committed = False
+
+    def snapshot(self, host):
+        """Copy what is about to change into /tmp on the router."""
+        _rc, out = install.ssh(
+            host,
+            f"rm -rf {UNDO_DIR} && mkdir -p {UNDO_DIR} && "
+            f"if [ -e {SYSUPGRADE_CONF} ]; then cp -p {SYSUPGRADE_CONF} {UNDO_DIR}/conf; fi && "
+            f"if [ -e {WORLD_OLD} ]; then cp -p {WORLD_OLD} {UNDO_DIR}/world; fi && "
+            f"if [ -d {BACKUP_DIR} ]; then : > {UNDO_DIR}/had-dir; fi && echo UNDO_READY",
+            timeout=30, check=False)
+        if "UNDO_READY" not in out:
+            raise Abort(f"cannot save {SYSUPGRADE_CONF} before changing it; "
+                        f"nothing was written: {out.strip()!r}")
+        self.host = host
+
+    def commit(self):
+        self.committed = True
+
+    def revert(self):
+        if self.host is None or self.committed:
+            return
+        host, self.host = self.host, None
+        try:
+            _rc, out = install.ssh(
+                host,
+                f"[ -d {UNDO_DIR} ] || exit 3; "
+                f"if [ -e {UNDO_DIR}/conf ]; then cat {UNDO_DIR}/conf > {SYSUPGRADE_CONF}; "
+                f"else rm -f {SYSUPGRADE_CONF}; fi && "
+                f"if [ -e {UNDO_DIR}/world ]; then cat {UNDO_DIR}/world > {WORLD_OLD}; "
+                f"else rm -f {WORLD_OLD}; fi && "
+                f"{{ [ -e {UNDO_DIR}/had-dir ] || rmdir {BACKUP_DIR} 2>/dev/null; true; }} && "
+                f"rm -rf {UNDO_DIR} && echo UNDONE", timeout=60, check=False)
+            if "UNDONE" not in out:
+                raise Abort(out.strip() or "no answer")
+            log(t("[c] the carry-over changes were undone: {conf} and {world} are as "
+                  "they were", conf=SYSUPGRADE_CONF, world=WORLD_OLD))
+        except Exception as exc:            # noqa: BLE001 -- the first error matters
+            log(t("[!] could not undo the carry-over changes on {host} ({error}). "
+                  "By hand, remove these lines from {conf}: {lines}; and remove {world} "
+                  "if you did not have one before.", host=host, error=exc,
+                  conf=SYSUPGRADE_CONF, lines=", ".join(self.added) or "(none)",
+                  world=WORLD_OLD))
+
+
+def prepare_carryover(host, args, outdir, undo=None):
     """Before the backup: what sysupgrade would drop, made part of it.
 
     Writes to the router's /etc only (sysupgrade.conf, /etc/backup/), which
-    the backup then carries; the image and the partitions are not touched."""
+    the backup then carries; the image and the partitions are not touched.
+    `undo` (a CarryoverUndo) records those writes so that they can be put
+    back if the update does not go ahead."""
     log(t("\n=== carry-over: extra files and packages ==="))
     _rc, world = install.ssh(host, "cat /etc/apk/world")
     _write_local(outdir, "world.txt", world)
@@ -366,20 +442,26 @@ def prepare_carryover(host, args, outdir):
     _write_local(outdir, "sysupgrade-list.txt", listed)
     save_rom_defaults(host, outdir, listed)
 
-    extras = [] if args.no_auto_keep else detect_extra_files(host)
-    if args.no_auto_keep:
-        log("[c] automatic extra-file detection is off (--no-auto-keep)")
+    extras = detect_extra_files(host) if args.auto_keep else []
+    if not args.auto_keep:
+        log("[c] extra-file scan not run (--auto-keep looks for files no package owns)")
     manual = [validate_keep_path(path) for path in args.extra_keep]
     paths = list(dict.fromkeys(extras + manual))
     if paths:
         log(t("[c] files no package owns and sysupgrade would not keep:"))
         for path in paths:
             log(f"      {path}")
-        install.confirm(t("add these {count} path(s) to {conf}?",
-                          count=len(paths), conf=SYSUPGRADE_CONF), args.yes)
-    else:
+        if not agree(t("add these {count} path(s) to {conf}?",
+                       count=len(paths), conf=SYSUPGRADE_CONF), args.yes):
+            log(t("[c] not added: the update goes on without these files"))
+            paths = []
+    elif args.auto_keep:
         log(t("[c] no extra files found that sysupgrade would drop"))
+    if undo is not None:
+        undo.snapshot(host)
     added = append_keep_list(host, paths + [BACKUP_DIR])
+    if undo is not None:
+        undo.added = added
     for path in added:
         log(f"[c] {SYSUPGRADE_CONF} += {path}")
 
@@ -1221,7 +1303,7 @@ def _remove_upload(host):
 
 
 def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
-                   installed):
+                   installed, undo=None):
     """Update the installed system with sysupgrade from itself, and verify it."""
     log(t("\n=== stage 3: flash (sysupgrade from the installed system) ==="))
     image = images["sysupgrade"]
@@ -1299,6 +1381,9 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
         _remove_upload(host)
         raise
 
+    # From here the new release is being written: the carry-over is part of it.
+    if undo is not None:
+        undo.commit()
     install.launch_sysupgrade(host, opts, manifest, verify_interface,
                               install.ssh, install.scp_to, where=host)
     log(t("[3] do not touch the power"))
@@ -1437,6 +1522,17 @@ def run_reinstall_only(args, profile):
 
 
 def run(args):
+    undo = CarryoverUndo()
+    try:
+        return _run(args, undo)
+    except BaseException:
+        # A decline, a rejected image, Ctrl-C: whatever stopped the update
+        # before it wrote the new release also takes the carry-over back.
+        undo.revert()
+        raise
+
+
+def _run(args, undo):
     os.umask(0o077)
     i18n.set_language(args.lang)
     i18n.tolerate_console_encoding()
@@ -1533,7 +1629,7 @@ def run(args):
             backup_config(host, outdir)      # still take one of what is there now
         else:
             if args.keep_settings:
-                prepare_carryover(host, args, outdir)
+                prepare_carryover(host, args, outdir, undo)
             config_tar = backup_config(host, outdir)
         if not args.keep_settings:
             config_tar = None
@@ -1553,7 +1649,7 @@ def run(args):
 
     if route == "in-place":
         found = flash_in_place(host, rel, images, args, profile, manifest,
-                               verify_transport, installed)
+                               verify_transport, installed, undo=undo)
         log(t("[+] update complete: your settings were restored." if config_tar
               else "[+] update complete: the new release is running with default settings."))
         finish_packages(found or host, args, outdir, config_tar)
@@ -1576,12 +1672,16 @@ def run(args):
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
+            undo.commit()
         except Exception as exc:            # noqa: BLE001 -- tagged by the pivot
             # What to say depends on how far the write got, and the exception
             # class cannot express that: pivot_to_ram tags the stage instead.
             # Catching Exception rather than (Abort, RestoreError) keeps a
             # transport timeout raised mid-write from escaping with no advice.
             stage = getattr(exc, "pivot_stage", None)
+            if stage in (None, "write-unconfirmed", "rebooted"):
+                # Written, or not known: the carry-over is left as it is.
+                undo.commit()
             if stage is None:
                 raise
             if stage == "write-unconfirmed":
@@ -1674,8 +1774,9 @@ def parse_args(argv=None):
     ap.add_argument("--extra-keep", metavar="PATH", action="append", default=[],
                     help="also add PATH to /etc/sysupgrade.conf before the backup "
                          "(repeatable)")
-    ap.add_argument("--no-auto-keep", action="store_true",
-                    help="do not look for files that no package owns")
+    ap.add_argument("--auto-keep", action="store_true",
+                    help="also look for files that no package owns and sysupgrade "
+                         "would drop, and offer to keep them (slow on a big overlay)")
     ap.add_argument("--no-reinstall", action="store_true",
                     help="do not reinstall your packages after the update")
     ap.add_argument("--reinstall-only", action="store_true",

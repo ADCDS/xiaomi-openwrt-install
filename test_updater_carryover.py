@@ -5,6 +5,7 @@ import shlex
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 import install
@@ -263,7 +264,7 @@ class PrepareTests(unittest.TestCase):
         return commands, uploads, files
 
     def test_keep_list_and_world_old(self):
-        commands, uploads, files = self.run_prepare("--extra-keep", "/root/notes")
+        commands, uploads, files = self.run_prepare("--auto-keep", "--extra-keep", "/root/notes")
         write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
         self.assertEqual(len(write), 1)
         self.assertEqual(shlex.split(write[0])[2],
@@ -275,23 +276,167 @@ class PrepareTests(unittest.TestCase):
         self.assertEqual(files, ["sysupgrade-list.txt", "world-old.txt", "world.txt"])
         self.assertFalse(any(cmd.startswith("tar czf") for cmd in commands))
 
-    def test_no_auto_keep(self):
-        commands, _uploads, _files = self.run_prepare("--no-auto-keep")
+    def test_scan_is_opt_in(self):
+        commands, _uploads, _files = self.run_prepare()
         self.assertTrue(any("FETCH_OK" in cmd for cmd in commands))
         self.assertFalse(any("AUTOKEEP_DONE" in cmd for cmd in commands))
         write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
         self.assertEqual(shlex.split(write[0])[2], "/etc/backup/\n")
 
-    def test_declining_writes_nothing(self):
-        args = updater.parse_args([])
+    def test_declining_the_files_skips_them_and_goes_on(self):
+        args = updater.parse_args(["--auto-keep"])
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            if "AUTOKEEP_DONE" in cmd:
+                return 0, ExtraFileTests.SCAN
+            if updater.KEEP_EOF in cmd:
+                return 0, updater.KEEP_EOF
+            if "UNDO_READY" in cmd:
+                return 0, "UNDO_READY"
+            return 0, ""
+        for answer in ("no", "yes", EOFError()):
+            commands.clear()
+            with self.subTest(answer=answer), patch.object(install, "ssh", ssh), \
+                 patch("builtins.input", side_effect=[answer]), \
+                 patch.object(install, "scp_to") as scp, \
+                 patch.object(updater, "log"), tempfile.TemporaryDirectory() as outdir:
+                updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
+                write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
+                self.assertEqual(shlex.split(write[0])[2], "/etc/backup/\n")
+                scp.assert_called_once()            # world-old.txt: the reinstall is on
+
+    def test_ctrl_c_at_the_files_prompt_stops_the_run(self):
+        args = updater.parse_args(["--auto-keep"])
         with patch.object(install, "ssh",
                           side_effect=lambda h, c, **k: (0, ExtraFileTests.SCAN if "AUTOKEEP_DONE" in c else "")), \
-             patch.object(install, "confirm", side_effect=install.Abort("declined")), \
+             patch("builtins.input", side_effect=KeyboardInterrupt), \
              patch.object(install, "scp_to") as scp, \
              patch.object(updater, "log"), tempfile.TemporaryDirectory() as outdir:
-            with self.assertRaises(install.Abort):
-                updater.prepare_carryover("h", args, outdir)
+            with self.assertRaises(KeyboardInterrupt):
+                updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
         scp.assert_not_called()
+
+
+class CarryoverUndoTests(unittest.TestCase):
+    def fake_ssh(self, answers):
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            for marker, answer in answers.items():
+                if marker in cmd:
+                    return 0, answer
+            return 0, ""
+        return commands, ssh
+
+    def test_revert_puts_both_back(self):
+        commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY", "UNDONE": "UNDONE"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log") as log:
+            undo.snapshot("h")
+            undo.added = ["/etc/x", "/etc/backup/"]
+            undo.revert()
+            undo.revert()                       # once only
+        restore = [cmd for cmd in commands if "UNDONE" in cmd]
+        self.assertEqual(len(restore), 1)
+        self.assertIn(f"cat {updater.UNDO_DIR}/conf > {updater.SYSUPGRADE_CONF}", restore[0])
+        self.assertIn(f"rm -f {updater.WORLD_OLD}", restore[0])
+        self.assertIn("undone", str(log.call_args_list))
+
+    def test_nothing_after_commit_or_without_a_snapshot(self):
+        commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY"})
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log"):
+            updater.CarryoverUndo().revert()
+            undo = updater.CarryoverUndo()
+            undo.snapshot("h")
+            undo.commit()
+            undo.revert()
+        self.assertFalse(any("UNDONE" in cmd for cmd in commands))
+
+    def test_failed_revert_says_what_to_remove(self):
+        _commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY", "UNDONE": "Connection refused"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log") as log:
+            undo.snapshot("h")
+            undo.added = ["/etc/x", "/etc/backup/"]
+            undo.revert()                       # must not raise over the first error
+        said = str(log.call_args_list)
+        self.assertIn("/etc/x, /etc/backup/", said)
+        self.assertIn(updater.WORLD_OLD, said)
+
+    def test_snapshot_failure_writes_nothing(self):
+        _commands, ssh = self.fake_ssh({"UNDO_READY": "cp: no space"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh):
+            with self.assertRaisesRegex(install.Abort, "nothing was written"):
+                undo.snapshot("h")
+        self.assertIsNone(undo.host)
+
+    def test_run_reverts_on_any_stop(self):
+        for exc in (install.Abort("declined"), KeyboardInterrupt()):
+            def fake_run(args, undo, exc=exc):
+                undo.host = "h"
+                raise exc
+            with self.subTest(exc=type(exc).__name__), \
+                 patch.object(updater, "_run", fake_run), \
+                 patch.object(updater.CarryoverUndo, "revert") as revert:
+                with self.assertRaises(type(exc)):
+                    updater.run(updater.parse_args([]))
+                revert.assert_called_once()
+
+
+class FlashInPlaceUndoTests(unittest.TestCase):
+    """The carry-over commits only once sysupgrade is about to write."""
+
+    def flash(self, test_rc, launch):
+        args = updater.parse_args(["--yes"])
+        args.transport, args.discover, args.verify_interface = "wired", "eth0", "eth0"
+        undo = updater.CarryoverUndo()
+        undo.host = "h"
+        image = {"path": "/x/fw.bin", "sha256": "ab" * 32, "name": "fw.bin"}
+
+        def ssh(host, cmd, **kw):
+            if cmd.startswith("sha256sum"):
+                return 0, "ab" * 32
+            if cmd.startswith("sysupgrade -T"):
+                return test_rc, "Image check failed"
+            return 0, "boot-1"
+        with patch.object(install, "ssh", ssh), patch.object(install, "scp_to"), \
+             patch.object(install, "neighbour_mac", return_value=None), \
+             patch.object(install, "update_resume_fields"), \
+             patch.object(install, "launch_sysupgrade", side_effect=launch), \
+             patch.object(updater.release, "revision", return_value="r1"), \
+             patch.object(updater, "_remove_upload"), patch.object(updater, "log"), \
+             patch.object(install, "log"):
+            try:
+                updater.flash_in_place("h", type("R", (), {"tag": "v9"})(), {"sysupgrade": image},
+                                       args, None, "m.json", "wired", "v9", undo=undo)
+            except install.Abort:
+                pass
+        return undo
+
+    def test_rejected_image_is_not_committed(self):
+        launch = unittest.mock.Mock()
+        self.assertFalse(self.flash(1, launch).committed)
+        launch.assert_not_called()
+
+    def test_committed_before_sysupgrade_starts(self):
+        seen = []
+
+        def launch(*a, **k):
+            seen.append(undo_ref[0].committed)
+            raise install.Abort("stop here")
+        undo_ref = []
+        orig = updater.CarryoverUndo.commit
+
+        def commit(self):
+            undo_ref.append(self)
+            orig(self)
+        with patch.object(updater.CarryoverUndo, "commit", commit):
+            self.flash(0, launch)
+        self.assertEqual(seen, [True])
 
 
 def tar_bytes(files, extra=()):
