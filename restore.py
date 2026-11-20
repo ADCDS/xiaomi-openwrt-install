@@ -135,6 +135,18 @@ SSH_PASSWORDS = [""]
 
 
 def ssh(host, cmd, timeout=180, check=True):
+    # updater.py --ssh-key-auth reaches the installed system through here too
+    # (revert.state_of). restore.py itself never sets it: the RAM system it
+    # restores from has no copy of the operator's key.
+    import install
+    if install.key_auth() is not None:
+        try:
+            rc, out = install.ssh(host, cmd, timeout=timeout, check=False)
+        except install.Abort as exc:          # a host key that does not match
+            raise RestoreError(str(exc)) from exc
+        if check and rc != 0:
+            raise RestoreError(f"ssh {cmd[:60]!r}: {out}")
+        return rc, out
     if hostnet.is_windows():
         try:
             result = winssh.run(host, cmd, SSH_PASSWORDS, timeout)

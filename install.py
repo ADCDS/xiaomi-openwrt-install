@@ -1167,15 +1167,141 @@ def check_is_openwrt_ram(host, router_iface=None, router_mac=None):
 # device that never came back, because setting the password is what locked us
 # out. main() appends the configured password here.
 SSH_PASSWORDS = [""]
+# The --verify-ssh-key value (a key path or "agent"), set only by main() for
+# --verify-only. Kept as its own switch for that option; key_auth() turns it
+# into the same KeyAuth that updater.py --ssh-key-auth sets in KEY_AUTH.
+VERIFY_SSH_KEY = None
+KEY_AUTH = None
 
 # What the RAM system is offered, and all it is offered: it has no password,
 # so whatever refuses this is not it, and a configured root password never
 # goes to a device the RAM stage only presumed was the router.
 RAM_PASSWORDS = ("",)
 
+# What OpenSSH prints when the far end's host key is not the one known_hosts
+# holds for it, or there is none and strict checking is on.
+HOST_KEY_FAILURES = ("Host key verification failed",
+                     "REMOTE HOST IDENTIFICATION HAS CHANGED")
+
+
+class KeyAuth:
+    """Log in to the *installed* system through the operator's own OpenSSH.
+
+    Nothing secret goes over the wire: the client proves it holds a key, and
+    the server proves who it is against known_hosts. ~/.ssh/config is honoured
+    -- no -i unless asked, no throwaway known_hosts, pubkey auth left on --
+    except for what keeps the login non-interactive and key-only.
+
+    Only for the installed system. The RAM installer has no copy of the public
+    key, and every call that addresses it passes passwords=RAM_PASSWORDS,
+    which keeps it on the empty-password path.
+
+    alias: a Host from ~/.ssh/config that ssh and scp connect to in place of
+    `alias_for`, the numeric address every network check still uses.
+    """
+
+    def __init__(self, identity=None, alias=None, alias_for=None):
+        self.identity = identity
+        self.alias = alias
+        self.alias_for = alias_for
+
+    def options(self):
+        opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                "-o", "PasswordAuthentication=no",
+                "-o", "KbdInteractiveAuthentication=no",
+                "-o", "PreferredAuthentications=publickey",
+                # Accepting the router as this host's gateway rests on its host
+                # key being checked, so a looser ~/.ssh/config setting (no,
+                # accept-new) is overridden here. Nothing else is.
+                "-o", "StrictHostKeyChecking=yes"]
+        if self.identity:
+            opts += ["-o", "IdentitiesOnly=yes", "-i", self.identity]
+        return opts
+
+    def _aliased(self, host):
+        return bool(self.alias) and host == self.alias_for
+
+    def ssh_target(self, host):
+        # An alias logs in as the User its config names; main() checked that
+        # this is root. A bare address names root itself.
+        return self.alias if self._aliased(host) else f"root@{host}"
+
+    def scp_target(self, host, path):
+        if self._aliased(host):
+            return f"{self.alias}:{path}"
+        return f"root@[{host}]:{path}" if ":" in host else f"root@{host}:{path}"
+
+
+def key_auth():
+    """The KeyAuth in force for the installed system, or None."""
+    if KEY_AUTH is not None:
+        return KEY_AUTH
+    if VERIFY_SSH_KEY is not None:
+        return KeyAuth(None if VERIFY_SSH_KEY == "agent" else VERIFY_SSH_KEY)
+    return None
+
+
+def key_failure(rc, output):
+    """What an OpenSSH exit status says about a key login, or None.
+
+    Only 255 is OpenSSH's own failure. Any other status is the remote
+    command's, and says nothing about the key (PR #8 review).
+    Returns "host-key", "auth" or "connection" for a 255."""
+    if rc != 255:
+        return None
+    if any(marker in output for marker in HOST_KEY_FAILURES):
+        return "host-key"
+    if "Permission denied" in output or "Too many authentication failures" in output:
+        return "auth"
+    return "connection"
+
+
+def _run_key(argv, timeout, host):
+    """Run an OpenSSH client; a host key that does not match always stops here.
+
+    That is never retried or tolerated, whatever check= the caller passed: the
+    device answering is not the one known_hosts describes."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+        rc, output = result.returncode, (result.stdout + result.stderr).strip()
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        rc, output = 255, str(exc)
+    if key_failure(rc, output) == "host-key":
+        raise Abort(t("the SSH host key of {host} is not the one known_hosts holds "
+                      "for it, or it has none there. Nothing was sent to it. Check "
+                      "the router's key yourself and update ~/.ssh/known_hosts "
+                      "only then; this tool does not relax the check.\n{output}",
+                      host=host, output=output))
+    return rc, output
+
+
+def key_scp(host, local, remote, upload=True, timeout=900):
+    """scp to or from the installed system with KEY_AUTH; no password fallback."""
+    auth = key_auth()
+    far = auth.scp_target(host, remote)
+    argv = ["scp", *hostnet.scp_legacy_flag(), *auth.options(),
+            *((local, far) if upload else (far, local))]
+    rc, output = _run_key(argv, timeout, host)
+    if rc:
+        raise Abort(t("scp with the SSH key to {host} failed: {output}",
+                      host=host, output=output))
+
 
 def ssh(host, cmd, timeout=120, check=True, passwords=None):
-    """Root over dropbear, trying each password we might have set."""
+    """Root over dropbear, trying each password we might have set.
+
+    With key_auth() in force, a call that does not name its passwords goes to
+    the installed system by key only; see KeyAuth."""
+    auth = key_auth()
+    if auth is not None and passwords is None:
+        rc, output = _run_key(["ssh", *auth.options(), auth.ssh_target(host), cmd],
+                              timeout, host)
+        if check and rc:
+            if rc == 255:
+                raise Abort(t("SSH key login to {host} failed: {output}",
+                              host=host, output=output))
+            raise Abort(f"ssh {cmd!r} failed (exit {rc}): {output}")
+        return rc, output
     if hostnet.is_windows():
         try:
             result = winssh.run(host, cmd,
@@ -1213,6 +1339,8 @@ def ssh(host, cmd, timeout=120, check=True, passwords=None):
 
 def scp_to(host, local, remote, passwords=None):
     """scp needs an IPv6 literal bracketed, or its colons read as host:path."""
+    if key_auth() is not None and passwords is None:
+        return key_scp(host, local, remote, upload=True)
     if hostnet.is_windows():
         try:
             return winssh.upload(host, local, remote,
@@ -1453,7 +1581,9 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
     where = interface or host
     log(t("[3] waiting up to {seconds}s for permanent OpenWrt on {where}",
           seconds=deadline_s, where=where))
-    secret = any(SSH_PASSWORDS)
+    # A key login sends nothing secret, so it is treated like the empty
+    # password here; the host key check in KeyAuth identifies the device.
+    secret = any(SSH_PASSWORDS) and key_auth() is None
     gateway_ok = bool(fallback) and (bool(router_mac) or not secret)
     mac = router_mac if secret else None
     router_iface = interface if gateway_ok else None
@@ -1495,6 +1625,24 @@ def verify_permanent_system(profile, interface=None, fallback=None, host=None,
             require_expected_revision(candidate, expected_revision)
             log(t("[+] OpenWrt is installed on NAND."))
             return candidate
+        failures = [(name, rc, output) for name, rc, output in
+                    (("board_name", rc1, board), ("rootfs_type", rc2, rtype),
+                     ("partition table", rc3, mtd_text)) if rc]
+        if failures:
+            last = "; ".join(f"{name}: exit {rc}: {output.strip()}"
+                             for name, rc, output in failures)
+            log(t("[3] verification commands failed on {host}: {error}",
+                  host=candidate, error=last))
+            # Only exit 255 is SSH itself failing. A refused key will not be
+            # accepted on the next try, so that stops here; a dropped
+            # connection, or a command that failed on a box still booting, is
+            # retried until the deadline like any other not-yet.
+            if key_auth() is not None and any(
+                    key_failure(rc, output) == "auth" for _n, rc, output in failures):
+                raise Abort(t("Key verification failed: {error}. Check the key/ssh-agent "
+                              "and trust this exact address with a manual SSH login first.", error=last))
+            time.sleep(10)
+            continue
         last = (f"board={board.strip()!r} rootfs={rtype.strip()!r}; expected "
                 f"board={profile.openwrt_board!r}, rootfs='overlay', and the "
                 "profile partition sizes")
@@ -1557,11 +1705,59 @@ def continuation_hint(manifest_path=None, error=None):
     return None
 
 
-def verification_command(manifest_path, interface=None):
+def verification_command(manifest_path, interface=None, host=None):
+    """The verification-only continuation. Under key auth, with the router's
+    address known, it verifies by key too: a password would not be accepted."""
     command = ["--verify-only", os.path.abspath(manifest_path)]
     if interface:
         command.extend(("--verify-interface", interface))
+    auth = key_auth()
+    if auth is not None and host:
+        command.extend(("--verify-host", host,
+                        "--verify-ssh-key", auth.identity or "agent"))
+        if auth._aliased(host):
+            command.extend(("--verify-ssh-alias", auth.alias))
     return rerun_command(*command)
+
+
+def ssh_config_value(alias, key):
+    """What `ssh -G` resolves `key` to for `alias`, from ~/.ssh/config."""
+    try:
+        result = subprocess.run(["ssh", "-G", alias], capture_output=True,
+                                text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Abort(f"cannot read the OpenSSH configuration for {alias!r}: {exc}") from exc
+    if result.returncode:
+        raise Abort(f"cannot read the OpenSSH configuration for {alias!r}: "
+                    f"{result.stderr.strip()}")
+    for line in result.stdout.splitlines():
+        name, _, value = line.partition(" ")
+        if name.lower() == key.lower():
+            return value.strip()
+    return ""
+
+
+def require_alias_matches(alias, host):
+    """An --ssh-alias must log in as root to the very address that is checked.
+
+    Every network check (gateway, banner, MAC) is made against the numeric
+    `host`; an alias that resolved elsewhere would log in to a device none of
+    them looked at."""
+    resolved = ssh_config_value(alias, "hostname")
+    try:
+        same = (ipaddress.ip_address(resolved.split("%", 1)[0])
+                == ipaddress.ip_address(host.split("%", 1)[0]))
+    except ValueError:
+        same = False
+    if not same:
+        raise Abort(t("the SSH alias {alias} connects to {resolved}, not {host}; "
+                      "nothing was contacted", alias=alias, resolved=resolved or "?",
+                      host=host))
+    user = ssh_config_value(alias, "user")
+    if user != "root":
+        raise Abort(t("the SSH alias {alias} logs in as {user}, not root; set "
+                      "\"User root\" for it in ~/.ssh/config", alias=alias,
+                      user=user or "?"))
 
 
 def build_sysupgrade_launcher(opts):
@@ -1648,10 +1844,14 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
           manifest_path=None, transport="wired", verify_interface=None,
           permanent_wifi_ssid=None, verify_fallback=None,
           verify_transport=None, router_iface=None, expected_revision="",
-          allow_8bit_nand=False):
+          allow_8bit_nand=False, verify_host=None, verify_host_iface=None):
     """router_iface: the router-facing interface on a wired install, where the
     RAM system's own DHCP makes it this host's gateway (gateway_conflict).
-    allow_8bit_nand: the operator's ECC_OPT_IN (see require_flashable_nand)."""
+    allow_8bit_nand: the operator's ECC_OPT_IN (see require_flashable_nand).
+    verify_host: verify the permanent system at this address instead of
+    rediscovering it (updater.py under key auth: known_hosts vouches for that
+    address, not for whatever link-local discovery finds), reached through
+    verify_host_iface. Returns the address the permanent system was verified at."""
     log(t("\n=== stage 3: flash (sysupgrade from the RAM system) ==="))
 
     # Everything up to the sysupgrade launch talks to the RAM system, which is
@@ -1769,16 +1969,23 @@ def flash(host, rel, images, assume_yes, profile, image_cache, cfg_tar=None,
 
     time.sleep(60)
     try:
-        verify_permanent_system(
-            profile, interface=verify_interface, fallback=verify_fallback,
-            host=host if not verify_interface else None,
-            router_mac=router_mac, expected_revision=expected_revision)
+        if verify_host:
+            found = verify_permanent_system(
+                profile, host=verify_host, host_iface=verify_host_iface,
+                expected_revision=expected_revision)
+        else:
+            found = verify_permanent_system(
+                profile, interface=verify_interface, fallback=verify_fallback,
+                host=host if not verify_interface else None,
+                router_mac=router_mac, expected_revision=expected_revision)
     except Abort as exc:
         log(t("[!] sysupgrade was launched; do not run the flash stage again"))
         log(t("[!] verification-only continuation:"))
-        log("    " + verification_command(manifest_path, verify_interface))
+        log("    " + verification_command(manifest_path, verify_interface,
+                                         host=verify_host))
         raise
     update_resume_phase(manifest_path, "flash-complete")
+    return found
 
 
 # ---- driver -----------------------------------------------------------------
@@ -1832,6 +2039,13 @@ def parse_args(argv=None):
     hidden = argparse.SUPPRESS
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),
                     help=hidden)
+    ap.add_argument("--verify-ssh-key", metavar="PATH_OR_agent",
+                    help="with --verify-only: use OpenSSH key file or 'agent'; requires a trusted host key")
+    ap.add_argument("--verify-host", metavar="ADDRESS",
+                    help="with --verify-only and --verify-ssh-key: verify this address without discovery")
+    ap.add_argument("--verify-ssh-alias", metavar="NAME",
+                    help="with --verify-host: connect ssh to this ~/.ssh/config Host, "
+                         "which must resolve to --verify-host and log in as root")
     ap.add_argument("--openwrt-host", default=None, help=hidden)
     ap.add_argument("--stage", default="all",
                     choices=("preflight", "pivot", "flash", "verify", "all"),
@@ -1981,14 +2195,23 @@ def absorb_secret_env(args):
     return args
 
 
-def require_host_tools(password=False):
+def require_host_tools(password=False, key=False):
     """Fail before touching the router if this host cannot talk to it.
 
     On Linux every one of these is used by the first contact with the router,
     so a missing tool belongs here rather than in a failure after the pivot.
     `sshpass` is required because every Linux SSH call disables pubkey auth and
     offers a password. `openssl` is only needed to hash a root password.
+    With key=True (KeyAuth) the system OpenSSH is used and no password is
+    offered, so neither sshpass nor openssl is needed, on Windows either.
     """
+    if key:
+        needed = ["ssh", "scp"] + ([] if hostnet.is_windows() else ["ip"])
+        missing = [tool for tool in needed if shutil.which(tool) is None]
+        if missing:
+            raise Abort("this host is missing " + ", ".join(missing)
+                        + "; install them before the router is touched")
+        return
     if hostnet.is_windows():
         try:
             winssh.dependencies()
@@ -2279,8 +2502,34 @@ def verify_resume_selection(resume, args, profile, rel, images):
 
 def main(argv=None):
     os.umask(0o077)
+    global VERIFY_SSH_KEY, KEY_AUTH
+    VERIFY_SSH_KEY = KEY_AUTH = None
     args = absorb_secret_env(parse_args(argv))
     i18n.set_language(args.lang)
+    if args.verify_ssh_key or args.verify_host or args.verify_ssh_alias:
+        if not args.verify_only:
+            raise Abort(t("--verify-ssh-key and --verify-host require --verify-only"))
+        if args.verify_host and not args.verify_ssh_key:
+            raise Abort(t("--verify-host requires --verify-ssh-key"))
+        if args.verify_ssh_alias and not args.verify_host:
+            raise Abort(t("--verify-ssh-alias requires --verify-host"))
+        if shutil.which("ssh") is None:
+            raise Abort(t("Key verification requires OpenSSH (ssh)"))
+        key = args.verify_ssh_key
+        if key != "agent":
+            key = os.path.abspath(os.path.expanduser(key))
+            if not os.path.isfile(key):
+                raise Abort(t("SSH private key file does not exist"))
+        if args.verify_host:
+            try:
+                ipaddress.ip_address(args.verify_host.split("%", 1)[0])
+            except ValueError as exc:
+                raise Abort(t("--verify-host must be a numeric IP address")) from exc
+        if args.verify_ssh_alias:
+            require_alias_matches(args.verify_ssh_alias, args.verify_host)
+        VERIFY_SSH_KEY = key
+        KEY_AUTH = KeyAuth(None if key == "agent" else key,
+                           alias=args.verify_ssh_alias, alias_for=args.verify_host)
     i18n.tolerate_console_encoding()
     if args.list_interfaces:
         if sys.platform == "darwin" and not hostnet.is_windows():
@@ -2359,7 +2608,8 @@ def main(argv=None):
     args.discover = canonical_interface(args.discover)
     args.verify_interface = canonical_interface(args.verify_interface)
     if not args.dry_run:
-        require_host_tools(password=bool(args.root_password))
+        require_host_tools(password=bool(args.root_password) and key_auth() is None,
+                           key=key_auth() is not None)
 
     if not args.discover and (args.stage == "all" or args.transport == "auto"):
         args.discover = chain.local_interface(args.host)
@@ -2383,7 +2633,7 @@ def main(argv=None):
 
     if (resume and resume.get("root_password_set")
             and args.stage in ("flash", "verify", "all")
-            and not args.root_password):
+            and not args.root_password and key_auth() is None):
         if not sys.stdin.isatty():
             raise Abort("post-install verification needs the configured root "
                         "password; rerun in a terminal")
@@ -2399,6 +2649,13 @@ def main(argv=None):
         phase = resume.get("phase")
         if phase not in ("pivot-complete", "flash-started", "flash-complete"):
             raise Abort(f"resume phase {phase!r} has not reached the RAM pivot")
+        if args.verify_host:
+            found = verify_permanent_system(
+                profile, host=args.verify_host, host_iface=args.verify_interface,
+                expected_revision=resume.get("expected_revision", ""))
+            require_new_boot(found, resume.get("boot_id"))
+            update_resume_phase(args.resume_manifest, "flash-complete")
+            return 0
         pinned = resume.get("verify_host")
         if pinned and not explicit_verify_interface:
             # An in-place update kept the router's address: go back to that

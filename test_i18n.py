@@ -23,6 +23,8 @@ TYPED = {
     "[?] {question} [type YES to continue] ": "YES",
     "[?] write {image} to ubi_kernel and reboot? [type YES] ": "YES",
     "[?] erase OpenWrt and write stock? [type RESTORE] ": "RESTORE",
+    "[?] {path}: keep your version (k), install the package's new one (n), "
+    "or decide later (d)? [k/n/d] ": "[k/n/d] ",
 }
 
 

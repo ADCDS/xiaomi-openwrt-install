@@ -36,11 +36,24 @@ route `ubi_kernel` is overwritten at step 3, so from there the way out is
 forward: run this again, and it continues from the RAM system. A torn write on
 either route needs the stock TFTP recovery or UART.
 
-It logs in by password, like the rest of this tool. A router configured for
-SSH keys only (`PasswordAuth off`) is refused at step 1, before any write.
+By default it logs in by password, like the rest of this tool, and a router
+configured for SSH keys only (`PasswordAuth off`) is refused at step 1. With
+--ssh-key-auth it logs in to the installed system through the system OpenSSH
+and ~/.ssh/config instead, by key only, with the host key checked against
+known_hosts. The RAM installer still gets the empty password: it has no copy
+of the key.
+
+Before the backup it also carries over what sysupgrade would drop: files in
+/overlay/upper that no package owns are added to /etc/sysupgrade.conf, and the
+packages the operator installed are listed in /etc/backup/world-old.txt.
+After a verified update those packages are installed again. See
+docs/packages.md.
 """
 
 import argparse
+import difflib
+import fnmatch
+import ipaddress
 import os
 import secrets
 import shlex
@@ -48,7 +61,9 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import time
+import urllib.parse
 
 import chain
 import devices
@@ -83,9 +98,794 @@ _T_HARMLESS = ("Image check failed.", "verifying sysupgrade tar file integrity")
 
 ROOTFS_TYPE = ". /lib/upgrade/common.sh 2>/dev/null; rootfs_type"
 
+# ---- carry-over: extra files and packages -----------------------------------
+
+SYSUPGRADE_CONF = "/etc/sysupgrade.conf"
+BACKUP_DIR = "/etc/backup/"
+WORLD_OLD = "/etc/backup/world-old.txt"
+REMOTE_OVERLAY = "/tmp/overlay-full.tar.gz"
+KEEP_EOF = "RD03V2_KEEP_EOF"
+
+# Files in /overlay/upper that are never added to sysupgrade.conf on their
+# own: generated at boot or by apk, tied to this one image, or programs that a
+# package (or the next image) provides. Shell glob patterns, matched against
+# the full path; `*` also matches "/". Edit here.
+AUTO_KEEP_EXCLUDES = (
+    "/etc/apk/world",
+    "/etc/urandom.seed",
+    "/etc/board*.json",
+    "/etc/hotplug*.json",
+    "/etc/capabilities/*",
+    "/etc/banner.openwrt",
+    "/lib/firmware/ath11k/*/cal-*.bin",
+    "/.wget-hsts",
+    "*.apk-new",
+    "/tmp/*",
+    "/var/*",
+    "/run",
+    "/run/*",
+    # Generated when a service is enabled; a reinstalled package enables its
+    # own, and a kept link would point at an init script not yet installed.
+    "/etc/rc.d/*",
+    # Includes that services (https-dns-proxy, pbr, ...) write at run time;
+    # files a package installs here are owned, so excluded anyway.
+    "/usr/share/nftables.d/*",
+    "/bin/*",
+    "/sbin/*",
+    "/lib/*",
+    "/usr/lib/*",
+    "/www/*",
+)
+
+# World entries that the firmware pins (name=version and the like) or that
+# are its own base; they come with the image and are never added by name.
+BASE_PACKAGES = ("kernel", "libc", "base-files")
+
+# Packages not reinstalled automatically, because adding them replaces a
+# package the firmware ships (apk resolves the conflict by swapping them).
+# Glob patterns -> why; docs/packages.md says how to do it by hand.
+SPECIAL_PACKAGES = {
+    "dnsmasq-*": "replaces the firmware's dnsmasq",
+    "wpad*": "replaces the firmware's wpad variant",
+    "hostapd*": "replaces the firmware's wpad/hostapd variant",
+    "odhcpd*": "replaces the firmware's odhcpd variant",
+}
+
+# How long a freshly updated router gets to reach its package repositories.
+REPOSITORY_DEADLINE_S = 300
+
+# The router's own resolver, and what netifd learned from the WAN. When the
+# restored dnsmasq config forwards to a resolver that a reinstalled package
+# provides (https-dns-proxy, stubby, ...), the router cannot resolve the
+# repositories until that package is back; see TemporaryResolver.
+RESOLV_CONF = "/tmp/resolv.conf"
+RESOLV_SAVED = "/tmp/rd03v2-resolv.conf.saved"
+WAN_RESOLV = "/tmp/resolv.conf.d/resolv.conf.auto"
+RESOLVER_MARK = "# rd03v2-updater: temporary resolver, restored after the reinstall"
+REPOSITORY_LISTS = "/etc/apk/repositories /etc/apk/repositories.d/*.list"
+
+# Configuration files after the update (see review_apk_new and
+# review_image_defaults). The image defaults are read from /rom, the
+# read-only copy of the running image, before and after the update.
+REMOTE_LIST = "/tmp/rd03v2-files.list"
+REMOTE_FILES = "/tmp/rd03v2-files.tar.gz"
+ROM_DEFAULTS_OLD = "rom-defaults-old.tar.gz"
+CONFFILE_DIR = "conffiles"
+APK_NEW = ".apk-new"
+# How much of a diff the log shows; the whole of it is always saved.
+DIFF_LOG_LINES = 40
+
+
+def is_auto_keep_excluded(path, excludes=AUTO_KEEP_EXCLUDES):
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in excludes)
+
+
+def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
+    """One remote pass over /overlay/upper; see detect_extra_files.
+
+    Prints `AUTOKEEP <path>` for each regular file or symlink that no package
+    owns, sysupgrade -l does not list, and no exclude matches, then
+    AUTOKEEP_DONE. Whiteouts (character devices) are not files and are
+    skipped by -type, as are names with a newline, which `read` would split.
+    """
+    for pattern in excludes:
+        if not all(c.isalnum() or c in "/._-*" for c in pattern):
+            raise ValueError(f"unsafe exclude pattern {pattern!r}")
+    case = "|".join(excludes)
+    return (
+        "cd /overlay/upper 2>/dev/null || { echo 'AUTOKEEP_ERROR no /overlay/upper'; exit 1; }\n"
+        "command -v apk >/dev/null 2>&1 || { echo 'AUTOKEEP_ERROR no apk'; exit 1; }\n"
+        "keep=/tmp/autokeep.$$\n"
+        "sysupgrade -l > \"$keep\" 2>/dev/null || "
+        "{ rm -f \"$keep\"; echo 'AUTOKEEP_ERROR sysupgrade -l failed'; exit 1; }\n"
+        "find . \\( -type f -o -type l \\) | while IFS= read -r p; do\n"
+        "  p=${p#.}\n"
+        f"  case \"$p\" in {case}) continue ;; esac\n"
+        "  grep -qxF \"$p\" \"$keep\" && continue\n"
+        "  apk info --who-owns \"$p\" >/dev/null 2>&1 && continue\n"
+        "  echo \"AUTOKEEP $p\"\n"
+        "done\n"
+        "rm -f \"$keep\"\n"
+        "echo AUTOKEEP_DONE\n")
+
+
+def parse_extra_files(output, excludes=AUTO_KEEP_EXCLUDES):
+    """The paths auto_keep_script reported, excludes applied again here."""
+    lines = output.splitlines()
+    for line in lines:
+        if line.startswith("AUTOKEEP_ERROR"):
+            raise Abort(f"cannot list the extra files: {line.split(' ', 1)[-1]}")
+    if "AUTOKEEP_DONE" not in (line.strip() for line in lines):
+        raise Abort(f"the extra-file scan did not finish: {output.strip()[-300:]!r}")
+    found = {line[len("AUTOKEEP "):] for line in lines if line.startswith("AUTOKEEP /")}
+    return sorted(path for path in found if not is_auto_keep_excluded(path, excludes))
+
+
+def detect_extra_files(host):
+    rc, out = install.ssh(host, auto_keep_script(), timeout=600, check=False)
+    if rc != 0 and "AUTOKEEP_ERROR" not in out:
+        raise Abort(f"cannot list the extra files on {host}: {out.strip()}")
+    return parse_extra_files(out)
+
+
+def _keep_key(line):
+    line = line.strip()
+    return line.rstrip("/") or line
+
+
+def keep_append_text(existing, paths):
+    """What to append to sysupgrade.conf so that it lists every one of paths.
+
+    Paths already listed (with or without a trailing "/") are not repeated, nor
+    is any path twice. A file that does not end in a newline gets one first, so
+    the first new path does not run into its last line."""
+    listed = {_keep_key(line) for line in existing.splitlines()
+              if line.strip() and not line.lstrip().startswith("#")}
+    new = []
+    for path in paths:
+        if _keep_key(path) not in listed:
+            listed.add(_keep_key(path))
+            new.append(path)
+    if not new:
+        return ""
+    lead = "\n" if existing and not existing.endswith("\n") else ""
+    return lead + "".join(path + "\n" for path in new)
+
+
+def validate_keep_path(path):
+    if not path.startswith("/") or "\n" in path or "\r" in path:
+        raise Abort(t("--extra-keep needs an absolute path on the router, got {path!r}",
+                      path=path))
+    return path
+
+
+def append_keep_list(host, paths):
+    """Add paths to the router's sysupgrade.conf; returns those it added."""
+    # install.ssh strips its output, which would hide whether the file ends in
+    # a newline; a marker after it keeps that last character in place.
+    _rc, out = install.ssh(
+        host, f"cat {SYSUPGRADE_CONF} 2>/dev/null; echo {KEEP_EOF}", check=False)
+    if KEEP_EOF not in out:
+        raise Abort(f"cannot read {SYSUPGRADE_CONF}: {out.strip()!r}")
+    existing = out.rsplit(KEEP_EOF, 1)[0]
+    text = keep_append_text(existing, paths)
+    if text:
+        install.ssh(host, f"printf %s {shlex.quote(text)} >> {SYSUPGRADE_CONF}")
+    return [line for line in text.splitlines() if line]
+
+
+def filter_world(text):
+    """The packages to reinstall, from /etc/apk/world.
+
+    Left out: entries with a version constraint (= < > ~: the firmware pins
+    those), the firmware's base (kernel, libc, base-files), libraries (lib*,
+    which come in as dependencies), and negations (!name). Sorted, unique."""
+    keep = set()
+    for entry in text.split():
+        if any(mark in entry for mark in "=<>~") or entry.startswith("!"):
+            continue
+        name = entry.split("@", 1)[0]
+        if name in BASE_PACKAGES or name.startswith("lib"):
+            continue
+        keep.add(entry)
+    return sorted(keep)
+
+
+def pinned_names(text):
+    """Package names /etc/apk/world pins with a version constraint."""
+    names = set()
+    for entry in text.split():
+        for mark in "=<>~":
+            if mark in entry:
+                names.add(entry.split(mark, 1)[0].split("@", 1)[0])
+                break
+    return names
+
+
+def installed_names(db_text):
+    """Names installed or provided, from /lib/apk/db/installed P: and p: lines."""
+    names = set()
+    for line in db_text.splitlines():
+        if line.startswith("P:"):
+            names.add(line[2:].strip())
+        elif line.startswith("p:"):
+            for item in line[2:].split():
+                names.add(item.split("=", 1)[0])
+    return names
+
+
+def special_reason(package):
+    for pattern, why in SPECIAL_PACKAGES.items():
+        if fnmatch.fnmatchcase(package.split("@", 1)[0], pattern):
+            return why
+    return None
+
+
+def _write_local(outdir, name, text):
+    path = os.path.join(outdir, name)
+    with open(path, "w", encoding="utf-8", newline="\n") as output:
+        output.write(text if not text or text.endswith("\n") else text + "\n")
+    return path
+
+
+def save_overlay_archive(host, outdir):
+    """overlay-full.tar.gz, for comparing by hand later; never restored."""
+    _rc, used = install.ssh(host, "du -sk /overlay/upper 2>/dev/null", check=False)
+    sizes = [token for token in used.split() if token.isdigit()]
+    if not sizes:
+        log(f"[c] cannot size /overlay/upper ({used.strip()!r}); overlay archive skipped")
+        return None
+    # The archive sits in tmpfs while it is copied off, beside a router still
+    # running everything, so it gets the same headroom as an uploaded image.
+    if int(sizes[0]) + IN_PLACE_MARGIN_KB > available_memory_kb(host):
+        log(t("[c] /overlay/upper ({size} KiB) does not fit in the router's free "
+              "memory; overlay-full.tar.gz was not saved", size=sizes[0]))
+        return None
+    local = os.path.join(outdir, "overlay-full.tar.gz")
+    try:
+        install.ssh(host, f"tar czf {REMOTE_OVERLAY} -C /overlay/upper .", timeout=300)
+        scp_from(host, REMOTE_OVERLAY, local)
+    finally:
+        try:
+            install.ssh(host, f"rm -f {REMOTE_OVERLAY}", timeout=30, check=False)
+        except Exception:               # noqa: BLE001 -- the first error matters
+            pass
+    log(f"[c] overlay archive (reference only, never restored) -> {local}")
+    return local
+
+
+def prepare_carryover(host, args, outdir):
+    """Before the backup: what sysupgrade would drop, made part of it.
+
+    Writes to the router's /etc only (sysupgrade.conf, /etc/backup/), which
+    the backup then carries; the image and the partitions are not touched."""
+    log(t("\n=== carry-over: extra files and packages ==="))
+    _rc, world = install.ssh(host, "cat /etc/apk/world")
+    _write_local(outdir, "world.txt", world)
+    _rc, listed = install.ssh(host, "sysupgrade -l", timeout=120)
+    _write_local(outdir, "sysupgrade-list.txt", listed)
+    save_rom_defaults(host, outdir, listed)
+
+    extras = [] if args.no_auto_keep else detect_extra_files(host)
+    if args.no_auto_keep:
+        log("[c] automatic extra-file detection is off (--no-auto-keep)")
+    manual = [validate_keep_path(path) for path in args.extra_keep]
+    paths = list(dict.fromkeys(extras + manual))
+    if paths:
+        log(t("[c] files no package owns and sysupgrade would not keep:"))
+        for path in paths:
+            log(f"      {path}")
+        install.confirm(t("add these {count} path(s) to {conf}?",
+                          count=len(paths), conf=SYSUPGRADE_CONF), args.yes)
+    else:
+        log(t("[c] no extra files found that sysupgrade would drop"))
+    added = append_keep_list(host, paths + [BACKUP_DIR])
+    for path in added:
+        log(f"[c] {SYSUPGRADE_CONF} += {path}")
+
+    forwarders = local_dns_forwarders(host)
+    if forwarders:
+        log(t("[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). "
+              "If a package you installed provides it, the router cannot resolve "
+              "names after the update until that package is reinstalled; the "
+              "reinstall then uses the WAN's DNS servers for the router itself.",
+              forwarders=", ".join(forwarders)))
+
+    wanted = filter_world(world)
+    text = "".join(name + "\n" for name in wanted)
+    local = _write_local(outdir, "world-old.txt", text)
+    install.ssh(host, f"mkdir -p {BACKUP_DIR}")
+    install.scp_to(host, local, WORLD_OLD)
+    log(t("[c] {count} package(s) to reinstall after the update -> {path}",
+          count=len(wanted), path=WORLD_OLD))
+    save_overlay_archive(host, outdir)
+
+
+def local_dns_forwarders(host):
+    """The dnsmasq upstreams on this router itself (127.0.0.1#5053 and the like)."""
+    _rc, out = install.ssh(host, "uci -q get dhcp.@dnsmasq[0].server", check=False)
+    return [item for item in out.split()
+            if item.split("#", 1)[0].split("/")[-1] in ("127.0.0.1", "::1")]
+
+
+def repository_host(host):
+    """The host name of the first package repository, or None."""
+    _rc, out = install.ssh(host, f"cat {REPOSITORY_LISTS} 2>/dev/null", check=False)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = urllib.parse.urlsplit(line.split()[-1]).hostname
+        if name:
+            return name
+    return None
+
+
+def wan_nameservers(host):
+    """The DNS servers netifd learned for the WAN, as addresses only."""
+    _rc, out = install.ssh(host, f"cat {WAN_RESOLV} 2>/dev/null", check=False)
+    servers = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] == "nameserver":
+            try:
+                servers.append(str(ipaddress.ip_address(fields[1])))
+            except ValueError:
+                continue                    # never put anything else in a command
+    return list(dict.fromkeys(servers))
+
+
+def resolves(host, name, server=None):
+    target = shlex.quote(name) + (f" {shlex.quote(server)}" if server else "")
+    _rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
+                           timeout=30, check=False)
+    return "DNS_OK" in out
+
+
+class TemporaryResolver:
+    """Point the router's *own* resolver at the WAN's DNS while packages install.
+
+    The restored config may make dnsmasq forward every query to a resolver
+    that a not-yet-reinstalled package provides, and noresolv keeps it off the
+    WAN's servers. The router then cannot resolve its repositories, and so
+    cannot install the package that would fix that. Only /tmp/resolv.conf,
+    which the router itself uses, is changed: dnsmasq and the LAN keep their
+    configuration, and nothing is committed. The WAN's own servers are used,
+    never a resolver this tool chooses; without any, it only explains.
+
+    restore() puts the saved file back unless dnsmasq has rewritten it in the
+    meantime (a reinstalled DNS package restarts it), in which case that
+    version is the right one and stays."""
+
+    def __init__(self, host):
+        self.host = host
+        self.servers = []
+        self.reported = False
+
+    @property
+    def active(self):
+        return bool(self.servers)
+
+    def engage(self, name):
+        """Use the WAN's DNS when the system resolver cannot resolve `name`."""
+        if resolves(self.host, name):
+            return False
+        servers = [server for server in wan_nameservers(self.host)
+                   if resolves(self.host, name, server)]
+        if not servers:
+            # Asked again on each retry, since the WAN may still be coming up;
+            # said once.
+            if not self.reported:
+                log(t("[p] the router cannot resolve {name}, and none of the WAN's "
+                      "DNS servers can either. Fix its DNS, then run this again "
+                      "with --reinstall-only.", name=name))
+                self.reported = True
+            return False
+        self.servers = servers
+        self._write()
+        log(t("[p] the router cannot resolve {name}. The restored dnsmasq config "
+              "forwards to {forwarders}, probably a resolver from a package that is "
+              "not reinstalled yet. Until the reinstall ends, the router itself uses "
+              "the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.",
+              name=name, forwarders=", ".join(local_dns_forwarders(self.host)) or "?",
+              servers=", ".join(servers)))
+        return True
+
+    def _write(self):
+        text = RESOLVER_MARK + "\n" + "".join(f"nameserver {s}\n" for s in self.servers)
+        install.ssh(self.host,
+                    f"[ -e {RESOLV_SAVED} ] || cp -p {RESOLV_CONF} {RESOLV_SAVED}; "
+                    f"printf %s {shlex.quote(text)} > {RESOLV_CONF}")
+
+    def keep(self, name):
+        """Before each install: write it again if dnsmasq replaced it and the
+        router's own resolver still fails."""
+        if self.active and not resolves(self.host, name):
+            self._write()
+
+    def restore(self):
+        if not self.active:
+            return
+        try:
+            install.ssh(self.host,
+                        f"if [ -e {RESOLV_SAVED} ]; then "
+                        f"grep -qF {shlex.quote(RESOLVER_MARK)} {RESOLV_CONF} && "
+                        f"cat {RESOLV_SAVED} > {RESOLV_CONF}; "
+                        f"rm -f {RESOLV_SAVED}; fi", timeout=30)
+            log(t("[p] the router's own resolver is back to its configuration"))
+        except (Abort, subprocess.TimeoutExpired) as exc:
+            log(t("[!] could not restore {conf} on the router ({error}); restart "
+                  "dnsmasq there (service dnsmasq restart) to rebuild it",
+                  conf=RESOLV_CONF, error=exc))
+        self.servers = []
+
+
+def wait_for_repositories(host, deadline_s=None, resolver=None):
+    """Whether `apk update` succeeded before the deadline.
+
+    With a TemporaryResolver, a failure that is the router's own DNS engages
+    it once, and the wait goes on."""
+    deadline_s = REPOSITORY_DEADLINE_S if deadline_s is None else deadline_s
+    log(t("[p] waiting up to {seconds}s for the router to reach its package "
+          "repositories", seconds=deadline_s))
+    end = time.time() + deadline_s
+    out = ""
+    name = None
+    while True:
+        try:
+            rc, out = install.ssh(host, "apk update", timeout=120, check=False)
+        except subprocess.TimeoutExpired:
+            rc, out = 1, "apk update timed out"
+        if rc == 0:
+            return True
+        if resolver is not None and not resolver.active:
+            name = name or repository_host(host)
+            if name and resolver.engage(name):
+                continue
+        if time.time() + 15 >= end:
+            log(f"[p] apk update: {out.strip()[-300:]}")
+            return False
+        time.sleep(15)
+
+
+def reinstall_packages(host, outdir, deadline_s=None, assume_yes=True):
+    """Install what world-old.txt lists and the updated system lacks.
+
+    Each package is checked first and added only when missing; a pinned or
+    special one is never added by name (see SPECIAL_PACKAGES). A package
+    whose configuration the backup restored leaves the new default beside it
+    as *.apk-new; each of those is then reviewed (review_apk_new), asking
+    unless assume_yes. Returns the summary as {"installed", "present",
+    "skipped", "failed", "conffiles"} and writes it to reinstall-summary.txt."""
+    log(t("\n=== packages: reinstall what the update dropped ==="))
+    rc, text = install.ssh(host, f"cat {WORLD_OLD}", check=False)
+    if rc != 0:
+        local = os.path.join(outdir, "world-old.txt")
+        if not os.path.exists(local):
+            log(t("[p] no package list on the router or in {outdir}; nothing to "
+                  "reinstall", outdir=outdir))
+            return None
+        with open(local, encoding="utf-8") as source:
+            text = source.read()
+        log(f"[p] {WORLD_OLD} is missing on the router; using {local}")
+    wanted = filter_world(text)
+    summary = {"installed": [], "present": [], "skipped": [], "failed": [],
+               "conffiles": []}
+    if not wanted:
+        log(t("[p] the package list is empty; nothing to reinstall"))
+        return _write_summary(outdir, summary)
+    if any(name.startswith("kmod-") for name in wanted):
+        log(t("[p] kernel modules (kmod-*) install only from the repository "
+              "built for the running firmware; a kmod that it lacks fails and "
+              "is listed below"))
+
+    _rc, db = install.ssh(host, "grep -E '^[Pp]:' /lib/apk/db/installed", check=False)
+    have = installed_names(db)
+    _rc, world_now = install.ssh(host, "cat /etc/apk/world", check=False)
+    pinned = pinned_names(world_now)
+    missing = []
+    for name in wanted:
+        bare = name.split("@", 1)[0]
+        if bare in have:
+            summary["present"].append(name)
+        elif bare in pinned:
+            summary["skipped"].append((name, "pinned by the firmware"))
+        elif special_reason(name):
+            summary["skipped"].append((name, special_reason(name)
+                                       + "; see docs/packages.md"))
+        else:
+            missing.append(name)
+
+    resolver = TemporaryResolver(host)
+    try:
+        if missing and not wait_for_repositories(host, deadline_s, resolver):
+            summary["failed"] += [(name, "the package repositories are unreachable")
+                                  for name in missing]
+            missing = []
+        before = list_apk_new(host) if missing else set()
+        repository = repository_host(host) if resolver.active else None
+        for name in missing:
+            if repository:
+                resolver.keep(repository)
+            try:
+                rc, out = install.ssh(host, f"apk add {shlex.quote(name)}",
+                                      timeout=600, check=False)
+            except subprocess.TimeoutExpired:
+                rc, out = 1, "apk add timed out"
+            if rc == 0:
+                summary["installed"].append(name)
+                log(f"[p] installed {name}")
+            else:
+                reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
+                summary["failed"].append((name, reason))
+                log(f"[p] could not install {name}: {reason}")
+    finally:
+        resolver.restore()
+    if summary["installed"]:
+        summary["conffiles"] = review_apk_new(host, outdir, before, assume_yes)
+    return _write_summary(outdir, summary)
+
+
+def _write_summary(outdir, summary):
+    lines = [f"installed: {name}" for name in summary["installed"]]
+    lines += [f"already present: {name}" for name in summary["present"]]
+    lines += [f"skipped: {name} -- {why}" for name, why in summary["skipped"]]
+    lines += [f"failed: {name} -- {why}" for name, why in summary["failed"]]
+    lines += [f"config {decision}: {path}" for path, decision in summary.get("conffiles", [])]
+    path = _write_local(outdir, "reinstall-summary.txt", "\n".join(lines))
+    log(t("[p] packages: {installed} installed, {present} already present, "
+          "{skipped} skipped, {failed} failed -> {path}",
+          installed=len(summary["installed"]), present=len(summary["present"]),
+          skipped=len(summary["skipped"]), failed=len(summary["failed"]),
+          path=path))
+    for name, why in summary["skipped"]:
+        log(t("[p] not reinstalled, do it by hand: {name} ({why})", name=name, why=why))
+    for name, why in summary["failed"]:
+        log(t("[p] failed: {name} ({why})", name=name, why=why))
+    if any(name.startswith("kmod-") for name, _why in summary["failed"]):
+        log(t("[p] a kmod that failed is not in the repository of the running "
+              "firmware; do not install one built for another kernel"))
+    return summary
+
+
+def read_files_archive(path):
+    """{"/absolute/path": bytes} for the regular files in a fetch_files archive.
+
+    Names are checked rather than trusted: nothing absolute, no "..", so an
+    odd archive cannot name a path outside the tree it claims to be."""
+    files = {}
+    with tarfile.open(path, "r:gz") as archive:
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            name = member.name[2:] if member.name.startswith("./") else member.name
+            if name.startswith("/") or ".." in name.split("/"):
+                raise Abort(f"{path} names {member.name!r}, outside its tree")
+            files["/" + name] = archive.extractfile(member).read()
+    return files
+
+
+def fetch_files(host, root, paths, keep=None):
+    """{path: bytes} for those of `paths` that are regular files under `root`.
+
+    One tar on the router, copied off with scp, so the bytes are exact (ssh
+    output is stripped). `paths` are absolute, as seen from `root`: /rom for
+    the image's defaults, / for what is in use. keep: also save the archive
+    there; it is not written when none of the paths exists."""
+    relative = [path.lstrip("/") for path in paths
+                if path.startswith("/") and "\n" not in path]
+    if not relative:
+        return {}
+    with tempfile.TemporaryDirectory() as tmp:
+        listing = os.path.join(tmp, "files.list")
+        with open(listing, "w", encoding="utf-8", newline="\n") as output:
+            output.write("".join(path + "\n" for path in relative))
+        have = REMOTE_LIST + ".have"
+        try:
+            install.scp_to(host, listing, REMOTE_LIST)
+            _rc, out = install.ssh(
+                host,
+                f"cd {shlex.quote(root)} && "
+                "while IFS= read -r p; do [ -f \"$p\" ] && [ ! -L \"$p\" ] && echo \"$p\"; "
+                f"done < {REMOTE_LIST} > {have} && "
+                f"if [ -s {have} ]; then tar czf {REMOTE_FILES} -T {have} && echo FETCH_OK; "
+                "else echo FETCH_NONE; fi",
+                timeout=120, check=False)
+            if "FETCH_NONE" in out:
+                return {}
+            if "FETCH_OK" not in out:
+                raise Abort(f"cannot read files under {root} on {host}: {out.strip()!r}")
+            local = keep or os.path.join(tmp, "files.tar.gz")
+            scp_from(host, REMOTE_FILES, local)
+        finally:
+            try:
+                install.ssh(host, f"rm -f {REMOTE_LIST} {have} {REMOTE_FILES}",
+                            timeout=30, check=False)
+            except Exception:               # noqa: BLE001 -- the first error matters
+                pass
+        # Only what was asked for: a tar may add entries of its own (macOS's
+        # adds AppleDouble ._ files), and those are not the router's files.
+        wanted = {"/" + path for path in relative}
+        return {path: data for path, data in read_files_archive(local).items()
+                if path in wanted}
+
+
+def _text(data):
+    return data.decode("utf-8", "replace").splitlines(keepends=True)
+
+
+def unified(old, new, old_name, new_name):
+    """A unified diff of two file contents, or a note when either is binary."""
+    if b"\0" in old or b"\0" in new:
+        return f"Binary files {old_name} and {new_name} differ\n"
+    lines = difflib.unified_diff(_text(old), _text(new), old_name, new_name)
+    return "".join(line if line.endswith("\n") else line + "\n" for line in lines)
+
+
+def save_diff(outdir, path, suffix, text):
+    folder = os.path.join(outdir, CONFFILE_DIR)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    local = os.path.join(folder, path.strip("/").replace("/", "__") + suffix)
+    with open(local, "w", encoding="utf-8", newline="\n") as output:
+        output.write(text)
+    return local
+
+
+def log_diff(text, saved):
+    lines = text.splitlines()
+    for line in lines[:DIFF_LOG_LINES]:
+        log("      " + line)
+    if len(lines) > DIFF_LOG_LINES:
+        log(f"      ... {len(lines) - DIFF_LOG_LINES} more lines in {saved}")
+
+
+# ---- configuration files of reinstalled packages (as dpkg asks) -------------
+
+def list_apk_new(host):
+    _rc, out = install.ssh(host, f"find /etc -name '*{APK_NEW}' 2>/dev/null",
+                           check=False)
+    return {line.strip() for line in out.splitlines()
+            if line.strip().startswith("/") and line.strip().endswith(APK_NEW)}
+
+
+def ask_conffile(path, assume_yes):
+    """The decision for one configuration file: keep, new or defer."""
+    if assume_yes:
+        return "defer"
+    choices = {"k": "keep", "n": "new", "d": "defer"}
+    while True:
+        try:
+            answer = input(t("[?] {path}: keep your version (k), install the "
+                             "package's new one (n), or decide later (d)? "
+                             "[k/n/d] ", path=path)).strip().lower()
+        except EOFError:
+            return "defer"
+        if answer in choices:
+            return choices[answer]
+
+
+def review_apk_new(host, outdir, before, assume_yes):
+    """Decide each *.apk-new that the reinstall left, as dpkg asks on upgrade.
+
+    apk never overwrites a configuration file you changed: it keeps yours and
+    writes the package's new default beside it as *.apk-new. Only those that
+    this reinstall created (not in `before`) are shown, as a diff from yours
+    to the package's, and for each one:
+      keep   your version stays and the *.apk-new is removed;
+      new    the package's version is installed, yours is kept as *.apk-old;
+      defer  both stay as they are (always so with --yes).
+    Every diff is saved under conffiles/ in the output directory.
+    Returns [(path, decision)]."""
+    created = sorted(list_apk_new(host) - set(before))
+    if not created:
+        return []
+    log(t("\n=== configuration files: new package versions ==="))
+    log(t("[p] {count} reinstalled package(s) brought a new version of a "
+          "configuration file you changed; yours is in use", count=len(created)))
+    pairs = [(new[:-len(APK_NEW)], new) for new in created]
+    files = fetch_files(host, "/", [path for pair in pairs for path in pair])
+    decisions = []
+    for path, new in pairs:
+        if path not in files or new not in files:
+            log(f"[p] cannot read {path} or {new}; left as it is")
+            decisions.append((path, "defer"))
+            continue
+        text = unified(files[path], files[new], f"{path} (yours)", f"{new} (package)")
+        saved = save_diff(outdir, path, ".apk-new.diff", text)
+        log(f"[p] {path}:")
+        log_diff(text, saved)
+        try:
+            decision = ask_conffile(path, assume_yes)
+        except KeyboardInterrupt:
+            # The update itself is done; Ctrl-C only stops the questions.
+            log("[p] interrupted: this and the remaining files are left for later")
+            assume_yes, decision = True, "defer"
+        quoted, quoted_new = shlex.quote(path), shlex.quote(new)
+        if decision == "keep":
+            install.ssh(host, f"rm -f {quoted_new}")
+            log(t("[p] kept your {path}; the package's version was removed",
+                  path=path))
+        elif decision == "new":
+            old = path + ".apk-old"
+            install.ssh(host, f"cp -p {quoted} {shlex.quote(old)} && "
+                              f"mv -f {quoted_new} {quoted}")
+            log(t("[p] installed the package's {path}; yours is in {old}. Restart "
+                  "the service that reads it, or reboot.", path=path, old=old))
+        else:
+            log(t("[p] left for later: {path} and {new}; the difference is in "
+                  "{diff}", path=path, new=new, diff=saved))
+        decisions.append((path, decision))
+    return decisions
+
+
+# ---- configuration files of the image's own packages ------------------------
+
+def save_rom_defaults(host, outdir, listed):
+    """Before the update: the image defaults of the files the backup keeps.
+
+    `listed` is `sysupgrade -l`. For each of those files that the running
+    image ships (it is in /rom), its default is saved as
+    rom-defaults-old.tar.gz. With the new image's default read after the
+    update, that gives the three versions a real comparison needs. Never
+    stops the update: this is only for the review afterwards."""
+    paths = [line.strip() for line in listed.splitlines() if line.strip().startswith("/")]
+    keep = os.path.join(outdir, ROM_DEFAULTS_OLD)
+    try:
+        found = fetch_files(host, "/rom", paths, keep=keep)
+    except (Abort, OSError, tarfile.TarError) as exc:
+        log(f"[c] could not save the image defaults ({exc}); the review of "
+            "changed defaults after the update is skipped")
+        return 0
+    log(f"[c] {len(found)} image default(s) of kept files -> {keep}" if found
+        else "[c] none of the kept files has an image default")
+    return len(found)
+
+
+def review_image_defaults(host, outdir):
+    """After the update: which kept files' image defaults the new release changed.
+
+    Your version was restored and is in use, which is right for a file whose
+    default did not change; those are not mentioned. For one whose default
+    did change, the upstream change (old default to new) is saved and shown,
+    so you can carry it into yours. Nothing on the router is changed.
+    Returns [(path, saved diff or None)]."""
+    archive = os.path.join(outdir, ROM_DEFAULTS_OLD)
+    if not os.path.exists(archive):
+        return []
+    log(t("\n=== configuration files: image defaults that changed upstream ==="))
+    old = read_files_archive(archive)
+    new = fetch_files(host, "/rom", sorted(old))
+    changed = sorted(path for path in old if new.get(path) != old[path])
+    if not changed:
+        log(t("[r] the new release changed none of the defaults of the files you "
+              "changed; your versions stay as they are"))
+        return []
+    mine = fetch_files(host, "/", [path for path in changed if path in new])
+    results = []
+    log(t("[r] the new release changed the default of {count} file(s) that you "
+          "changed. Yours were restored and are in use; carry over what you "
+          "need from the upstream change:", count=len(changed)))
+    for path in changed:
+        if path not in new:
+            log(t("[r] the new release no longer ships {path}", path=path))
+            results.append((path, None))
+            continue
+        if mine.get(path) == new[path]:
+            results.append((path, None))
+            continue
+        text = unified(old[path], new[path], f"{path} (old default)",
+                       f"{path} (new default)")
+        saved = save_diff(outdir, path, ".upstream.diff", text)
+        log(t("[r] {path}: upstream change in {diff}", path=path, diff=saved))
+        log_diff(text, saved)
+        results.append((path, saved))
+    return results
+
 
 def scp_from(host, remote, local):
     """Copy remote:path off the box. install.py only ever sends."""
+    if install.key_auth() is not None:
+        return install.key_scp(host, local, remote, upload=False, timeout=300)
     if hostnet.is_windows():
         try:
             return winssh.download(host, remote, local, install.SSH_PASSWORDS)
@@ -215,19 +1015,7 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
     and 'ram' otherwise.
     """
     log(t("\n=== stage 1: pre-flight (nothing is written) ==="))
-    # Refuses this host's own gateway; see install.gateway_conflict.
-    install.check_is_openwrt_ram(host, router_iface=router_iface)
-    rc, out = install.ssh(host, "echo up", timeout=30, check=False)
-    if rc != 0:
-        if "Permission denied" in out:
-            raise Abort(t(
-                "{host} refused the root password offered. Pass the current one "
-                "with --root-password. A router set to SSH keys only "
-                "(PasswordAuth off) is not supported: nothing was written.",
-                host=host))
-        raise Abort(f"cannot log in to {host}: {out}")
-
-    board, rootfs = revert.state_of(host, profile)   # refuses any other board
+    board, rootfs = identify(host, profile, router_iface)
     log(f"[1] {host}: {board}, rootfs_type={rootfs}")
     why = revert.require_nand_support(host, rel, profile, images_dir)
     log(f"[1] NAND gate: PASS -- {why}")
@@ -237,13 +1025,46 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
         raise Abort(f"rootfs_type is {rootfs!r}: neither the installed system "
                     "nor the RAM installer, so nothing here applies")
 
+    mtd = require_permanent_layout(host, profile, board, rootfs)
+    require_idle_kernel_partition(host, mtd)
+    return _choose_route(host, rel, images, mtd, allow_in_place)
+
+
+def identify(host, profile, router_iface=None):
+    """Log in and return (board, rootfs type); refuses any other board."""
+    # Refuses this host's own gateway; see install.gateway_conflict.
+    install.check_is_openwrt_ram(host, router_iface=router_iface)
+    rc, out = install.ssh(host, "echo up", timeout=30, check=False)
+    if rc != 0:
+        if install.key_auth() is not None:
+            # No password is tried after a refused key, not even the RAM
+            # installer's empty one: see KeyAuth.
+            raise Abort(t(
+                "{host} did not accept the SSH key login, and no password is "
+                "tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) "
+                "and ~/.ssh/config with a manual `ssh` first. If the router is in "
+                "the RAM installer (an interrupted update), it has no copy of your "
+                "key: run this again without --ssh-key-auth. Nothing was written.",
+                host=host, output=out))
+        if "Permission denied" in out:
+            raise Abort(t(
+                "{host} refused the root password offered. Pass the current one "
+                "with --root-password. For a router set to SSH keys only "
+                "(PasswordAuth off), use --ssh-key-auth. Nothing was written.",
+                host=host))
+        raise Abort(f"cannot log in to {host}: {out}")
+    return revert.state_of(host, profile)
+
+
+def require_permanent_layout(host, profile, board, rootfs):
     _rc, mtd_text = install.ssh(host, "cat /proc/mtd")
     if not install.permanent_system_matches(profile, board, rootfs, mtd_text):
         raise Abort("the partition map is not this profile's OpenWrt layout: "
                     f"expected {sorted(profile.openwrt_partitions)}\n{mtd_text}")
-    mtd = install.parse_mtd(mtd_text)
-    require_idle_kernel_partition(host, mtd)
+    return install.parse_mtd(mtd_text)
 
+
+def _choose_route(host, rel, images, mtd, allow_in_place):
     installed = installed_release(host)
     in_place = (allow_in_place and is_v2_release(installed)
                 and is_v2_release(rel.tag))
@@ -266,7 +1087,7 @@ def preflight(host, profile, rel, images, images_dir, router_iface=None,
                       "needs {needed} KiB. Free some first, for example by "
                       "stopping services you can spare, then run this again.",
                       available=available, image=image["name"], needed=needed))
-    return rootfs, ("in-place" if in_place else "ram"), installed
+    return "overlay", ("in-place" if in_place else "ram"), installed
 
 
 def permanent_ssid(host, args, verify_transport, rootfs, profile):
@@ -420,7 +1241,10 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
     verify_interface = None if same_host else args.verify_interface
     # On a cable, the router may be this host's gateway (its own DHCP):
     # pre-flight accepted that, and verification has to as well.
-    gateway_iface = args.discover if args.transport == "wired" else None
+    # Under key auth nothing secret is offered and the host key identifies the
+    # router, so it is accepted as the gateway on its interface, Wi-Fi too.
+    gateway_iface = (args.discover if args.transport == "wired" or args.ssh_key_auth
+                     else None)
     router_mac = install.neighbour_mac(host, gateway_iface) if gateway_iface else None
 
     try:
@@ -492,9 +1316,124 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
     except Abort:
         log(t("[!] sysupgrade was launched; do not run the flash stage again"))
         log(t("[!] verification-only continuation:"))
-        log("    " + install.verification_command(manifest, verify_interface))
+        log("    " + install.verification_command(
+            manifest, verify_interface, host=host if same_host else None))
         raise
     install.update_resume_phase(manifest, "flash-complete")
+    return found
+
+
+def check_key_options(args):
+    """The --ssh-key-auth combinations that can work, checked before any work."""
+    if not args.ssh_key_auth:
+        if args.ssh_identity or args.ssh_alias:
+            raise Abort(t("--ssh-identity and --ssh-alias require --ssh-key-auth"))
+        return
+    if args.root_password:
+        raise Abort(t("--ssh-key-auth sends no password; drop --root-password"))
+    if not args.keep_settings:
+        raise Abort(t("--ssh-key-auth needs the settings kept: a clean install "
+                      "removes your public key and the router's host key, so the "
+                      "update could not be verified by key"))
+    if args.ssh_identity:
+        args.ssh_identity = os.path.abspath(os.path.expanduser(args.ssh_identity))
+        if not os.path.isfile(args.ssh_identity):
+            raise Abort(t("SSH private key file does not exist"))
+    if args.ssh_alias:
+        try:
+            ipaddress.ip_address((args.host or "").split("%", 1)[0])
+        except ValueError as exc:
+            raise Abort(t("--ssh-alias requires --host with the router's numeric "
+                          "address, which the network checks use")) from exc
+
+
+def enable_key_auth(args):
+    """Send every installed-system ssh/scp through OpenSSH with keys only."""
+    if args.ssh_alias:
+        install.require_alias_matches(args.ssh_alias, args.host)
+    install.KEY_AUTH = install.KeyAuth(args.ssh_identity, alias=args.ssh_alias,
+                                       alias_for=args.host)
+    log(t("[*] SSH: key login to the installed system through OpenSSH and "
+          "~/.ssh/config; no password is sent, and known_hosts must already "
+          "hold the router's host key"))
+
+
+def require_tools_and_login(args):
+    install.require_host_tools(password=bool(args.root_password),
+                               key=args.ssh_key_auth)
+    if args.ssh_key_auth:
+        enable_key_auth(args)
+    if args.root_password:
+        install.SSH_PASSWORDS.append(args.root_password)
+        restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
+
+
+def gateway_allowed(args):
+    """Whether the router may be this host's default gateway on args.discover.
+
+    On a cable the router's own DHCP makes it this host's gateway. That is
+    accepted while all we would offer it is the empty password, the same rule
+    as restore.locate; a configured one goes only to a link-local peer. Under
+    --ssh-key-auth it is accepted as well, on Wi-Fi too: nothing secret is
+    sent (the key never leaves this host), and known_hosts is checked
+    strictly, so a device that only shares the router's address fails the
+    host key check before anything runs on it."""
+    if args.ssh_key_auth:
+        return True
+    return args.transport == "wired" and not any(install.SSH_PASSWORDS)
+
+
+def open_outdir(args, prefix):
+    outdir = os.path.abspath(args.outdir or f"{prefix}-{time.strftime('%Y%m%d-%H%M%S')}")
+    os.makedirs(outdir, mode=0o700, exist_ok=True)
+    os.chmod(outdir, 0o700)
+    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
+    log(f"[*] output -> {outdir}/")
+    return outdir
+
+
+def finish_packages(host, args, outdir, config_tar):
+    """After a verified update: review the configuration files, reinstall.
+
+    Neither ever turns that update into a failure."""
+    if not config_tar or not host:
+        return
+    try:
+        review_image_defaults(host, outdir)
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired, OSError,
+            tarfile.TarError) as exc:
+        log(f"[r] the review of changed image defaults stopped: {exc}")
+    if args.no_reinstall:
+        log("[p] package reinstall skipped (--no-reinstall)")
+        return
+    try:
+        reinstall_packages(host, outdir, assume_yes=args.yes)
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired) as exc:
+        log(t("[!] the update is complete, but reinstalling packages stopped: "
+              "{error}. Run this again with --reinstall-only to retry.", error=exc))
+
+
+def run_reinstall_only(args, profile):
+    """--reinstall-only: on an already updated router, only reinstall packages."""
+    args.discover = (install.canonical_interface(args.discover)
+                     or chain.local_interface(args.host or profile.openwrt_host))
+    if args.transport == "auto" and args.discover:
+        args.transport = install.detect_transport(args.discover)
+    outdir = open_outdir(args, "reinstall")
+    require_tools_and_login(args)
+    gateway_ok = gateway_allowed(args) and bool(args.discover)
+    host = args.host or install.wait_and_discover(
+        args.discover, deadline_s=120,
+        fallback=profile.openwrt_host if args.transport == "wired" else None,
+        router_gateway_ok=gateway_ok)
+    board, rootfs = identify(host, profile, args.discover if gateway_ok else None)
+    if rootfs != "overlay":
+        raise Abort(f"rootfs_type is {rootfs!r}, not the installed system; "
+                    "--reinstall-only works on an installed, updated router")
+    require_permanent_layout(host, profile, board, rootfs)
+    log(f"[*] {host}: {board}, the installed system")
+    reinstall_packages(host, outdir, assume_yes=args.yes)
+    return 0
 
 
 def run(args):
@@ -503,6 +1442,9 @@ def run(args):
     i18n.tolerate_console_encoding()
     profile = devices.get_profile(args.device)
     args.image = {"default": "standard", "nss": "nss"}[args.flavour]
+    check_key_options(args)
+    if args.reinstall_only:
+        return run_reinstall_only(args, profile)
 
     if args.config_backup:
         args.config_backup = os.path.abspath(args.config_backup)
@@ -529,12 +1471,7 @@ def run(args):
     log(f"[*] transport: {args.transport}"
         + (f" via {args.discover}" if args.discover else ""))
 
-    outdir = os.path.abspath(
-        args.outdir or f"update-{time.strftime('%Y%m%d-%H%M%S')}")
-    os.makedirs(outdir, mode=0o700, exist_ok=True)
-    os.chmod(outdir, 0o700)
-    chain.set_log_sink(open(f"{outdir}/transcript.log", "w", encoding="utf-8"))
-    log(f"[*] output -> {outdir}/")
+    outdir = open_outdir(args, "update")
 
     rel = release.resolve(args.tag, profile, args.images, offline=args.offline,
                           log=log)
@@ -556,16 +1493,9 @@ def run(args):
         log(t("[dry-run] router was not contacted"))
         return 0
 
-    install.require_host_tools(password=bool(args.root_password))
-    if args.root_password:
-        install.SSH_PASSWORDS.append(args.root_password)
-        restore.SSH_PASSWORDS[:] = install.SSH_PASSWORDS
-
-    # On a cable the router's own DHCP makes it this host's gateway. That is
-    # accepted only while all we would offer it is the empty password, the same
-    # rule as restore.locate; a configured one goes only to a link-local peer.
+    require_tools_and_login(args)
     fallback = profile.openwrt_host if args.transport == "wired" else None
-    gateway_ok = args.transport == "wired" and not any(install.SSH_PASSWORDS)
+    gateway_ok = gateway_allowed(args)
     host = args.host or install.wait_and_discover(
         args.discover, deadline_s=120, fallback=fallback,
         router_gateway_ok=gateway_ok)
@@ -573,6 +1503,13 @@ def run(args):
     rootfs, route, installed = preflight(host, profile, rel, images, args.images,
                               router_iface=args.discover if gateway_ok else None,
                               allow_in_place=not args.via_ram_installer)
+    installed_host = host
+    if args.ssh_key_auth and route == "ram":
+        log(t("[!] this update goes through the RAM installer, which has no copy "
+              "of your SSH key. It is reached with its empty root password, as "
+              "without --ssh-key-auth (so sshpass is needed); the final check "
+              "logs in to {host} by key again.", host=installed_host))
+        install.require_host_tools()
     verify_transport = install.detect_transport(args.verify_interface)
     args.wifi_ssid = permanent_ssid(host, args, verify_transport, rootfs,
                                     profile)
@@ -591,15 +1528,20 @@ def run(args):
         if args.config_backup:
             config_tar = args.config_backup
             log(f"[*] restoring the given config backup: {config_tar}")
+            log("[c] the extra files and package list are whatever that archive "
+                "holds; nothing is added to it")
             backup_config(host, outdir)      # still take one of what is there now
         else:
+            if args.keep_settings:
+                prepare_carryover(host, args, outdir)
             config_tar = backup_config(host, outdir)
         if not args.keep_settings:
             config_tar = None
             log("[*] clean install: settings will be reset to defaults; a backup "
                 f"of the current ones is in {outdir}")
 
-    if config_tar and turns_off_password_login(config_tar):
+    # Under --ssh-key-auth the final check logs in by key, so this does not apply.
+    if config_tar and not args.ssh_key_auth and turns_off_password_login(config_tar):
         log(t("[!] this config turns off password login, and the final check logs "
               "in by password. It will report that it could not verify the router "
               "even when the update worked: when it starts waiting, check with your "
@@ -610,10 +1552,11 @@ def run(args):
                                   secrets.token_hex(16), config_tar)
 
     if route == "in-place":
-        flash_in_place(host, rel, images, args, profile, manifest,
-                       verify_transport, installed)
+        found = flash_in_place(host, rel, images, args, profile, manifest,
+                               verify_transport, installed)
         log(t("[+] update complete: your settings were restored." if config_tar
               else "[+] update complete: the new release is running with default settings."))
+        finish_packages(found or host, args, outdir, config_tar)
         return 0
 
     if rootfs != "tmpfs":
@@ -660,15 +1603,21 @@ def run(args):
             raise Abort(f"{exc}\n{resume_hint(config_tar)}") from exc
     install.update_resume_phase(manifest, "pivot-complete")
 
-    install.flash(
+    # Under key auth the permanent system is verified where it was before:
+    # known_hosts vouches for that address, not for one discovery turns up.
+    # The kept configuration keeps that address, and its host key.
+    found = install.flash(
         host, rel, images, args.yes, profile, args.images, config_tar, manifest,
         args.transport, args.verify_interface, args.wifi_ssid,
         profile.openwrt_host if verify_transport == "wired" else None,
         verify_transport,
         router_iface=args.discover if args.transport == "wired" else None,
-        expected_revision=release.revision(rel, args.images))
+        expected_revision=release.revision(rel, args.images),
+        verify_host=installed_host if args.ssh_key_auth else None,
+        verify_host_iface=args.discover if args.ssh_key_auth else None)
     log(t("[+] update complete: your settings were restored." if config_tar
           else "[+] update complete: the new release is running with default settings."))
+    finish_packages(found, args, outdir, config_tar)
     return 0
 
 
@@ -711,6 +1660,27 @@ def parse_args(argv=None):
     ap.add_argument("--via-ram-installer", action="store_true",
                     help="update through the RAM installer, which reformats both "
                          "UBI partitions (always used from v1.x)")
+    ap.add_argument("--ssh-key-auth", action="store_true",
+                    help="log in to the installed system with your OpenSSH keys "
+                         "and ~/.ssh/config; never a password. The host key must "
+                         "already be in known_hosts")
+    ap.add_argument("--ssh-identity", metavar="PATH", default=None,
+                    help="with --ssh-key-auth: use only this private key "
+                         "(-i PATH, IdentitiesOnly=yes)")
+    ap.add_argument("--ssh-alias", metavar="NAME", default=None,
+                    help="with --ssh-key-auth: connect ssh/scp to this ~/.ssh/config "
+                         "Host; --host stays the numeric address for the network "
+                         "checks")
+    ap.add_argument("--extra-keep", metavar="PATH", action="append", default=[],
+                    help="also add PATH to /etc/sysupgrade.conf before the backup "
+                         "(repeatable)")
+    ap.add_argument("--no-auto-keep", action="store_true",
+                    help="do not look for files that no package owns")
+    ap.add_argument("--no-reinstall", action="store_true",
+                    help="do not reinstall your packages after the update")
+    ap.add_argument("--reinstall-only", action="store_true",
+                    help="only reinstall the packages listed in "
+                         "/etc/backup/world-old.txt on an already updated router")
     ap.add_argument("--recover-stale-lock", action="store_true",
                     help="clear an inactive stale writer lock after inspection")
     ap.add_argument("--device", default="rd03v2", choices=tuple(devices.PROFILES),

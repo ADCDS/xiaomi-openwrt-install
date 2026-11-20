@@ -48,6 +48,25 @@ cd xiaomi-openwrt-install
 sudo apt install sshpass openssl
 ```
 
+### Verificar o sistema instalado com uma chave SSH
+
+Se a interface web e o login manual por SSH com chave funcionam, repita apenas
+a verificação, sem gravar novamente:
+
+```sh
+python3 install.py --verify-only /path/to/install/resume.json \
+  --verify-interface en0 --verify-host 192.168.1.1 \
+  --verify-ssh-key ~/.ssh/id_ed25519
+```
+
+Substitua a interface e o caminho da chave privada. Use `agent` no lugar do
+caminho para usar ssh-agent ou a configuração padrão do OpenSSH. Carregue chaves
+protegidas com `ssh-add` primeiro. Este modo exige OpenSSH e uma chave de host
+confiável para o endereço exato: confirme-a com um login SSH manual primeiro.
+Ele verifica a placa, as partições permanentes, a versão e a reinicialização
+registrada, depois atualiza o `resume.json` local. Essas opções exigem
+`--verify-only` e não alteram a autenticação durante a gravação.
+
 ### Windows 10/11
 
 Instale o Python 3.9 ou mais recente a partir do

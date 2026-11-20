@@ -2178,6 +2178,14 @@ class _UpdateBox:
         return rc, out
 
     def answer(self, cmd):
+        # The carry-over before the backup: no extra files, an empty
+        # sysupgrade.conf. Everything else it asks reads as empty.
+        if "AUTOKEEP_DONE" in cmd:
+            return 0, "AUTOKEEP_DONE"
+        if "RD03V2_KEEP_EOF" in cmd:
+            return 0, "RD03V2_KEEP_EOF"
+        if "FETCH_OK" in cmd:
+            return 0, "FETCH_NONE"
         if "board_name" in cmd:
             return (self.board_rc, self.board if self.board_rc == 0 else "")
         if "rootfs_type" in cmd:
@@ -2379,6 +2387,55 @@ def _sysupgrade_command(launcher):
         if line.startswith("exec /sbin/sysupgrade"):
             return line
     return None
+
+
+def test_updater_key_auth():
+    print("\n[updater: --ssh-key-auth]")
+    saved = install.KEY_AUTH
+    gateway = [("192.168.31.1", "eth0")]
+    key = ["--interface", "eth0", "--host", "192.168.31.1", "--ssh-key-auth"]
+    try:
+        box = _UpdateBox(installed="v2.1.3", t_result="accepts")
+        with mock.patch.object(install, "require_host_tools") as tools:
+            r = _run_update(box, key + ["--config-backup", "KEY_ONLY_BACKUP"],
+                            routes=gateway)
+        check("key auth updates in place with the router as this host's gateway",
+              r.error is None and box.launched, r.error or "")
+        check("key auth asks for neither sshpass nor openssl",
+              tools.call_args_list == [mock.call(password=False, key=True)],
+              str(tools.call_args_list))
+        check("a config that turns off password login is no warning under key auth",
+              "turns off password login" not in r.output, r.output[-300:])
+        check("the final check goes back to the same address, on its interface",
+              (r.verified or {}).get("host") == "192.168.31.1"
+              and r.verified.get("host_iface") == "eth0", str(r.verified))
+
+        # Wi-Fi: the password rule refuses a gateway there, the key rule does not.
+        wifi = {"eth0": "wifi"}
+        install.KEY_AUTH = None
+        r = _run_update(_UpdateBox(installed="v2.1.3", t_result="accepts"),
+                        ["--interface", "eth0", "--host", "192.168.31.1"],
+                        transports=wifi, routes=gateway)
+        check("without key auth the router is still refused as a Wi-Fi gateway",
+              "default gateway" in (r.error or ""), r.error or "")
+        with mock.patch.object(install, "require_host_tools"):
+            r = _run_update(_UpdateBox(installed="v2.1.3", t_result="accepts"), key,
+                            transports=wifi, routes=gateway)
+        check("with key auth it is accepted, as nothing secret is offered",
+              r.error is None, r.error or "")
+
+        box = _UpdateBox(installed=None)          # no v2 stamp: the RAM route
+        with mock.patch.object(install, "require_host_tools") as tools:
+            r = _run_update(box, key, routes=gateway)
+        check("the RAM route under key auth says the installer gets the empty password",
+              "has no copy of your SSH key" in r.output and r.flash is not None,
+              r.error or r.output[-300:])
+        check("and asks for sshpass before the pivot",
+              mock.call() in tools.call_args_list, str(tools.call_args_list))
+        check("the RAM installer is offered only the empty password",
+              all(offer == [""] for offer in box.offered), str(box.offered))
+    finally:
+        install.KEY_AUTH = saved
 
 
 def test_updater_in_place():
@@ -3898,6 +3955,7 @@ def main():
     test_dtbread()
     test_updater()
     test_updater_in_place()
+    test_updater_key_auth()
     test_default_routes_fail_closed()
     test_update_verification()
     test_ubi9_reservation()

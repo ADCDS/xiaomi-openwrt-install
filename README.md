@@ -44,6 +44,27 @@ git clone https://github.com/ADCDS/xiaomi-openwrt-install.git
 cd xiaomi-openwrt-install
 ```
 
+### Verify an installed system with an SSH key
+
+If the web UI and manual key-based SSH login work, retry verification without
+flashing again:
+
+```sh
+python3 install.py --verify-only /path/to/install/resume.json \
+  --verify-interface en0 --verify-host 192.168.1.1 \
+  --verify-ssh-key ~/.ssh/id_ed25519
+```
+
+Replace the interface and private key path. Use `agent` instead of the path for
+ssh-agent or your default OpenSSH configuration. Load encrypted keys with
+`ssh-add` first. This mode requires system OpenSSH and a trusted host key for
+the exact target address: confirm it with a manual SSH login first. It checks
+the board, permanent partitions, release revision and recorded reboot, then
+updates the local resume manifest. These options require `--verify-only` and
+do not change authentication during flashing. If your `~/.ssh/config` names
+the router by an alias, add `--verify-ssh-alias NAME`; that Host must resolve
+to `--verify-host` and log in as `root`.
+
 ### macOS (experimental)
 
 The wired install and revert have been run end to end on macOS 14 (Sonoma)
@@ -77,6 +98,10 @@ Select the router-facing interface from that list, then run, for example,
 GUI from the same terminal to inherit PATH. Apple's LibreSSL does not support
 `openssl passwd -6`. Join Wi-Fi manually in System Settings; Linux `nmcli`
 automation is unavailable. This approach does not require paramiko or passlib.
+
+To update an installed system from a Mac with the SSH key in your
+`~/.ssh/config`, see [Update with your SSH key](#update-with-your-ssh-key).
+Key login needs neither `sshpass` nor OpenSSL 3.
 
 ### Windows 10/11
 
@@ -202,6 +227,59 @@ flashing twice.
 Use `updater.py` to update OpenWrt while keeping its settings. See the
 [update guide](docs/maintenance.md#update-an-installed-system) for commands,
 release selection, configuration backups, and recovery.
+
+Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
+
+- Files in `/overlay/upper` that no package owns and `sysupgrade -l` does not
+  list (for example your own scripts or apk keys) are shown, and after your
+  confirmation added to `/etc/sysupgrade.conf`. Generated and program files
+  are excluded (`AUTO_KEEP_EXCLUDES` in `updater.py`). Add paths by hand with
+  `--extra-keep PATH` (repeatable); turn the detection off with
+  `--no-auto-keep`.
+- The packages you installed are saved as `/etc/backup/world-old.txt`, which
+  goes into the backup. After a verified update, each missing package is
+  installed again with `apk add`, and a summary is written to
+  `reinstall-summary.txt` in the output directory. Skip this with
+  `--no-reinstall`; retry it later with `--reinstall-only`. See
+  [docs/packages.md](docs/packages.md) for kernel modules and packages such as
+  `dnsmasq-full`, which are not replaced automatically.
+- After the update, configuration files that have a newer default are shown.
+  For a reinstalled package's `*.apk-new` you choose, as with dpkg, to keep
+  your version, install the new one, or decide later. For an image package
+  whose default the new release changed, the upstream change is shown and
+  saved in `conffiles/`. See
+  [Configuration files after the update](docs/packages.md#configuration-files-after-the-update).
+
+The output directory also keeps `world.txt`, `sysupgrade-list.txt` and
+`overlay-full.tar.gz` for comparison. The archive is never restored.
+
+### Update with your SSH key
+
+If the router accepts only SSH keys, or you prefer them, log in with your own
+OpenSSH setup:
+
+```sh
+python3 updater.py --ssh-key-auth --host 192.168.31.1 --interface en0
+```
+
+- `ssh` and `scp` use your `~/.ssh/config` and `known_hosts`. No password is
+  sent, and a refused key is never followed by a password.
+- Log in once by hand (`ssh root@192.168.31.1`) to check and record the
+  router's host key. A missing or changed host key stops the update; check
+  the key yourself before you edit `known_hosts`.
+- Load a key that has a passphrase with `ssh-add` first. Use
+  `--ssh-identity PATH` to offer only one key.
+- If your config names the router by an alias, add `--ssh-alias NAME`.
+  `--host` stays the numeric address that the network checks use; the alias
+  must resolve to it and log in as `root`.
+- The router may be this computer's default gateway on `--interface`: no
+  password is sent, and the host key is checked strictly.
+- The settings must be kept (no `--no-keep-settings`), because the update is
+  verified by key afterwards.
+- The RAM installer route (`--via-ram-installer`, updates from v1.x) still
+  logs in to the RAM installer with its empty password, so it needs
+  `sshpass`. To continue an interrupted update from the RAM installer, run
+  without `--ssh-key-auth`.
 
 ## Web wizard
 

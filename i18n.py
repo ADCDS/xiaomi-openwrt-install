@@ -128,8 +128,8 @@ RU = {
         "sysupgrade уже был запущен; не запускайте этап прошивки повторно. Продолжите только проверкой: {command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Роутеры с входом только по ключам (PasswordAuth off) не поддерживаются: ничего не записано.",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} отклонил указанный пароль root. Укажите текущий через --root-password. Для роутера с входом только по ключам (PasswordAuth off) используйте --ssh-key-auth. Ничего не записано.",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "доступно только {available} КиБ памяти, а для {image} нужно {needed} КиБ. Освободите память, например остановив необязательные службы, и запустите снова.",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -290,8 +290,8 @@ ZH_CN = {
         "sysupgrade 已经启动；请勿再次运行刷机阶段。请改用只读的继续命令：{command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} 拒绝了所给的 root 密码。请用 --root-password 传入当前密码。不支持仅允许 SSH 密钥登录（PasswordAuth off）的路由器：未写入任何内容。",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} 拒绝了所给的 root 密码。请用 --root-password 传入当前密码。仅允许 SSH 密钥登录（PasswordAuth off）的路由器请使用 --ssh-key-auth。未写入任何内容。",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "当前仅剩 {available} KiB 内存，而 {image} 需要 {needed} KiB。请先释放一些内存（例如停止可以暂时停用的服务），然后重新运行。",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -452,8 +452,8 @@ PT_BR = {
         "o sysupgrade já foi iniciado; não execute a etapa de gravação novamente. Use a continuação somente leitura: {command}",
 
     # ---- updater.py ---------------------------------------------------------
-    "{host} refused the root password offered. Pass the current one with --root-password. A router set to SSH keys only (PasswordAuth off) is not supported: nothing was written.":
-        "{host} recusou a senha de root informada. Passe a atual com --root-password. Um roteador configurado para apenas chaves SSH (PasswordAuth off) não é suportado: nada foi gravado.",
+    "{host} refused the root password offered. Pass the current one with --root-password. For a router set to SSH keys only (PasswordAuth off), use --ssh-key-auth. Nothing was written.":
+        "{host} recusou a senha de root informada. Passe a atual com --root-password. Para um roteador configurado para apenas chaves SSH (PasswordAuth off), use --ssh-key-auth. Nada foi gravado.",
     "only {available} KiB of memory is available and {image} needs {needed} KiB. Free some first, for example by stopping services you can spare, then run this again.":
         "só há {available} KiB de memória disponível e {image} precisa de {needed} KiB. Libere um pouco primeiro, por exemplo parando serviços dispensáveis, e execute isto de novo.",
     "\n=== stage 3: flash (sysupgrade from the installed system) ===":
@@ -513,6 +513,198 @@ PT_BR = {
     "[!] stock did not answer on {host} within 7 minutes. It may still be booting; check that this host has an address on that subnet.":
         "[!] o firmware de fábrica não respondeu em {host} dentro de 7 minutos. Ele ainda pode estar inicializando; verifique se este computador tem um endereço nessa sub-rede.",
 }
+
+# Read-only SSH key verification.
+ZH_CN.update({
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "密钥验证失败：{error}。请检查密钥或 ssh-agent，并先手动 SSH 登录同一地址以确认并信任主机密钥。",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key 和 --verify-host 必须与 --verify-only 一起使用",
+    "--verify-host requires --verify-ssh-key": "--verify-host 必须与 --verify-ssh-key 一起使用",
+    "Key verification requires OpenSSH (ssh)": "密钥验证需要安装 OpenSSH（ssh）",
+    "SSH private key file does not exist": "SSH 私钥文件不存在",
+    "--verify-host must be a numeric IP address": "--verify-host 必须是数字形式的 IP 地址",
+})
+RU.update({
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Ошибка проверки с ключом: {error}. Проверьте ключ/ssh-agent и сначала подтвердите ключ хоста, подключившись вручную по SSH к этому же адресу.",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key и --verify-host требуют --verify-only",
+    "--verify-host requires --verify-ssh-key": "--verify-host требует --verify-ssh-key",
+    "Key verification requires OpenSSH (ssh)": "Для проверки с ключом нужен OpenSSH (ssh)",
+    "SSH private key file does not exist": "Файл закрытого ключа SSH не существует",
+    "--verify-host must be a numeric IP address": "--verify-host должен быть числовым IP-адресом",
+})
+PT_BR.update({
+    "Key verification failed: {error}. Check the key/ssh-agent and trust this exact address with a manual SSH login first.": "Falha na verificação com chave: {error}. Confira a chave/ssh-agent e confirme primeiro a chave do host conectando-se manualmente por SSH a esse mesmo endereço.",
+    "--verify-ssh-key and --verify-host require --verify-only": "--verify-ssh-key e --verify-host exigem --verify-only",
+    "--verify-host requires --verify-ssh-key": "--verify-host exige --verify-ssh-key",
+    "Key verification requires OpenSSH (ssh)": "A verificação com chave exige OpenSSH (ssh)",
+    "SSH private key file does not exist": "O arquivo da chave privada SSH não existe",
+    "--verify-host must be a numeric IP address": "--verify-host deve ser um endereço IP numérico",
+})
+
+# updater.py --ssh-key-auth, the carry-over of extra files, and the package
+# reinstall.
+ZH_CN.update({
+    'SSH key login to {host} failed: {output}': '使用 SSH 密钥登录 {host} 失败：{output}',
+    'scp with the SSH key to {host} failed: {output}': '使用 SSH 密钥对 {host} 执行 scp 失败：{output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": '{host} 的 SSH 主机密钥与 known_hosts 中记录的不一致，或 known_hosts 中没有它的记录。没有向它发送任何内容。请先自行核对路由器的主机密钥，确认后再更新 ~/.ssh/known_hosts；本工具不会放宽这项检查。\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] {host} 上的验证命令失败：{error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias 必须与 --verify-host 一起使用',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'SSH 别名 {alias} 连接的是 {resolved}，而不是 {host}；尚未连接任何设备',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'SSH 别名 {alias} 以 {user} 而不是 root 登录；请在 ~/.ssh/config 中为它设置 "User root"',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} 未接受 SSH 密钥登录，也不会改用任何密码重试：{output}\n请先手动运行 `ssh`，检查密钥、ssh-agent（ssh-add）和 ~/.ssh/config。如果路由器处于 RAM 安装器中（更新曾被中断），其中没有你的公钥：请去掉 --ssh-key-auth 后重新运行。未写入任何内容。',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity 和 --ssh-alias 必须与 --ssh-key-auth 一起使用',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth 不会发送任何密码；请去掉 --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth 要求保留设置：全新安装会删除你的公钥和路由器的主机密钥，更新后就无法用密钥验证',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias 需要用 --host 给出路由器的数字地址，网络检查使用的是这个地址',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH：通过 OpenSSH 和 ~/.ssh/config 用密钥登录已安装的系统；不发送任何密码，known_hosts 中必须已有路由器的主机密钥',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] 本次更新要经过 RAM 安装器，其中没有你的 SSH 公钥。连接它时使用其空的 root 密码，与不加 --ssh-key-auth 时相同（因此需要 sshpass）；最终验证会再次用密钥登录 {host}。',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] 更新已完成，但重装软件包中途停止：{error}。可加上 --reinstall-only 重新运行以重试。',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep 需要路由器上的绝对路径，收到的是 {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper（{size} KiB）超出路由器的可用内存；未保存 overlay-full.tar.gz',
+    '\n=== carry-over: extra files and packages ===': '\n=== 迁移：额外文件和软件包 ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] 不属于任何软件包、sysupgrade 也不会保留的文件：',
+    'add these {count} path(s) to {conf}?': '将这 {count} 个路径追加到 {conf}？',
+    '[c] no extra files found that sysupgrade would drop': '[c] 没有发现 sysupgrade 会丢弃的额外文件',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] 更新后需重装 {count} 个软件包 -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] 最多等待 {seconds} 秒，直到路由器能访问软件包仓库',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== 软件包：重装更新后缺失的软件包 ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] 路由器上和 {outdir} 中都没有软件包列表；无需重装',
+    '[p] the package list is empty; nothing to reinstall': '[p] 软件包列表为空；无需重装',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] 内核模块（kmod-*）只能从当前固件对应的仓库安装；仓库里没有的 kmod 会安装失败，并列在下方',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] 软件包：已安装 {installed} 个，原已存在 {present} 个，跳过 {skipped} 个，失败 {failed} 个 -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] 未自动重装，请手动处理：{name}（{why}）',
+    '[p] failed: {name} ({why})': '[p] 失败：{name}（{why}）',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] 安装失败的 kmod 不在当前固件对应的仓库中；不要安装为其他内核编译的版本',
+})
+RU.update({
+    'SSH key login to {host} failed: {output}': 'Не удалось войти на {host} по SSH-ключу: {output}',
+    'scp with the SSH key to {host} failed: {output}': 'Ошибка scp с SSH-ключом для {host}: {output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": 'Ключ хоста SSH {host} не совпадает с записанным в known_hosts, или записи нет. Ему ничего не отправлено. Сами проверьте ключ роутера и только потом обновите ~/.ssh/known_hosts; эта программа не ослабляет проверку.\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] Команды проверки на {host} завершились с ошибкой: {error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias требует --verify-host',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'SSH-псевдоним {alias} подключается к {resolved}, а не к {host}; ни к чему не подключались',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'SSH-псевдоним {alias} входит как {user}, а не root; укажите для него "User root" в ~/.ssh/config',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} не принял вход по SSH-ключу, и пароль вместо него не пробуется: {output}\nСначала проверьте ключ, ssh-agent (ssh-add) и ~/.ssh/config, подключившись вручную через `ssh`. Если роутер в RAM-установщике (прерванное обновление), вашего ключа там нет: запустите снова без --ssh-key-auth. Ничего не записано.',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity и --ssh-alias требуют --ssh-key-auth',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth не отправляет пароль; уберите --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth требует сохранить настройки: чистая установка удалит ваш открытый ключ и ключ хоста роутера, и обновление нельзя будет проверить по ключу',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias требует --host с числовым адресом роутера, который используют сетевые проверки',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: вход в установленную систему по ключу через OpenSSH и ~/.ssh/config; пароль не отправляется, ключ хоста роутера уже должен быть в known_hosts',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Это обновление идёт через RAM-установщик, в котором нет вашего SSH-ключа. К нему подключаются с его пустым паролем root, как без --ssh-key-auth (поэтому нужен sshpass); итоговая проверка снова входит на {host} по ключу.',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] Обновление завершено, но переустановка пакетов остановилась: {error}. Чтобы повторить, запустите снова с --reinstall-only.',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep требует абсолютный путь на роутере, получено {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper ({size} КиБ) не помещается в свободную память роутера; overlay-full.tar.gz не сохранён',
+    '\n=== carry-over: extra files and packages ===': '\n=== перенос: дополнительные файлы и пакеты ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] файлы, не принадлежащие ни одному пакету и не сохраняемые sysupgrade:',
+    'add these {count} path(s) to {conf}?': 'Добавить эти пути ({count}) в {conf}?',
+    '[c] no extra files found that sysupgrade would drop': '[c] дополнительных файлов, которые sysupgrade отбросил бы, не найдено',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] пакетов для переустановки после обновления: {count} -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] ожидание до {seconds} с, пока роутер не получит доступ к репозиториям пакетов',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== пакеты: переустановка того, что убрало обновление ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] списка пакетов нет ни на роутере, ни в {outdir}; переустанавливать нечего',
+    '[p] the package list is empty; nothing to reinstall': '[p] список пакетов пуст; переустанавливать нечего',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] модули ядра (kmod-*) ставятся только из репозитория, собранного для работающей прошивки; kmod, которого там нет, не установится и будет указан ниже',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] пакеты: установлено {installed}, уже были {present}, пропущено {skipped}, с ошибкой {failed} -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] не переустановлен, сделайте вручную: {name} ({why})',
+    '[p] failed: {name} ({why})': '[p] ошибка: {name} ({why})',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] не установившегося kmod нет в репозитории работающей прошивки; не ставьте сборку для другого ядра',
+})
+PT_BR.update({
+    'SSH key login to {host} failed: {output}': 'Falha no login com chave SSH em {host}: {output}',
+    'scp with the SSH key to {host} failed: {output}': 'Falha no scp com chave SSH para {host}: {output}',
+    "the SSH host key of {host} is not the one known_hosts holds for it, or it has none there. Nothing was sent to it. Check the router's key yourself and update ~/.ssh/known_hosts only then; this tool does not relax the check.\n{output}": 'A chave de host SSH de {host} não é a que o known_hosts tem para ele, ou não há nenhuma lá. Nada foi enviado a ele. Confira você mesmo a chave do roteador e só então atualize ~/.ssh/known_hosts; esta ferramenta não relaxa a verificação.\n{output}',
+    '[3] verification commands failed on {host}: {error}': '[3] Os comandos de verificação falharam em {host}: {error}',
+    '--verify-ssh-alias requires --verify-host': '--verify-ssh-alias exige --verify-host',
+    'the SSH alias {alias} connects to {resolved}, not {host}; nothing was contacted': 'O alias SSH {alias} conecta a {resolved}, não a {host}; nada foi contatado',
+    'the SSH alias {alias} logs in as {user}, not root; set "User root" for it in ~/.ssh/config': 'O alias SSH {alias} entra como {user}, não como root; defina "User root" para ele em ~/.ssh/config',
+    '{host} did not accept the SSH key login, and no password is tried in its place: {output}\nCheck the key, ssh-agent (ssh-add) and ~/.ssh/config with a manual `ssh` first. If the router is in the RAM installer (an interrupted update), it has no copy of your key: run this again without --ssh-key-auth. Nothing was written.': '{host} não aceitou o login com chave SSH, e nenhuma senha é tentada no lugar: {output}\nConfira antes a chave, o ssh-agent (ssh-add) e o ~/.ssh/config com um `ssh` manual. Se o roteador estiver no instalador em RAM (uma atualização interrompida), ele não tem cópia da sua chave: execute de novo sem --ssh-key-auth. Nada foi gravado.',
+    '--ssh-identity and --ssh-alias require --ssh-key-auth': '--ssh-identity e --ssh-alias exigem --ssh-key-auth',
+    '--ssh-key-auth sends no password; drop --root-password': '--ssh-key-auth não envia senha; remova --root-password',
+    "--ssh-key-auth needs the settings kept: a clean install removes your public key and the router's host key, so the update could not be verified by key": '--ssh-key-auth exige manter as configurações: uma instalação limpa remove sua chave pública e a chave de host do roteador, e a atualização não poderia ser verificada por chave',
+    "--ssh-alias requires --host with the router's numeric address, which the network checks use": '--ssh-alias exige --host com o endereço numérico do roteador, usado pelas verificações de rede',
+    "[*] SSH: key login to the installed system through OpenSSH and ~/.ssh/config; no password is sent, and known_hosts must already hold the router's host key": '[*] SSH: login com chave no sistema instalado via OpenSSH e ~/.ssh/config; nenhuma senha é enviada, e o known_hosts já deve ter a chave de host do roteador',
+    '[!] this update goes through the RAM installer, which has no copy of your SSH key. It is reached with its empty root password, as without --ssh-key-auth (so sshpass is needed); the final check logs in to {host} by key again.': '[!] Esta atualização passa pelo instalador em RAM, que não tem cópia da sua chave SSH. Ele é acessado com sua senha de root vazia, como sem --ssh-key-auth (por isso o sshpass é necessário); a verificação final entra em {host} com a chave de novo.',
+    '[!] the update is complete, but reinstalling packages stopped: {error}. Run this again with --reinstall-only to retry.': '[!] A atualização terminou, mas a reinstalação de pacotes parou: {error}. Execute de novo com --reinstall-only para tentar outra vez.',
+    '--extra-keep needs an absolute path on the router, got {path!r}': '--extra-keep exige um caminho absoluto no roteador, recebido {path!r}',
+    "[c] /overlay/upper ({size} KiB) does not fit in the router's free memory; overlay-full.tar.gz was not saved": '[c] /overlay/upper ({size} KiB) não cabe na memória livre do roteador; overlay-full.tar.gz não foi salvo',
+    '\n=== carry-over: extra files and packages ===': '\n=== transferência: arquivos extras e pacotes ===',
+    '[c] files no package owns and sysupgrade would not keep:': '[c] arquivos que nenhum pacote possui e que o sysupgrade não manteria:',
+    'add these {count} path(s) to {conf}?': 'adicionar estes {count} caminho(s) a {conf}?',
+    '[c] no extra files found that sysupgrade would drop': '[c] nenhum arquivo extra que o sysupgrade descartaria foi encontrado',
+    '[c] {count} package(s) to reinstall after the update -> {path}': '[c] {count} pacote(s) para reinstalar após a atualização -> {path}',
+    '[p] waiting up to {seconds}s for the router to reach its package repositories': '[p] aguardando até {seconds}s até o roteador alcançar seus repositórios de pacotes',
+    '\n=== packages: reinstall what the update dropped ===': '\n=== pacotes: reinstalar o que a atualização removeu ===',
+    '[p] no package list on the router or in {outdir}; nothing to reinstall': '[p] não há lista de pacotes no roteador nem em {outdir}; nada a reinstalar',
+    '[p] the package list is empty; nothing to reinstall': '[p] a lista de pacotes está vazia; nada a reinstalar',
+    '[p] kernel modules (kmod-*) install only from the repository built for the running firmware; a kmod that it lacks fails and is listed below': '[p] módulos do kernel (kmod-*) só se instalam do repositório feito para o firmware em execução; um kmod que falte lá falha e é listado abaixo',
+    '[p] packages: {installed} installed, {present} already present, {skipped} skipped, {failed} failed -> {path}': '[p] pacotes: {installed} instalados, {present} já presentes, {skipped} ignorados, {failed} com falha -> {path}',
+    '[p] not reinstalled, do it by hand: {name} ({why})': '[p] não reinstalado, faça à mão: {name} ({why})',
+    '[p] failed: {name} ({why})': '[p] falhou: {name} ({why})',
+    '[p] a kmod that failed is not in the repository of the running firmware; do not install one built for another kernel': '[p] um kmod que falhou não está no repositório do firmware em execução; não instale um feito para outro kernel',
+})
+
+# updater.py: reviewing configuration files after the update.
+ZH_CN.update({
+    '\n=== configuration files: new package versions ===': '\n=== 配置文件：软件包带来的新版本 ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] 有 {count} 个重装的软件包带来了你改过的配置文件的新版本；当前使用的仍是你的版本',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}：保留你的版本（k）、换成软件包的新版本（n），还是稍后决定（d）？[k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] 已保留你的 {path}；软件包的版本已删除',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] 已换成软件包的 {path}；你的版本保存在 {old}。请重启使用它的服务，或重启路由器。',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] 留待稍后处理：{path} 和 {new}；差异见 {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== 配置文件：上游改动过的镜像默认版本 ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] 新版本没有改动你改过的那些文件的默认版本；你的版本保持不变',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] 新版本改动了 {count} 个你改过的文件的默认版本。你的版本已恢复并在使用中；请从上游的改动里挑出需要的内容加进去：',
+    '[r] the new release no longer ships {path}': '[r] 新版本不再包含 {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}：上游的改动见 {diff}',
+})
+RU.update({
+    '\n=== configuration files: new package versions ===': '\n=== файлы настроек: новые версии из пакетов ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] переустановленные пакеты ({count}) принесли новую версию изменённого вами файла настроек; используется ваша версия',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}: оставить вашу версию (k), установить новую из пакета (n) или решить позже (d)? [k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] ваш {path} оставлен; версия из пакета удалена',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] установлен {path} из пакета; ваша версия сохранена в {old}. Перезапустите службу, которая его читает, или перезагрузите роутер.',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] отложено: {path} и {new}; различия в {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== файлы настроек: значения по умолчанию, изменённые в образе ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] новый выпуск не изменил значения по умолчанию ни одного из изменённых вами файлов; ваши версии остаются как есть',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] новый выпуск изменил значения по умолчанию у изменённых вами файлов ({count}). Ваши версии восстановлены и используются; перенесите нужное из изменений образа:',
+    '[r] the new release no longer ships {path}': '[r] в новом выпуске больше нет {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}: изменения образа в {diff}',
+})
+PT_BR.update({
+    '\n=== configuration files: new package versions ===': '\n=== arquivos de configuração: novas versões dos pacotes ===',
+    '[p] {count} reinstalled package(s) brought a new version of a configuration file you changed; yours is in use': '[p] {count} pacote(s) reinstalado(s) trouxe(ram) uma nova versão de um arquivo de configuração que você alterou; a sua está em uso',
+    "[?] {path}: keep your version (k), install the package's new one (n), or decide later (d)? [k/n/d] ": '[?] {path}: manter a sua versão (k), instalar a nova do pacote (n) ou decidir depois (d)? [k/n/d] ',
+    "[p] kept your {path}; the package's version was removed": '[p] o seu {path} foi mantido; a versão do pacote foi removida',
+    "[p] installed the package's {path}; yours is in {old}. Restart the service that reads it, or reboot.": '[p] o {path} do pacote foi instalado; o seu está em {old}. Reinicie o serviço que o lê, ou reinicie o roteador.',
+    '[p] left for later: {path} and {new}; the difference is in {diff}': '[p] deixado para depois: {path} e {new}; a diferença está em {diff}',
+    '\n=== configuration files: image defaults that changed upstream ===': '\n=== arquivos de configuração: padrões da imagem alterados pelo upstream ===',
+    '[r] the new release changed none of the defaults of the files you changed; your versions stay as they are': '[r] a nova versão não alterou o padrão de nenhum dos arquivos que você mudou; as suas versões ficam como estão',
+    '[r] the new release changed the default of {count} file(s) that you changed. Yours were restored and are in use; carry over what you need from the upstream change:': '[r] a nova versão alterou o padrão de {count} arquivo(s) que você mudou. Os seus foram restaurados e estão em uso; leve deles o que precisar da mudança do upstream:',
+    '[r] the new release no longer ships {path}': '[r] a nova versão não inclui mais {path}',
+    '[r] {path}: upstream change in {diff}': '[r] {path}: mudança do upstream em {diff}',
+})
+
+# updater.py: the temporary resolver while packages reinstall.
+ZH_CN.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] dnsmasq 把 DNS 转发给路由器本机上的解析器（{forwarders}）。如果它来自你自己安装的软件包，更新后在该软件包重装之前，路由器将无法解析域名；届时重装步骤会让路由器自身临时使用 WAN 口的 DNS 服务器。',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] 路由器无法解析 {name}，WAN 口的 DNS 服务器也都无法解析。请先修复路由器的 DNS，然后加上 --reinstall-only 重新运行。',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] 路由器无法解析 {name}。恢复的 dnsmasq 配置把 DNS 转发给 {forwarders}，它很可能来自一个尚未重装的软件包。在重装结束之前，路由器自身临时使用 WAN 口的 DNS 服务器（{servers}）；dnsmasq 和局域网的配置不变。',
+    "[p] the router's own resolver is back to its configuration": '[p] 路由器自身的 DNS 解析设置已恢复原样',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] 无法恢复路由器上的 {conf}（{error}）；请在路由器上重启 dnsmasq（service dnsmasq restart）以重新生成它',
+})
+RU.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] dnsmasq пересылает DNS резолверу на самом роутере ({forwarders}). Если его предоставляет установленный вами пакет, после обновления роутер не сможет разрешать имена, пока пакет не переустановлен; тогда на время переустановки сам роутер будет использовать DNS-серверы WAN.',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] роутер не может разрешить {name}, и ни один DNS-сервер WAN тоже не может. Исправьте DNS роутера и запустите снова с --reinstall-only.',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] роутер не может разрешить {name}. Восстановленная конфигурация dnsmasq пересылает DNS на {forwarders}, вероятно, резолвер из ещё не переустановленного пакета. До конца переустановки сам роутер использует DNS-серверы WAN ({servers}); dnsmasq и LAN не меняются.',
+    "[p] the router's own resolver is back to its configuration": '[p] собственный резолвер роутера возвращён к его настройкам',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] не удалось восстановить {conf} на роутере ({error}); перезапустите там dnsmasq (service dnsmasq restart), чтобы пересоздать его',
+})
+PT_BR.update({
+    "[c] dnsmasq forwards DNS to a resolver on the router itself ({forwarders}). If a package you installed provides it, the router cannot resolve names after the update until that package is reinstalled; the reinstall then uses the WAN's DNS servers for the router itself.": '[c] O dnsmasq encaminha o DNS para um resolvedor no próprio roteador ({forwarders}). Se ele vier de um pacote que você instalou, após a atualização o roteador não conseguirá resolver nomes até esse pacote ser reinstalado; a reinstalação então usa os servidores DNS da WAN para o próprio roteador.',
+    "[p] the router cannot resolve {name}, and none of the WAN's DNS servers can either. Fix its DNS, then run this again with --reinstall-only.": '[p] o roteador não consegue resolver {name}, e nenhum servidor DNS da WAN consegue. Corrija o DNS do roteador e execute de novo com --reinstall-only.',
+    "[p] the router cannot resolve {name}. The restored dnsmasq config forwards to {forwarders}, probably a resolver from a package that is not reinstalled yet. Until the reinstall ends, the router itself uses the WAN's DNS servers ({servers}); dnsmasq and the LAN are unchanged.": '[p] o roteador não consegue resolver {name}. A configuração restaurada do dnsmasq encaminha para {forwarders}, provavelmente um resolvedor de um pacote ainda não reinstalado. Até o fim da reinstalação, o próprio roteador usa os servidores DNS da WAN ({servers}); o dnsmasq e a LAN não mudam.',
+    "[p] the router's own resolver is back to its configuration": '[p] o resolvedor do próprio roteador voltou à sua configuração',
+    '[!] could not restore {conf} on the router ({error}); restart dnsmasq there (service dnsmasq restart) to rebuild it': '[!] não foi possível restaurar {conf} no roteador ({error}); reinicie o dnsmasq lá (service dnsmasq restart) para recriá-lo',
+})
 
 CATALOGUES = {"ru": RU, "zh-CN": ZH_CN, "pt-BR": PT_BR}
 

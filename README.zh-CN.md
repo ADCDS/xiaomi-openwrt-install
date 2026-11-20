@@ -38,6 +38,25 @@ cd xiaomi-openwrt-install
 sudo apt install sshpass openssl
 ```
 
+### 刷写后使用 SSH 密钥验证
+
+若网页可访问且手动密钥 SSH 登录成功，可只重新验证，不重复刷写：
+
+```sh
+python3 install.py --verify-only /实际安装目录/resume.json \
+  --verify-interface en0 --verify-host 192.168.1.1 \
+  --verify-ssh-key ~/.ssh/id_ed25519
+```
+
+将接口和私钥路径替换为实际值。使用 ssh-agent 或默认 SSH 配置时，可将
+私钥路径替换为 `agent`。带口令的私钥请先用 `ssh-add` 加载。
+此模式使用系统 OpenSSH，只允许公钥认证，并严格检查已知主机密钥；请先
+手动 SSH 登录同一 IP 地址并确认主机身份。它仍检查设备型号、永久分区、
+固件版本及记录的重启信息，成功后更新本地 `resume.json`。
+这些选项仅用于 `--verify-only`，不改变刷写阶段的认证方式。
+如果 `~/.ssh/config` 用别名指代路由器，请加上 `--verify-ssh-alias 别名`；
+该 Host 必须解析到 `--verify-host` 的地址，并以 `root` 登录。
+
 ### macOS（实验性）
 
 有线安装与恢复已在 macOS 14（Sonoma）对 AX3000T 实机完整验证；macOS 支持仍为实验性，
@@ -70,6 +89,9 @@ python3 install.py --list-interfaces
 GUI 必须从同一终端启动以继承 PATH。系统自带 LibreSSL 不支持所需的
 `openssl passwd -6`。Wi-Fi 请在 macOS 系统设置中手动连接；不支持 Linux
 的 `nmcli` 自动连接。此方案不需要 paramiko 或 passlib。
+
+在 Mac 上使用 `~/.ssh/config` 中的 SSH 密钥更新已安装的系统，见
+[使用 SSH 密钥更新](#使用-ssh-密钥更新)。密钥登录不需要 `sshpass` 和 OpenSSL 3。
 
 ### Windows 10/11
 
@@ -182,6 +204,45 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 ## 更新已安装的系统
 
 `updater.py` 默认保留现有设置。详见[更新 OpenWrt 以及继续中断的更新](docs/maintenance.zh-CN.md#更新已安装的系统)。
+
+备份之前，`updater.py` 还会保留 `sysupgrade` 默认会丢弃的内容：
+
+- `/overlay/upper` 中不属于任何软件包、也不在 `sysupgrade -l` 列表里的文件
+  （例如自己的脚本或 apk 密钥）会列出来，确认后追加到 `/etc/sysupgrade.conf`。
+  自动生成的文件和程序文件不在此列（见 `updater.py` 中的 `AUTO_KEEP_EXCLUDES`）。
+  可用 `--extra-keep 路径`（可重复）手动追加，用 `--no-auto-keep` 关闭自动检测。
+- 你安装的软件包会记录在 `/etc/backup/world-old.txt`，随配置一起备份。
+  更新并验证成功后，缺少的软件包会逐个用 `apk add` 重新安装，结果汇总写入输出目录的
+  `reinstall-summary.txt`。用 `--no-reinstall` 跳过这一步，之后可用
+  `--reinstall-only` 重试。内核模块以及 `dnsmasq-full` 等不会自动替换的软件包，见
+  [docs/packages.md](docs/packages.md)。
+- 更新后会列出有新默认版本的配置文件。重装的软件包留下的 `*.apk-new`，会像 dpkg 一样
+  让你选择保留自己的版本、换成新版本，还是稍后决定。镜像自带软件包的默认版本被新版本改动时，
+  会显示上游的改动，并保存到输出目录的 `conffiles/`。详见
+  [Configuration files after the update](docs/packages.md#configuration-files-after-the-update)。
+
+输出目录还会保存 `world.txt`、`sysupgrade-list.txt` 和 `overlay-full.tar.gz`
+供对照，其中的归档不会用于恢复。
+
+### 使用 SSH 密钥更新
+
+如果路由器只允许 SSH 密钥登录，或者你更想用密钥，可以使用自己的 OpenSSH 配置：
+
+```sh
+python3 updater.py --ssh-key-auth --host 192.168.31.1 --interface en0
+```
+
+- `ssh` 和 `scp` 使用你的 `~/.ssh/config` 和 `known_hosts`。不会发送任何密码，
+  密钥被拒绝后也不会改用密码。
+- 请先手动登录一次（`ssh root@192.168.31.1`），核对并记录路由器的主机密钥。
+  主机密钥缺失或改变时更新会中止；请自己核对密钥后再修改 `known_hosts`。
+- 带口令的私钥请先用 `ssh-add` 加载。用 `--ssh-identity 路径` 只使用指定的私钥。
+- 如果配置里用别名指代路由器，请加上 `--ssh-alias 别名`。`--host` 仍是网络检查使用的
+  数字地址；别名必须解析到这个地址，并以 `root` 登录。
+- 路由器可以是本机在 `--interface` 上的默认网关：不会发送密码，主机密钥也会严格校验。
+- 必须保留设置（不能用 `--no-keep-settings`），因为更新后要用密钥验证。
+- RAM 安装器路线（`--via-ram-installer`、从 v1.x 更新）登录 RAM 安装器时仍使用其空密码，
+  因此需要 `sshpass`。要从 RAM 安装器继续中断的更新，请不加 `--ssh-key-auth` 运行。
 
 ## 网页向导
 
