@@ -205,6 +205,11 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 
 По умолчанию `updater.py` сохраняет настройки. См. [обновление OpenWrt и продолжение прерванного обновления](docs/maintenance.ru.md#обновление-установленной-системы).
 
+После проверенного обновления `updater.py` снова ставит пакеты, которые вы
+устанавливали сами (`--no-reinstall` отключает это). Файлы, не принадлежащие ни
+одному пакету, он ищет только с `--auto-keep`. Подробнее (на английском):
+[docs/packages.md](docs/packages.md).
+
 ## Веб-мастер
 
 ```sh
