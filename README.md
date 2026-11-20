@@ -230,12 +230,13 @@ release selection, configuration backups, and recovery.
 
 Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
 
-- Files in `/overlay/upper` that no package owns and `sysupgrade -l` does not
-  list (for example your own scripts or apk keys) are shown, and after your
-  confirmation added to `/etc/sysupgrade.conf`. Generated and program files
-  are excluded (`AUTO_KEEP_EXCLUDES` in `updater.py`). Add paths by hand with
-  `--extra-keep PATH` (repeatable); turn the detection off with
-  `--no-auto-keep`.
+- With `--auto-keep`, files in `/overlay/upper` that no package owns and
+  `sysupgrade -l` does not list (for example your own scripts or apk keys) are
+  shown, and after your confirmation added to `/etc/sysupgrade.conf`. If you
+  decline, they are left out and the update goes on. Generated and program
+  files are excluded (`AUTO_KEEP_EXCLUDES` in `updater.py`). The scan is off by
+  default because it is slow on a large overlay. Add paths by hand with
+  `--extra-keep PATH` (repeatable).
 - The packages you installed are saved as `/etc/backup/world-old.txt`, which
   goes into the backup. After a verified update, each missing package is
   installed again with `apk add`, and a summary is written to
@@ -245,10 +246,15 @@ Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
   `dnsmasq-full`, which are not replaced automatically.
 - After the update, configuration files that have a newer default are shown.
   For a reinstalled package's `*.apk-new` you choose, as with dpkg, to keep
-  your version, install the new one, or decide later. For an image package
+  your version, install the new one, or decide later. That diff is shown on
+  the terminal only, never in the log, since your file may hold passwords. For an image package
   whose default the new release changed, the upstream change is shown and
   saved in `conffiles/`. See
   [Configuration files after the update](docs/packages.md#configuration-files-after-the-update).
+
+If the update stops before the new release is written (you decline, or the
+image is rejected), the changes to `/etc/sysupgrade.conf` and `/etc/backup/`
+are put back.
 
 The output directory also keeps `world.txt`, `sysupgrade-list.txt` and
 `overlay-full.tar.gz` for comparison. The archive is never restored.

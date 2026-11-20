@@ -207,19 +207,23 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
 
 备份之前，`updater.py` 还会保留 `sysupgrade` 默认会丢弃的内容：
 
-- `/overlay/upper` 中不属于任何软件包、也不在 `sysupgrade -l` 列表里的文件
-  （例如自己的脚本或 apk 密钥）会列出来，确认后追加到 `/etc/sysupgrade.conf`。
-  自动生成的文件和程序文件不在此列（见 `updater.py` 中的 `AUTO_KEEP_EXCLUDES`）。
-  可用 `--extra-keep 路径`（可重复）手动追加，用 `--no-auto-keep` 关闭自动检测。
+- 加上 `--auto-keep` 时，`/overlay/upper` 中不属于任何软件包、也不在 `sysupgrade -l`
+  列表里的文件（例如自己的脚本或 apk 密钥）会列出来，确认后追加到 `/etc/sysupgrade.conf`；
+  拒绝则不追加，更新照常继续。自动生成的文件和程序文件不在此列（见 `updater.py` 中的
+  `AUTO_KEEP_EXCLUDES`）。overlay 较大时这项扫描很慢，所以默认关闭。
+  可用 `--extra-keep 路径`（可重复）手动追加。
 - 你安装的软件包会记录在 `/etc/backup/world-old.txt`，随配置一起备份。
   更新并验证成功后，缺少的软件包会逐个用 `apk add` 重新安装，结果汇总写入输出目录的
   `reinstall-summary.txt`。用 `--no-reinstall` 跳过这一步，之后可用
   `--reinstall-only` 重试。内核模块以及 `dnsmasq-full` 等不会自动替换的软件包，见
   [docs/packages.md](docs/packages.md)。
 - 更新后会列出有新默认版本的配置文件。重装的软件包留下的 `*.apk-new`，会像 dpkg 一样
-  让你选择保留自己的版本、换成新版本，还是稍后决定。镜像自带软件包的默认版本被新版本改动时，
+  让你选择保留自己的版本、换成新版本，还是稍后决定。这份差异只显示在终端上，不会写入日志，因为你的文件里可能有密码。镜像自带软件包的默认版本被新版本改动时，
   会显示上游的改动，并保存到输出目录的 `conffiles/`。详见
   [Configuration files after the update](docs/packages.md#configuration-files-after-the-update)。
+
+如果更新在写入新版本之前停止（例如你拒绝确认，或镜像被拒绝），对 `/etc/sysupgrade.conf`
+和 `/etc/backup/` 的这些修改会被撤销。
 
 输出目录还会保存 `world.txt`、`sysupgrade-list.txt` 和 `overlay-full.tar.gz`
 供对照，其中的归档不会用于恢复。

@@ -2184,6 +2184,11 @@ class _UpdateBox:
             return 0, "AUTOKEEP_DONE"
         if "RD03V2_KEEP_EOF" in cmd:
             return 0, "RD03V2_KEEP_EOF"
+        # CarryoverUndo: the copy taken before those writes, and putting it back.
+        if "UNDO_READY" in cmd:
+            return 0, "UNDO_READY"
+        if "echo UNDONE" in cmd:
+            return 0, "UNDONE"
         if "FETCH_OK" in cmd:
             return 0, "FETCH_NONE"
         if "board_name" in cmd:
@@ -3312,7 +3317,9 @@ def test_gui_strings():
     used |= set(re.findall(r'"([a-z_0-9]+(?:\.[a-z_0-9]+)+)"', script)) - {"strings.json"}
     used |= {f"stage.{s}" for s in runner.STAGES}
     used |= {f"prereq.{c['id']}" for c in prereqs.collect()["checks"]}
-    used |= {"prereq.paramiko", "prereq.passlib", "prereq.powershell"}
+    # collect() lists only this host's checks: the Windows ones exist only
+    # there, and macOS drops nmcli (gui/prereqs.py).
+    used |= {"prereq.paramiko", "prereq.passlib", "prereq.powershell", "prereq.nmcli"}
     used |= {f"prereq.platform.{p}" for p in ("linux", "wsl", "windows", "macos", "other")}
     for mode in ("install", "update", "revert"):
         used |= {f"config.lede.{mode}", f"review.action.{mode}", f"mode.{mode}.h"}

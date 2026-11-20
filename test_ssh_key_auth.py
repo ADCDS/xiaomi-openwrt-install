@@ -54,6 +54,40 @@ class CommandTests(KeyAuthCase):
         self.assertEqual(argv[-2:], ["root@192.168.31.1", "echo up"])
         self.assertIsNone(run.call_args.kwargs.get("env"))
 
+    def test_output_stays_clean_and_nothing_is_forwarded(self):
+        # ~/.ssh/config is honoured, except where it could put client chatter
+        # into parsed output, reuse a master verified some other way, or hand
+        # this host's agent/X11/ports to the router.
+        for argv in (install.KeyAuth().options(), install.KeyAuth("/k").options()):
+            for option in ("LogLevel=ERROR", "RequestTTY=no", "PermitLocalCommand=no",
+                           "RemoteCommand=none", "ControlMaster=no", "ControlPath=none",
+                           "ForwardAgent=no", "ForwardX11=no", "ClearAllForwardings=yes"):
+                self.assertIn(option, argv)
+                self.assertEqual(argv[argv.index(option) - 1], "-o")
+
+    def test_ssh_never_reads_the_terminal(self):
+        with patch.object(install.subprocess, "run", return_value=done(0, "up")) as run:
+            install.ssh("192.168.31.1", "echo up")
+        self.assertIs(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+        install.KEY_AUTH = None
+        with patch.object(install.subprocess, "run", return_value=done(0, "up")) as run:
+            install.ssh("192.168.31.1", "echo up")
+        self.assertIs(run.call_args.kwargs.get("stdin"), subprocess.DEVNULL)
+
+    def test_a_scope_id_must_name_an_interface(self):
+        for good in ("192.168.31.1", "fe80::1%en0", "fe80::1%12", "fe80::1%br-lan.1"):
+            install.numeric_address(good)
+        for bad in ("fe80::1%;reboot", "fe80::1%$(id)", "192.168.31.1%en0", "fe80::1%",
+                    "router.lan"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                install.numeric_address(bad)
+
+    def test_host_key_failure_warns_about_the_ram_installer(self):
+        with patch.object(install.subprocess, "run",
+                          return_value=done(255, "", "Host key verification failed.")):
+            with self.assertRaisesRegex(install.Abort, "RAM installer.*do not add"):
+                install.ssh("192.168.31.1", "echo up", check=False)
+
     def test_identity_is_the_only_key_offered(self):
         install.KEY_AUTH = install.KeyAuth("/keys/router key")
         with patch.object(install.subprocess, "run", return_value=done()) as run:
@@ -189,6 +223,28 @@ class VerificationTests(KeyAuthCase):
                                                 host_iface="en0")
         self.assertEqual(check.call_args.kwargs["router_iface"], "en0")
         self.assertIsNone(check.call_args.kwargs["router_mac"])
+
+    def test_a_recorded_mac_is_bound_under_key_auth_too(self):
+        # Two routers restored from one backup share a host key; the MAC the
+        # update recorded tells them apart before the reinstall acts on one.
+        with patch.object(install, "check_is_openwrt_ram") as check, \
+             patch.object(install, "ssh", return_value=(255, "Permission denied")), \
+             patch.object(install, "log"):
+            with self.assertRaises(install.Abort):
+                install.verify_permanent_system(devices.RD03V2, host="192.168.31.1",
+                                                host_iface="en0",
+                                                router_mac="aa:bb:cc:dd:ee:ff")
+        self.assertEqual(check.call_args.kwargs["router_iface"], "en0")
+        self.assertEqual(check.call_args.kwargs["router_mac"], "aa:bb:cc:dd:ee:ff")
+
+    def test_another_mac_is_refused_under_key_auth(self):
+        with patch.object(install, "gateway_conflict", return_value=None), \
+             patch.object(install, "ssh_banner", return_value=("SSH-2.0-dropbear", None)), \
+             patch.object(install, "neighbour_mac", return_value="11:22:33:44:55:66"), \
+             patch.object(install, "log"):
+            with self.assertRaisesRegex(install.Abort, "not the router's"):
+                install.check_is_openwrt_ram("192.168.31.1", router_iface="en0",
+                                             router_mac="aa:bb:cc:dd:ee:ff")
 
     def test_continuation_verifies_by_key(self):
         install.KEY_AUTH = install.KeyAuth("/k/id", alias="ax", alias_for="192.168.31.1")

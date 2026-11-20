@@ -2,9 +2,12 @@
 import io
 import os
 import shlex
+import shutil
+import subprocess
 import tarfile
 import tempfile
 import unittest
+import unittest.mock
 from unittest.mock import patch
 
 import install
@@ -60,6 +63,48 @@ class ExtraFileTests(unittest.TestCase):
         self.assertIn("sysupgrade -l", script)
         with self.assertRaises(ValueError):
             updater.auto_keep_script(("/etc/$(reboot)",))
+
+    @unittest.skipUnless(shutil.which("busybox"), "needs busybox, the router's shell")
+    def test_script_on_busybox_with_batched_owner_lookups(self):
+        # The real script, run by busybox ash against a fake overlay and an
+        # apk that answers as apk-tools 3.0.5 does: "<path> is owned by <pkg>"
+        # on stdout for an owned path, an error on stderr for the others.
+        with tempfile.TemporaryDirectory() as tmp:
+            upper, bin_dir = os.path.join(tmp, "upper"), os.path.join(tmp, "bin")
+            os.makedirs(bin_dir)
+            files = (["etc/config/network", "etc/mine.conf", "etc/has space.conf",
+                      "etc/rc.d/S10x"] + [f"etc/owned/{n}" for n in range(205)])
+            for name in files:
+                os.makedirs(os.path.dirname(os.path.join(upper, name)), exist_ok=True)
+                open(os.path.join(upper, name), "w").close()
+            calls = os.path.join(tmp, "calls")
+            scripts = {
+                "apk": f'echo "$#" >> {shlex.quote(calls)}\nshift 2\nfor p; do case "$p" in '
+                       '/etc/owned/*) echo "$p is owned by pkg-1.0" ;; '
+                       '*) echo "ERROR: $p: Could not find owner package" >&2 ;; esac; done\n'
+                       'exit 3\n',
+                "sysupgrade": 'echo /etc/config/network\n',
+            }
+            for name, body in scripts.items():
+                with open(os.path.join(bin_dir, name), "w") as f:
+                    f.write("#!/bin/sh\n" + body)
+                os.chmod(os.path.join(bin_dir, name), 0o755)
+            script = updater.auto_keep_script().replace("/overlay/upper", shlex.quote(upper))
+            env = dict(os.environ, PATH=bin_dir + ":" + os.environ["PATH"], TMPDIR=tmp)
+            result = subprocess.run(["busybox", "sh", "-c", script], capture_output=True,
+                                    text=True, env=env, timeout=60)
+            self.assertEqual(updater.parse_extra_files(result.stdout),
+                             ["/etc/has space.conf", "/etc/mine.conf"])
+            with open(calls) as f:
+                batches = [int(n) - 2 for n in f.read().split()]
+            self.assertEqual(sorted(batches), [7, 100, 100])   # 207 paths, three calls
+            # No owned path at all: an empty pattern list must not hide the rest.
+            for n in range(205):
+                os.remove(os.path.join(upper, f"etc/owned/{n}"))
+            result = subprocess.run(["busybox", "sh", "-c", script], capture_output=True,
+                                    text=True, env=env, timeout=60)
+            self.assertEqual(updater.parse_extra_files(result.stdout),
+                             ["/etc/has space.conf", "/etc/mine.conf"])
 
     def test_detection_is_one_ssh_call(self):
         with patch.object(install, "ssh", return_value=(0, self.SCAN)) as ssh:
@@ -120,6 +165,37 @@ class SysupgradeConfTests(unittest.TestCase):
             updater.validate_keep_path("etc/x")
         self.assertEqual(updater.validate_keep_path("/etc/x"), "/etc/x")
 
+    def test_extra_keep_refuses_what_sysupgrade_would_split(self):
+        # sysupgrade expands sysupgrade.conf unquoted: "/etc/x -delete" would
+        # hand find an action. A wildcard typed on purpose is a pattern.
+        for path in ("/etc/x -delete", "/etc/has space.conf", "/etc/tab\there",
+                     "/etc/it's", '/etc/"q"', "/etc/back\\slash"):
+            with self.subTest(path=path), self.assertRaisesRegex(install.Abort, "folder"):
+                updater.validate_keep_path(path)
+        self.assertEqual(updater.validate_keep_path("/etc/foo/*"), "/etc/foo/*")
+
+    def test_scanned_names_sysupgrade_cannot_keep_are_reported_not_kept(self):
+        args = updater.parse_args(["--auto-keep", "--yes"])
+        scan = ("AUTOKEEP /etc/mine.conf\nAUTOKEEP /etc/has space.conf\n"
+                "AUTOKEEP /etc/star*.conf\nAUTOKEEP_DONE\n")
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            if "AUTOKEEP_DONE" in cmd:
+                return 0, scan
+            if updater.KEEP_EOF in cmd:
+                return 0, updater.KEEP_EOF
+            return 0, "UNDO_READY" if "UNDO_READY" in cmd else ""
+        with patch.object(install, "ssh", ssh), patch.object(install, "scp_to"), \
+             patch.object(updater, "log") as log, tempfile.TemporaryDirectory() as outdir:
+            updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
+        write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
+        self.assertEqual(shlex.split(write[0])[2], "/etc/mine.conf\n/etc/backup/\n")
+        said = str(log.call_args_list)
+        self.assertIn("'/etc/has space.conf'", said)
+        self.assertIn("'/etc/star*.conf'", said)
+
 
 class WorldTests(unittest.TestCase):
     WORLD = ("base-files=1.2-r1\nkernel=6.6.93~abc-r1\nlibc\nkmod-nft-offload=6.6.93-r1\n"
@@ -128,8 +204,8 @@ class WorldTests(unittest.TestCase):
 
     def test_filter(self):
         self.assertEqual(updater.filter_world(self.WORLD),
-                         ["dnsmasq-full", "htop@custom", "kmod-wireguard", "luci",
-                          "luci-app-aurora"])
+                         ["dnsmasq-full", "htop@custom", "kmod-wireguard",
+                          "libustream-mbedtls", "luci", "luci-app-aurora"])
 
     def test_pinned_and_installed_names(self):
         self.assertEqual(updater.pinned_names(self.WORLD),
@@ -147,7 +223,7 @@ class ReinstallTests(unittest.TestCase):
             target.start()
             self.addCleanup(target.stop)
 
-    def router(self, world_old, *, installed=(), pinned="", fail=(), update_rc=(0,)):
+    def router(self, world_old, *, installed=(), pinned="", fail=(), update_rc=(0,), lost=()):
         added, updates = [], list(update_rc)
 
         def ssh(host, cmd, **kw):
@@ -169,6 +245,8 @@ class ReinstallTests(unittest.TestCase):
                 added.append(name)
                 if name in fail:
                     return 1, "ERROR: unable to select packages:\n  " + name + " (no such package)"
+                if name in lost:
+                    return 255, "Connection to 192.168.31.1 closed by remote host."
                 return 0, "OK"
             raise AssertionError(cmd)
         return ssh, added
@@ -194,6 +272,30 @@ class ReinstallTests(unittest.TestCase):
         self.assertIn("installed: htop", text)
         self.assertIn("skipped: dnsmasq-full -- ", text)
 
+    def test_libraries_come_back_but_tls_variants_are_listed(self):
+        ssh, added = self.router("libpcap\nlibustream-openssl\nhtop\n")
+        with patch.object(install, "ssh", ssh):
+            summary = updater.reinstall_packages("h", self.tmp.name)
+        self.assertEqual(added, ["htop", "libpcap"])
+        self.assertIn("TLS backend", dict(summary["skipped"])["libustream-openssl"])
+
+    def test_a_lost_connection_stops_the_adds_and_lists_the_rest(self):
+        ssh, added = self.router("a\nb\nc\n", lost=("b",))
+        with patch.object(install, "ssh", ssh):
+            summary = updater.reinstall_packages("h", self.tmp.name)
+        self.assertEqual(added, ["a", "b"])                 # c is not tried
+        self.assertEqual(summary["installed"], ["a"])
+        failed = dict(summary["failed"])
+        self.assertEqual(sorted(failed), ["b", "c"])
+        self.assertIn("SSH connection failed", failed["c"])
+
+    def test_a_lost_connection_is_not_reported_as_repositories(self):
+        ssh, added = self.router("htop\n", update_rc=(255, 255, 255))
+        with patch.object(install, "ssh", ssh):
+            with self.assertRaisesRegex(install.Abort, "lost the SSH connection"):
+                updater.reinstall_packages("h", self.tmp.name, deadline_s=1)
+        self.assertEqual(added, [])
+
     def test_unreachable_repositories_fail_every_missing_package(self):
         ssh, added = self.router("htop\nnano\n", update_rc=())
         with patch.object(install, "ssh", ssh):
@@ -217,9 +319,12 @@ class ReinstallTests(unittest.TestCase):
 
     def test_a_reinstall_failure_does_not_fail_the_update(self):
         args = updater.parse_args([])
-        with patch.object(updater, "reinstall_packages",
-                          side_effect=install.Abort("lost the router")):
-            updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
+        for error in (install.Abort("lost the router"), OSError("disk full"),
+                      tarfile.ReadError("not a gzip file")):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(updater, "review_image_defaults"), \
+                 patch.object(updater, "reinstall_packages", side_effect=error):
+                updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
         args = updater.parse_args(["--no-reinstall"])
         with patch.object(updater, "reinstall_packages") as reinstall:
             updater.finish_packages("h", args, self.tmp.name, "cfg.tar.gz")
@@ -263,35 +368,179 @@ class PrepareTests(unittest.TestCase):
         return commands, uploads, files
 
     def test_keep_list_and_world_old(self):
-        commands, uploads, files = self.run_prepare("--extra-keep", "/root/notes")
+        commands, uploads, files = self.run_prepare("--auto-keep", "--extra-keep", "/root/notes")
         write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
         self.assertEqual(len(write), 1)
         self.assertEqual(shlex.split(write[0])[2],
                          "/etc/apk/keys/eamonxg.pem\n/etc/apk/keys/glass-apk.rsa.pub\n"
                          "/etc/aurora/device.hash\n/usr/bin/led-status.sh\n/root/notes\n"
                          "/etc/backup/\n")
-        self.assertEqual(uploads[updater.WORLD_OLD], "htop\nluci\n")
+        self.assertEqual(uploads[updater.WORLD_OLD], "htop\nlibfoo\nluci\n")
         self.assertIn("etc/config/network\n", uploads[updater.REMOTE_LIST])
         self.assertEqual(files, ["sysupgrade-list.txt", "world-old.txt", "world.txt"])
         self.assertFalse(any(cmd.startswith("tar czf") for cmd in commands))
 
-    def test_no_auto_keep(self):
-        commands, _uploads, _files = self.run_prepare("--no-auto-keep")
+    def test_scan_is_opt_in(self):
+        commands, _uploads, _files = self.run_prepare()
         self.assertTrue(any("FETCH_OK" in cmd for cmd in commands))
         self.assertFalse(any("AUTOKEEP_DONE" in cmd for cmd in commands))
         write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
         self.assertEqual(shlex.split(write[0])[2], "/etc/backup/\n")
 
-    def test_declining_writes_nothing(self):
-        args = updater.parse_args([])
+    def test_declining_the_files_skips_them_and_goes_on(self):
+        args = updater.parse_args(["--auto-keep"])
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            if "AUTOKEEP_DONE" in cmd:
+                return 0, ExtraFileTests.SCAN
+            if updater.KEEP_EOF in cmd:
+                return 0, updater.KEEP_EOF
+            if "UNDO_READY" in cmd:
+                return 0, "UNDO_READY"
+            return 0, ""
+        for answer in ("no", "yes", EOFError()):
+            commands.clear()
+            with self.subTest(answer=answer), patch.object(install, "ssh", ssh), \
+                 patch("builtins.input", side_effect=[answer]), \
+                 patch.object(install, "scp_to") as scp, \
+                 patch.object(updater, "log"), tempfile.TemporaryDirectory() as outdir:
+                updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
+                write = [cmd for cmd in commands if cmd.startswith("printf %s ")]
+                self.assertEqual(shlex.split(write[0])[2], "/etc/backup/\n")
+                scp.assert_called_once()            # world-old.txt: the reinstall is on
+
+    def test_ctrl_c_at_the_files_prompt_stops_the_run(self):
+        args = updater.parse_args(["--auto-keep"])
         with patch.object(install, "ssh",
                           side_effect=lambda h, c, **k: (0, ExtraFileTests.SCAN if "AUTOKEEP_DONE" in c else "")), \
-             patch.object(install, "confirm", side_effect=install.Abort("declined")), \
+             patch("builtins.input", side_effect=KeyboardInterrupt), \
              patch.object(install, "scp_to") as scp, \
              patch.object(updater, "log"), tempfile.TemporaryDirectory() as outdir:
-            with self.assertRaises(install.Abort):
-                updater.prepare_carryover("h", args, outdir)
+            with self.assertRaises(KeyboardInterrupt):
+                updater.prepare_carryover("h", args, outdir, updater.CarryoverUndo())
         scp.assert_not_called()
+
+
+class CarryoverUndoTests(unittest.TestCase):
+    def fake_ssh(self, answers):
+        commands = []
+
+        def ssh(host, cmd, **kw):
+            commands.append(cmd)
+            for marker, answer in answers.items():
+                if marker in cmd:
+                    return 0, answer
+            return 0, ""
+        return commands, ssh
+
+    def test_revert_puts_both_back(self):
+        commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY", "UNDONE": "UNDONE"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log") as log:
+            undo.snapshot("h")
+            undo.added = ["/etc/x", "/etc/backup/"]
+            undo.revert()
+            undo.revert()                       # once only
+        restore = [cmd for cmd in commands if "UNDONE" in cmd]
+        self.assertEqual(len(restore), 1)
+        self.assertIn(f"cat {updater.UNDO_DIR}/conf > {updater.SYSUPGRADE_CONF}", restore[0])
+        self.assertIn(f"rm -f {updater.WORLD_OLD}", restore[0])
+        self.assertIn("undone", str(log.call_args_list))
+
+    def test_nothing_after_commit_or_without_a_snapshot(self):
+        commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY"})
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log"):
+            updater.CarryoverUndo().revert()
+            undo = updater.CarryoverUndo()
+            undo.snapshot("h")
+            undo.commit()
+            undo.revert()
+        self.assertFalse(any("UNDONE" in cmd for cmd in commands))
+
+    def test_failed_revert_says_what_to_remove(self):
+        _commands, ssh = self.fake_ssh({"UNDO_READY": "UNDO_READY", "UNDONE": "Connection refused"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh), patch.object(updater, "log") as log:
+            undo.snapshot("h")
+            undo.added = ["/etc/x", "/etc/backup/"]
+            undo.revert()                       # must not raise over the first error
+        said = str(log.call_args_list)
+        self.assertIn("/etc/x, /etc/backup/", said)
+        self.assertIn(updater.WORLD_OLD, said)
+
+    def test_snapshot_failure_writes_nothing(self):
+        _commands, ssh = self.fake_ssh({"UNDO_READY": "cp: no space"})
+        undo = updater.CarryoverUndo()
+        with patch.object(install, "ssh", ssh):
+            with self.assertRaisesRegex(install.Abort, "nothing was written"):
+                undo.snapshot("h")
+        self.assertIsNone(undo.host)
+
+    def test_run_reverts_on_any_stop(self):
+        for exc in (install.Abort("declined"), KeyboardInterrupt()):
+            def fake_run(args, undo, exc=exc):
+                undo.host = "h"
+                raise exc
+            with self.subTest(exc=type(exc).__name__), \
+                 patch.object(updater, "_run", fake_run), \
+                 patch.object(updater.CarryoverUndo, "revert") as revert:
+                with self.assertRaises(type(exc)):
+                    updater.run(updater.parse_args([]))
+                revert.assert_called_once()
+
+
+class FlashInPlaceUndoTests(unittest.TestCase):
+    """The carry-over commits only once sysupgrade is about to write."""
+
+    def flash(self, test_rc, launch):
+        args = updater.parse_args(["--yes"])
+        args.transport, args.discover, args.verify_interface = "wired", "eth0", "eth0"
+        undo = updater.CarryoverUndo()
+        undo.host = "h"
+        image = {"path": "/x/fw.bin", "sha256": "ab" * 32, "name": "fw.bin"}
+
+        def ssh(host, cmd, **kw):
+            if cmd.startswith("sha256sum"):
+                return 0, "ab" * 32
+            if cmd.startswith("sysupgrade -T"):
+                return test_rc, "Image check failed"
+            return 0, "boot-1"
+        with patch.object(install, "ssh", ssh), patch.object(install, "scp_to"), \
+             patch.object(install, "neighbour_mac", return_value=None), \
+             patch.object(install, "update_resume_fields"), \
+             patch.object(install, "launch_sysupgrade", side_effect=launch), \
+             patch.object(updater.release, "revision", return_value="r1"), \
+             patch.object(updater, "_remove_upload"), patch.object(updater, "log"), \
+             patch.object(install, "log"):
+            try:
+                updater.flash_in_place("h", type("R", (), {"tag": "v9"})(), {"sysupgrade": image},
+                                       args, None, "m.json", "wired", "v9", undo=undo)
+            except install.Abort:
+                pass
+        return undo
+
+    def test_rejected_image_is_not_committed(self):
+        launch = unittest.mock.Mock()
+        self.assertFalse(self.flash(1, launch).committed)
+        launch.assert_not_called()
+
+    def test_committed_before_sysupgrade_starts(self):
+        seen = []
+
+        def launch(*a, **k):
+            seen.append(undo_ref[0].committed)
+            raise install.Abort("stop here")
+        undo_ref = []
+        orig = updater.CarryoverUndo.commit
+
+        def commit(self):
+            undo_ref.append(self)
+            orig(self)
+        with patch.object(updater.CarryoverUndo, "commit", commit):
+            self.flash(0, launch)
+        self.assertEqual(seen, [True])
 
 
 def tar_bytes(files, extra=()):
@@ -407,6 +656,23 @@ class ApkNewReviewTests(unittest.TestCase):
             diff = f.read()
         self.assertIn("+\toption rebind_protection '1'", diff)
         self.assertIn("/etc/config/a (yours)", diff)
+
+    def test_the_diff_of_your_file_never_reaches_the_log(self):
+        self.MINE = b"config ddns 'x'\n\toption password 'hunter2-secret'\n"
+        self.PACKAGE = b"config ddns 'x'\n\toption password ''\n"
+        for assume_yes, tty in ((True, True), (False, True), (False, False)):
+            terminal = io.StringIO()
+            terminal.isatty = lambda tty=tty: tty
+            with self.subTest(assume_yes=assume_yes, tty=tty), \
+                 patch.object(updater, "log") as log, \
+                 patch.object(updater.sys, "stdout", terminal):
+                self.review(["d", "d"], assume_yes=assume_yes)
+            self.assertNotIn("hunter2", str(log.call_args_list))
+            self.assertIn("+1 -1 line(s)", str(log.call_args_list))
+            self.assertEqual("hunter2" in terminal.getvalue(), not assume_yes and tty)
+        with open(os.path.join(self.tmp.name, "conffiles",
+                               "etc__config__a.apk-new.diff"), encoding="utf-8") as f:
+            self.assertIn("hunter2-secret", f.read())   # saved in full, privately
 
     def test_yes_defers_without_asking_or_writing(self):
         result, asked = self.review([], assume_yes=True)
@@ -637,6 +903,15 @@ class TemporaryResolverTests(unittest.TestCase):
             self.assertEqual(updater.local_dns_forwarders("h"),
                              ["127.0.0.1#5053", "/lan/::1#5054"])
 
+
+
+class SshLossTests(unittest.TestCase):
+    def test_a_lost_connection_is_not_a_dns_answer(self):
+        with patch.object(install, "ssh", return_value=(255, "Connection timed out")):
+            with self.assertRaisesRegex(install.Abort, "lost the SSH connection.*DNS"):
+                updater.resolves("h", "downloads.openwrt.org")
+        with patch.object(install, "ssh", return_value=(1, "")):
+            self.assertFalse(updater.resolves("h", "downloads.openwrt.org"))
 
 if __name__ == "__main__":
     unittest.main()

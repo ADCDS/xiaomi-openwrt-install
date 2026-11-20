@@ -105,6 +105,8 @@ BACKUP_DIR = "/etc/backup/"
 WORLD_OLD = "/etc/backup/world-old.txt"
 REMOTE_OVERLAY = "/tmp/overlay-full.tar.gz"
 KEEP_EOF = "RD03V2_KEEP_EOF"
+# Where CarryoverUndo keeps what the carry-over is about to change (tmpfs).
+UNDO_DIR = "/tmp/rd03v2-carryover-undo"
 
 # Files in /overlay/upper that are never added to sysupgrade.conf on their
 # own: generated at boot or by apk, tied to this one image, or programs that a
@@ -149,6 +151,7 @@ SPECIAL_PACKAGES = {
     "wpad*": "replaces the firmware's wpad variant",
     "hostapd*": "replaces the firmware's wpad/hostapd variant",
     "odhcpd*": "replaces the firmware's odhcpd variant",
+    "libustream-*": "replaces the firmware's TLS backend for uclient/uhttpd",
 }
 
 # How long a freshly updated router gets to reach its package repositories.
@@ -172,6 +175,8 @@ REMOTE_FILES = "/tmp/rd03v2-files.tar.gz"
 ROM_DEFAULTS_OLD = "rom-defaults-old.tar.gz"
 CONFFILE_DIR = "conffiles"
 APK_NEW = ".apk-new"
+# Paths per `apk info --who-owns` call in the extra-file scan.
+OWNER_BATCH = 100
 # How much of a diff the log shows; the whole of it is always saved.
 DIFF_LOG_LINES = 40
 
@@ -187,6 +192,12 @@ def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
     owns, sysupgrade -l does not list, and no exclude matches, then
     AUTOKEEP_DONE. Whiteouts (character devices) are not files and are
     skipped by -type, as are names with a newline, which `read` would split.
+
+    Ownership is asked of apk in batches of OWNER_BATCH paths: each apk call
+    loads its whole database, so one call per file took minutes on a large
+    overlay. apk 3 prints `<path> is owned by <package>` on stdout for each
+    owned path and an error on stderr for each other one (checked on the
+    reference router, apk-tools 3.0.5).
     """
     for pattern in excludes:
         if not all(c.isalnum() or c in "/._-*" for c in pattern):
@@ -198,14 +209,24 @@ def auto_keep_script(excludes=AUTO_KEEP_EXCLUDES):
         "keep=/tmp/autokeep.$$\n"
         "sysupgrade -l > \"$keep\" 2>/dev/null || "
         "{ rm -f \"$keep\"; echo 'AUTOKEEP_ERROR sysupgrade -l failed'; exit 1; }\n"
+        "cand=$keep.cand; owned=$keep.owned; : > \"$owned\"\n"
         "find . \\( -type f -o -type l \\) | while IFS= read -r p; do\n"
         "  p=${p#.}\n"
         f"  case \"$p\" in {case}) continue ;; esac\n"
         "  grep -qxF \"$p\" \"$keep\" && continue\n"
-        "  apk info --who-owns \"$p\" >/dev/null 2>&1 && continue\n"
+        "  printf '%s\\n' \"$p\"\n"
+        "done > \"$cand\"\n"
+        "set --\n"
+        "while IFS= read -r p; do\n"
+        "  set -- \"$@\" \"$p\"\n"
+        f"  if [ $# -ge {OWNER_BATCH} ]; then apk info --who-owns \"$@\" 2>/dev/null >> \"$owned\"; set --; fi\n"
+        "done < \"$cand\"\n"
+        "if [ $# -gt 0 ]; then apk info --who-owns \"$@\" 2>/dev/null >> \"$owned\"; fi\n"
+        "sed -n 's/ is owned by .*//p' \"$owned\" > \"$owned.paths\"\n"
+        "grep -vxF -f \"$owned.paths\" \"$cand\" | while IFS= read -r p; do\n"
         "  echo \"AUTOKEEP $p\"\n"
         "done\n"
-        "rm -f \"$keep\"\n"
+        "rm -f \"$keep\" \"$cand\" \"$owned\" \"$owned.paths\"\n"
         "echo AUTOKEEP_DONE\n")
 
 
@@ -252,10 +273,35 @@ def keep_append_text(existing, paths):
     return lead + "".join(path + "\n" for path in new)
 
 
+# Characters sysupgrade cannot take in a sysupgrade.conf line: it expands the
+# list unquoted (`find $(sed ... /etc/sysupgrade.conf ...)` in
+# list_static_conffiles, read on the reference router), so whitespace splits
+# a name into several find arguments -- "/etc/x -delete" would be a find
+# action -- quotes and backslashes are kept as they are, and wildcards are
+# expanded: wanted in a pattern someone typed, wrong in a file's real name.
+UNQUOTABLE = set("\\'\"")
+WILDCARDS = set("*?[]")
+
+
+def keep_path_problem(path, wildcards_ok=False):
+    """Why sysupgrade.conf cannot carry `path` as it is, or None."""
+    if not path.startswith("/"):
+        return "not an absolute path"
+    if any(c.isspace() or not c.isprintable() or c in UNQUOTABLE for c in path):
+        return "a space, quote or backslash, which sysupgrade does not take"
+    if not wildcards_ok and any(c in WILDCARDS for c in path):
+        return "a wildcard, which sysupgrade would expand"
+    return None
+
+
 def validate_keep_path(path):
     if not path.startswith("/") or "\n" in path or "\r" in path:
         raise Abort(t("--extra-keep needs an absolute path on the router, got {path!r}",
                       path=path))
+    if keep_path_problem(path, wildcards_ok=True):
+        raise Abort(t("--extra-keep {path!r}: sysupgrade splits names at spaces and "
+                      "does not take quotes or backslashes, so it cannot keep this "
+                      "one. Keep the folder that holds it instead.", path=path))
     return path
 
 
@@ -278,14 +324,16 @@ def filter_world(text):
     """The packages to reinstall, from /etc/apk/world.
 
     Left out: entries with a version constraint (= < > ~: the firmware pins
-    those), the firmware's base (kernel, libc, base-files), libraries (lib*,
-    which come in as dependencies), and negations (!name). Sorted, unique."""
+    those), the firmware's base (kernel, libc, base-files), and negations
+    (!name). Libraries stay: world lists only what was asked for by name, so
+    a lib* there was installed on purpose, and dependencies are never in it.
+    Sorted, unique."""
     keep = set()
     for entry in text.split():
         if any(mark in entry for mark in "=<>~") or entry.startswith("!"):
             continue
         name = entry.split("@", 1)[0]
-        if name in BASE_PACKAGES or name.startswith("lib"):
+        if name in BASE_PACKAGES:
             continue
         keep.add(entry)
     return sorted(keep)
@@ -354,11 +402,85 @@ def save_overlay_archive(host, outdir):
     return local
 
 
-def prepare_carryover(host, args, outdir):
+def agree(question, assume_yes):
+    """install.confirm for a question whose "no" skips one step, not the run.
+
+    Anything but YES is a no; EOF (no terminal) is a no. Ctrl-C still stops
+    the whole run."""
+    if assume_yes:
+        log(t("[?] {question} -- assumed yes (--yes)", question=question))
+        return True
+    try:
+        answer = input(t("[?] {question} [type YES to continue] ", question=question))
+    except EOFError:
+        return False
+    return answer.strip() == "YES"
+
+
+class CarryoverUndo:
+    """What prepare_carryover changed on the router, put back on failure.
+
+    The carry-over writes sysupgrade.conf and /etc/backup/ before the update
+    is confirmed, because the backup has to carry them. Until the update
+    starts writing the new release (commit()), a decline, a rejected image or
+    any other stop puts both back, so "nothing was written" stays true. After
+    that, or when it cannot tell, it leaves the router alone."""
+
+    def __init__(self):
+        self.host = None
+        self.added = []
+        self.committed = False
+
+    def snapshot(self, host):
+        """Copy what is about to change into /tmp on the router."""
+        _rc, out = install.ssh(
+            host,
+            f"rm -rf {UNDO_DIR} && mkdir -p {UNDO_DIR} && "
+            f"if [ -e {SYSUPGRADE_CONF} ]; then cp -p {SYSUPGRADE_CONF} {UNDO_DIR}/conf; fi && "
+            f"if [ -e {WORLD_OLD} ]; then cp -p {WORLD_OLD} {UNDO_DIR}/world; fi && "
+            f"if [ -d {BACKUP_DIR} ]; then : > {UNDO_DIR}/had-dir; fi && echo UNDO_READY",
+            timeout=30, check=False)
+        if "UNDO_READY" not in out:
+            raise Abort(f"cannot save {SYSUPGRADE_CONF} before changing it; "
+                        f"nothing was written: {out.strip()!r}")
+        self.host = host
+
+    def commit(self):
+        self.committed = True
+
+    def revert(self):
+        if self.host is None or self.committed:
+            return
+        host, self.host = self.host, None
+        try:
+            _rc, out = install.ssh(
+                host,
+                f"[ -d {UNDO_DIR} ] || exit 3; "
+                f"if [ -e {UNDO_DIR}/conf ]; then cat {UNDO_DIR}/conf > {SYSUPGRADE_CONF}; "
+                f"else rm -f {SYSUPGRADE_CONF}; fi && "
+                f"if [ -e {UNDO_DIR}/world ]; then cat {UNDO_DIR}/world > {WORLD_OLD}; "
+                f"else rm -f {WORLD_OLD}; fi && "
+                f"{{ [ -e {UNDO_DIR}/had-dir ] || rmdir {BACKUP_DIR} 2>/dev/null; true; }} && "
+                f"rm -rf {UNDO_DIR} && echo UNDONE", timeout=60, check=False)
+            if "UNDONE" not in out:
+                raise Abort(out.strip() or "no answer")
+            log(t("[c] the carry-over changes were undone: {conf} and {world} are as "
+                  "they were", conf=SYSUPGRADE_CONF, world=WORLD_OLD))
+        except Exception as exc:            # noqa: BLE001 -- the first error matters
+            log(t("[!] could not undo the carry-over changes on {host} ({error}). "
+                  "By hand, remove these lines from {conf}: {lines}; and remove {world} "
+                  "if you did not have one before.", host=host, error=exc,
+                  conf=SYSUPGRADE_CONF, lines=", ".join(self.added) or "(none)",
+                  world=WORLD_OLD))
+
+
+def prepare_carryover(host, args, outdir, undo=None):
     """Before the backup: what sysupgrade would drop, made part of it.
 
     Writes to the router's /etc only (sysupgrade.conf, /etc/backup/), which
-    the backup then carries; the image and the partitions are not touched."""
+    the backup then carries; the image and the partitions are not touched.
+    `undo` (a CarryoverUndo) records those writes so that they can be put
+    back if the update does not go ahead."""
     log(t("\n=== carry-over: extra files and packages ==="))
     _rc, world = install.ssh(host, "cat /etc/apk/world")
     _write_local(outdir, "world.txt", world)
@@ -366,20 +488,33 @@ def prepare_carryover(host, args, outdir):
     _write_local(outdir, "sysupgrade-list.txt", listed)
     save_rom_defaults(host, outdir, listed)
 
-    extras = [] if args.no_auto_keep else detect_extra_files(host)
-    if args.no_auto_keep:
-        log("[c] automatic extra-file detection is off (--no-auto-keep)")
+    extras = detect_extra_files(host) if args.auto_keep else []
+    unkeepable = [path for path in extras if keep_path_problem(path)]
+    if unkeepable:
+        log(t("[c] not kept: sysupgrade cannot keep names with spaces, wildcards or "
+              "quotes. Keep their folder with --extra-keep, or rename them:"))
+        for path in unkeepable:
+            log(f"      {path!r}")
+        extras = [path for path in extras if path not in unkeepable]
+    if not args.auto_keep:
+        log("[c] extra-file scan not run (--auto-keep looks for files no package owns)")
     manual = [validate_keep_path(path) for path in args.extra_keep]
     paths = list(dict.fromkeys(extras + manual))
     if paths:
         log(t("[c] files no package owns and sysupgrade would not keep:"))
         for path in paths:
             log(f"      {path}")
-        install.confirm(t("add these {count} path(s) to {conf}?",
-                          count=len(paths), conf=SYSUPGRADE_CONF), args.yes)
-    else:
+        if not agree(t("add these {count} path(s) to {conf}?",
+                       count=len(paths), conf=SYSUPGRADE_CONF), args.yes):
+            log(t("[c] not added: the update goes on without these files"))
+            paths = []
+    elif args.auto_keep:
         log(t("[c] no extra files found that sysupgrade would drop"))
+    if undo is not None:
+        undo.snapshot(host)
     added = append_keep_list(host, paths + [BACKUP_DIR])
+    if undo is not None:
+        undo.added = added
     for path in added:
         log(f"[c] {SYSUPGRADE_CONF} += {path}")
 
@@ -435,10 +570,21 @@ def wan_nameservers(host):
     return list(dict.fromkeys(servers))
 
 
+def ssh_lost(host, rc, out, doing):
+    """Abort when OpenSSH itself failed (exit 255; see install.key_failure).
+
+    That is not the router's DNS or its repositories, and must not be
+    reported as either, or answered by changing its resolver."""
+    if rc == 255:
+        raise Abort(f"lost the SSH connection to {host} while {doing}: "
+                    f"{out.strip()[-300:]}")
+
+
 def resolves(host, name, server=None):
     target = shlex.quote(name) + (f" {shlex.quote(server)}" if server else "")
-    _rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
-                           timeout=30, check=False)
+    rc, out = install.ssh(host, f"nslookup {target} >/dev/null 2>&1 && echo DNS_OK",
+                          timeout=30, check=False)
+    ssh_lost(host, rc, out, "checking its DNS")
     return "DNS_OK" in out
 
 
@@ -538,11 +684,12 @@ def wait_for_repositories(host, deadline_s=None, resolver=None):
             rc, out = 1, "apk update timed out"
         if rc == 0:
             return True
-        if resolver is not None and not resolver.active:
+        if rc != 255 and resolver is not None and not resolver.active:
             name = name or repository_host(host)
             if name and resolver.engage(name):
                 continue
         if time.time() + 15 >= end:
+            ssh_lost(host, rc, out, "waiting for its package repositories")
             log(f"[p] apk update: {out.strip()[-300:]}")
             return False
         time.sleep(15)
@@ -615,6 +762,15 @@ def reinstall_packages(host, outdir, deadline_s=None, assume_yes=True):
             if rc == 0:
                 summary["installed"].append(name)
                 log(f"[p] installed {name}")
+            elif rc == 255:
+                # OpenSSH failed, not apk: every later package would fail the
+                # same way, and not for any reason of its own.
+                reason = "the SSH connection failed: " + (
+                    out.strip().splitlines() or ["exit 255"])[-1]
+                rest = missing[missing.index(name):]
+                summary["failed"] += [(other, reason) for other in rest]
+                log(f"[p] {reason}; {len(rest)} package(s) left for --reinstall-only")
+                break
             else:
                 reason = (out.strip().splitlines() or [f"exit {rc}"])[-1]
                 summary["failed"].append((name, reason))
@@ -731,7 +887,31 @@ def save_diff(outdir, path, suffix, text):
     return local
 
 
+def diff_size(text):
+    """(added, removed) lines of a unified diff, headers left out."""
+    lines = text.splitlines()
+    added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
+    return added, removed
+
+
+def show_private_diff(path, text, saved, interactive):
+    """A diff against the operator's own file, which may hold secrets.
+
+    Passwords, keys and tokens live in /etc/config, and transcripts get
+    pasted into public issues. So the log (console, transcript.log, the GUI)
+    only says how big the diff is and where it is saved; an operator who is
+    about to answer for that file sees it on the terminal, outside the log."""
+    added, removed = diff_size(text)
+    log(f"[p] {path}: +{added} -{removed} line(s) against the package's version; "
+        f"diff (may hold your secrets) in {saved}")
+    if interactive and sys.stdout.isatty():
+        sys.stdout.write("".join("      " + line + "\n" for line in text.splitlines()))
+        sys.stdout.flush()
+
+
 def log_diff(text, saved):
+    """For diffs between two image defaults only: public firmware content."""
     lines = text.splitlines()
     for line in lines[:DIFF_LOG_LINES]:
         log("      " + line)
@@ -769,8 +949,9 @@ def review_apk_new(host, outdir, before, assume_yes):
 
     apk never overwrites a configuration file you changed: it keeps yours and
     writes the package's new default beside it as *.apk-new. Only those that
-    this reinstall created (not in `before`) are shown, as a diff from yours
-    to the package's, and for each one:
+    this reinstall created (not in `before`) are offered, with the diff from
+    yours to the package's on the terminal but never in the log (see
+    show_private_diff), and for each one:
       keep   your version stays and the *.apk-new is removed;
       new    the package's version is installed, yours is kept as *.apk-old;
       defer  both stay as they are (always so with --yes).
@@ -792,8 +973,7 @@ def review_apk_new(host, outdir, before, assume_yes):
             continue
         text = unified(files[path], files[new], f"{path} (yours)", f"{new} (package)")
         saved = save_diff(outdir, path, ".apk-new.diff", text)
-        log(f"[p] {path}:")
-        log_diff(text, saved)
+        show_private_diff(path, text, saved, interactive=not assume_yes)
         try:
             decision = ask_conffile(path, assume_yes)
         except KeyboardInterrupt:
@@ -1221,7 +1401,7 @@ def _remove_upload(host):
 
 
 def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
-                   installed):
+                   installed, undo=None):
     """Update the installed system with sysupgrade from itself, and verify it."""
     log(t("\n=== stage 3: flash (sysupgrade from the installed system) ==="))
     image = images["sysupgrade"]
@@ -1299,6 +1479,9 @@ def flash_in_place(host, rel, images, args, profile, manifest, verify_transport,
         _remove_upload(host)
         raise
 
+    # From here the new release is being written: the carry-over is part of it.
+    if undo is not None:
+        undo.commit()
     install.launch_sysupgrade(host, opts, manifest, verify_interface,
                               install.ssh, install.scp_to, where=host)
     log(t("[3] do not touch the power"))
@@ -1341,7 +1524,7 @@ def check_key_options(args):
             raise Abort(t("SSH private key file does not exist"))
     if args.ssh_alias:
         try:
-            ipaddress.ip_address((args.host or "").split("%", 1)[0])
+            install.numeric_address(args.host or "")
         except ValueError as exc:
             raise Abort(t("--ssh-alias requires --host with the router's numeric "
                           "address, which the network checks use")) from exc
@@ -1377,7 +1560,9 @@ def gateway_allowed(args):
     --ssh-key-auth it is accepted as well, on Wi-Fi too: nothing secret is
     sent (the key never leaves this host), and known_hosts is checked
     strictly, so a device that only shares the router's address fails the
-    host key check before anything runs on it."""
+    host key check before anything runs on it. Where a MAC was recorded, the
+    final check binds it too (install.verify_permanent_system): a host key
+    restored from one backup onto two routers does not tell them apart."""
     if args.ssh_key_auth:
         return True
     return args.transport == "wired" and not any(install.SSH_PASSWORDS)
@@ -1408,7 +1593,8 @@ def finish_packages(host, args, outdir, config_tar):
         return
     try:
         reinstall_packages(host, outdir, assume_yes=args.yes)
-    except (Abort, restore.RestoreError, subprocess.TimeoutExpired) as exc:
+    except (Abort, restore.RestoreError, subprocess.TimeoutExpired, OSError,
+            tarfile.TarError) as exc:
         log(t("[!] the update is complete, but reinstalling packages stopped: "
               "{error}. Run this again with --reinstall-only to retry.", error=exc))
 
@@ -1437,6 +1623,17 @@ def run_reinstall_only(args, profile):
 
 
 def run(args):
+    undo = CarryoverUndo()
+    try:
+        return _run(args, undo)
+    except BaseException:
+        # A decline, a rejected image, Ctrl-C: whatever stopped the update
+        # before it wrote the new release also takes the carry-over back.
+        undo.revert()
+        raise
+
+
+def _run(args, undo):
     os.umask(0o077)
     i18n.set_language(args.lang)
     i18n.tolerate_console_encoding()
@@ -1533,7 +1730,7 @@ def run(args):
             backup_config(host, outdir)      # still take one of what is there now
         else:
             if args.keep_settings:
-                prepare_carryover(host, args, outdir)
+                prepare_carryover(host, args, outdir, undo)
             config_tar = backup_config(host, outdir)
         if not args.keep_settings:
             config_tar = None
@@ -1553,7 +1750,7 @@ def run(args):
 
     if route == "in-place":
         found = flash_in_place(host, rel, images, args, profile, manifest,
-                               verify_transport, installed)
+                               verify_transport, installed, undo=undo)
         log(t("[+] update complete: your settings were restored." if config_tar
               else "[+] update complete: the new release is running with default settings."))
         finish_packages(found or host, args, outdir, config_tar)
@@ -1576,12 +1773,16 @@ def run(args):
             host = revert.pivot_to_ram(
                 host, ubi, itb, args.discover, fallback=fallback,
                 recover_stale_lock=args.recover_stale_lock) or host
+            undo.commit()
         except Exception as exc:            # noqa: BLE001 -- tagged by the pivot
             # What to say depends on how far the write got, and the exception
             # class cannot express that: pivot_to_ram tags the stage instead.
             # Catching Exception rather than (Abort, RestoreError) keeps a
             # transport timeout raised mid-write from escaping with no advice.
             stage = getattr(exc, "pivot_stage", None)
+            if stage in (None, "write-unconfirmed", "rebooted"):
+                # Written, or not known: the carry-over is left as it is.
+                undo.commit()
             if stage is None:
                 raise
             if stage == "write-unconfirmed":
@@ -1674,8 +1875,9 @@ def parse_args(argv=None):
     ap.add_argument("--extra-keep", metavar="PATH", action="append", default=[],
                     help="also add PATH to /etc/sysupgrade.conf before the backup "
                          "(repeatable)")
-    ap.add_argument("--no-auto-keep", action="store_true",
-                    help="do not look for files that no package owns")
+    ap.add_argument("--auto-keep", action="store_true",
+                    help="also look for files that no package owns and sysupgrade "
+                         "would drop, and offer to keep them (slow on a big overlay)")
     ap.add_argument("--no-reinstall", action="store_true",
                     help="do not reinstall your packages after the update")
     ap.add_argument("--reinstall-only", action="store_true",

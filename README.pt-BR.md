@@ -211,6 +211,11 @@ Defina uma senha de administrador se ela estiver em branco. Guarde os backups e 
 
 O `updater.py` mantém as configurações por padrão. Veja como [atualizar o OpenWrt e retomar uma atualização interrompida](docs/maintenance.pt-BR.md#atualização-de-um-sistema-instalado).
 
+Depois de uma atualização verificada, o `updater.py` reinstala os pacotes que
+você instalou (`--no-reinstall` desliga isso). Arquivos que não pertencem a
+nenhum pacote só são procurados com `--auto-keep`. Detalhes (em inglês):
+[docs/packages.md](docs/packages.md).
+
 ## Assistente web
 
 ```sh

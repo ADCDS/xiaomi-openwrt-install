@@ -17,7 +17,9 @@ It leaves out these entries:
   these to its own build, for example `kernel`, `base-files` and its kernel
   modules.
 - `kernel`, `libc` and `base-files`.
-- `lib*` packages. Libraries come back as dependencies.
+
+Libraries stay in the list. `/etc/apk/world` holds only the packages that were
+asked for by name, so a `lib*` entry there was installed on purpose.
 
 After the update has been verified, `updater.py` waits until `apk update`
 works, then checks each listed package. It installs only those that are
@@ -67,7 +69,8 @@ shows you where a newer default exists, in two ways.
 **Packages that were reinstalled.** apk never overwrites a configuration file
 that you changed. It keeps yours and saves the package's new default next to
 it as `*.apk-new`. For each `*.apk-new` that the reinstall created,
-`updater.py` shows the difference from your version and asks, as dpkg does:
+`updater.py` shows the difference from your version on the terminal and asks,
+as dpkg does:
 
 - `k`: keep your version. The `*.apk-new` file is removed.
 - `n`: install the package's version. Yours is saved as `*.apk-old`. Restart
@@ -76,6 +79,10 @@ it as `*.apk-new`. For each `*.apk-new` that the reinstall created,
 
 With `--yes`, or without a terminal, every file is left for later. Ctrl-C
 leaves the current file and the rest for later.
+
+This difference is never written to the log, `transcript.log` or the GUI,
+because your file can hold passwords and keys. The log gives only its size
+and the file in `conffiles/` that holds it.
 
 **Packages in the image.** sysupgrade restores your version over the image's
 default without asking, which is correct when that default did not change.
@@ -108,6 +115,7 @@ patterns in `SPECIAL_PACKAGES` in `updater.py`:
 | `dnsmasq-*` (such as `dnsmasq-full`) | `dnsmasq` |
 | `wpad*`, `hostapd*` | the firmware's `wpad` variant |
 | `odhcpd*` | the firmware's `odhcpd` variant |
+| `libustream-*` | the firmware's TLS backend for `uclient-fetch` and `uhttpd` |
 
 Replace one of these by hand. Download the new package first: once `dnsmasq`
 is removed, the router may not resolve the repository's name any more. For
@@ -123,10 +131,11 @@ with `service dnsmasq restart` and `logread -e dnsmasq` afterwards.
 
 ## Files that no package owns
 
-Before the backup, `updater.py` scans `/overlay/upper` once and lists the
-files that no package owns (`apk info --who-owns` finds none) and that
+With `--auto-keep`, before the backup, `updater.py` scans `/overlay/upper`
+once and lists the files that no package owns (`apk info --who-owns` finds none) and that
 `sysupgrade -l` does not list. After you confirm the list, it adds these files
-to `/etc/sysupgrade.conf`. Paths that are already listed are not added again.
+to `/etc/sysupgrade.conf`; if you decline, they are left out and the update
+goes on. Paths that are already listed are not added again.
 Generated files and program directories are excluded. The list is
 `AUTO_KEEP_EXCLUDES` in `updater.py`. It includes the service links in
 `/etc/rc.d/`. So the scan does not carry over which services are enabled: a
@@ -134,6 +143,8 @@ reinstalled package enables its service as the package does by default. If
 you disabled one, check it after the update with `service`, and disable it
 again with `service NAME disable`.
 
-Use `--extra-keep PATH` to add more paths, and `--no-auto-keep` to turn off
-the scan. The paths go into `/etc/sysupgrade.conf` itself, because lists in
+The scan is off by default, because it is slow on a large overlay. Use
+`--extra-keep PATH` to add paths without it. A file whose name has a space, wildcard or
+quote is listed as not kept: sysupgrade reads `/etc/sysupgrade.conf` unquoted
+and would split or expand that name. Keep the folder that holds it instead. The paths go into `/etc/sysupgrade.conf` itself, because lists in
 `/etc/sysupgrade.conf.d/` were found not to take effect on this firmware.
