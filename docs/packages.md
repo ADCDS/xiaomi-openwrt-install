@@ -67,7 +67,8 @@ shows you where a newer default exists, in two ways.
 **Packages that were reinstalled.** apk never overwrites a configuration file
 that you changed. It keeps yours and saves the package's new default next to
 it as `*.apk-new`. For each `*.apk-new` that the reinstall created,
-`updater.py` shows the difference from your version and asks, as dpkg does:
+`updater.py` shows the difference from your version on the terminal and asks,
+as dpkg does:
 
 - `k`: keep your version. The `*.apk-new` file is removed.
 - `n`: install the package's version. Yours is saved as `*.apk-old`. Restart
@@ -76,6 +77,10 @@ it as `*.apk-new`. For each `*.apk-new` that the reinstall created,
 
 With `--yes`, or without a terminal, every file is left for later. Ctrl-C
 leaves the current file and the rest for later.
+
+This difference is never written to the log, `transcript.log` or the GUI,
+because your file can hold passwords and keys. The log gives only its size
+and the file in `conffiles/` that holds it.
 
 **Packages in the image.** sysupgrade restores your version over the image's
 default without asking, which is correct when that default did not change.

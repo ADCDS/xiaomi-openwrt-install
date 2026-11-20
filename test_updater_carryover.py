@@ -553,6 +553,23 @@ class ApkNewReviewTests(unittest.TestCase):
         self.assertIn("+\toption rebind_protection '1'", diff)
         self.assertIn("/etc/config/a (yours)", diff)
 
+    def test_the_diff_of_your_file_never_reaches_the_log(self):
+        self.MINE = b"config ddns 'x'\n\toption password 'hunter2-secret'\n"
+        self.PACKAGE = b"config ddns 'x'\n\toption password ''\n"
+        for assume_yes, tty in ((True, True), (False, True), (False, False)):
+            terminal = io.StringIO()
+            terminal.isatty = lambda tty=tty: tty
+            with self.subTest(assume_yes=assume_yes, tty=tty), \
+                 patch.object(updater, "log") as log, \
+                 patch.object(updater.sys, "stdout", terminal):
+                self.review(["d", "d"], assume_yes=assume_yes)
+            self.assertNotIn("hunter2", str(log.call_args_list))
+            self.assertIn("+1 -1 line(s)", str(log.call_args_list))
+            self.assertEqual("hunter2" in terminal.getvalue(), not assume_yes and tty)
+        with open(os.path.join(self.tmp.name, "conffiles",
+                               "etc__config__a.apk-new.diff"), encoding="utf-8") as f:
+            self.assertIn("hunter2-secret", f.read())   # saved in full, privately
+
     def test_yes_defers_without_asking_or_writing(self):
         result, asked = self.review([], assume_yes=True)
         self.assertEqual([d for _p, d in result], ["defer", "defer"])

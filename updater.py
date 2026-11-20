@@ -813,7 +813,31 @@ def save_diff(outdir, path, suffix, text):
     return local
 
 
+def diff_size(text):
+    """(added, removed) lines of a unified diff, headers left out."""
+    lines = text.splitlines()
+    added = sum(1 for line in lines if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in lines if line.startswith("-") and not line.startswith("---"))
+    return added, removed
+
+
+def show_private_diff(path, text, saved, interactive):
+    """A diff against the operator's own file, which may hold secrets.
+
+    Passwords, keys and tokens live in /etc/config, and transcripts get
+    pasted into public issues. So the log (console, transcript.log, the GUI)
+    only says how big the diff is and where it is saved; an operator who is
+    about to answer for that file sees it on the terminal, outside the log."""
+    added, removed = diff_size(text)
+    log(f"[p] {path}: +{added} -{removed} line(s) against the package's version; "
+        f"diff (may hold your secrets) in {saved}")
+    if interactive and sys.stdout.isatty():
+        sys.stdout.write("".join("      " + line + "\n" for line in text.splitlines()))
+        sys.stdout.flush()
+
+
 def log_diff(text, saved):
+    """For diffs between two image defaults only: public firmware content."""
     lines = text.splitlines()
     for line in lines[:DIFF_LOG_LINES]:
         log("      " + line)
@@ -851,8 +875,9 @@ def review_apk_new(host, outdir, before, assume_yes):
 
     apk never overwrites a configuration file you changed: it keeps yours and
     writes the package's new default beside it as *.apk-new. Only those that
-    this reinstall created (not in `before`) are shown, as a diff from yours
-    to the package's, and for each one:
+    this reinstall created (not in `before`) are offered, with the diff from
+    yours to the package's on the terminal but never in the log (see
+    show_private_diff), and for each one:
       keep   your version stays and the *.apk-new is removed;
       new    the package's version is installed, yours is kept as *.apk-old;
       defer  both stay as they are (always so with --yes).
@@ -874,8 +899,7 @@ def review_apk_new(host, outdir, before, assume_yes):
             continue
         text = unified(files[path], files[new], f"{path} (yours)", f"{new} (package)")
         saved = save_diff(outdir, path, ".apk-new.diff", text)
-        log(f"[p] {path}:")
-        log_diff(text, saved)
+        show_private_diff(path, text, saved, interactive=not assume_yes)
         try:
             decision = ask_conffile(path, assume_yes)
         except KeyboardInterrupt:

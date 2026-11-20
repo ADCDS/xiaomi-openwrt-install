@@ -246,7 +246,8 @@ Before the backup, `updater.py` also keeps what `sysupgrade` would drop:
   `dnsmasq-full`, which are not replaced automatically.
 - After the update, configuration files that have a newer default are shown.
   For a reinstalled package's `*.apk-new` you choose, as with dpkg, to keep
-  your version, install the new one, or decide later. For an image package
+  your version, install the new one, or decide later. That diff is shown on
+  the terminal only, never in the log, since your file may hold passwords. For an image package
   whose default the new release changed, the upstream change is shown and
   saved in `conffiles/`. See
   [Configuration files after the update](docs/packages.md#configuration-files-after-the-update).

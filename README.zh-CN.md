@@ -218,7 +218,7 @@ Get-NetFirewallRule -DisplayName "Xiaomi OpenWrt installer" | Remove-NetFirewall
   `--reinstall-only` 重试。内核模块以及 `dnsmasq-full` 等不会自动替换的软件包，见
   [docs/packages.md](docs/packages.md)。
 - 更新后会列出有新默认版本的配置文件。重装的软件包留下的 `*.apk-new`，会像 dpkg 一样
-  让你选择保留自己的版本、换成新版本，还是稍后决定。镜像自带软件包的默认版本被新版本改动时，
+  让你选择保留自己的版本、换成新版本，还是稍后决定。这份差异只显示在终端上，不会写入日志，因为你的文件里可能有密码。镜像自带软件包的默认版本被新版本改动时，
   会显示上游的改动，并保存到输出目录的 `conffiles/`。详见
   [Configuration files after the update](docs/packages.md#configuration-files-after-the-update)。
 
